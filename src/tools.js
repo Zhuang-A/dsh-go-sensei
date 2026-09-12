@@ -972,18 +972,20 @@ export async function autoComputeIfNeeded(ctx, cfg, game, opts = {}) {
   const memoKey = `${gameFingerprint(game)}|${cfg.maxVisits}`
   const memo = ANALYSIS_CACHE.get(memoKey)
   if (memo !== undefined) {
-    game.moves = memo.moves
-    return {
-      autoEngine: {
-        from: memo.from,
-        to: memo.to,
-        moves: memo.moveCount,
-        seconds: memo.seconds,
-        engine: memo.engine,
-        model: memo.model,
-        source: memo.source,
-        cached: true,
-      },
+    const merged = mergeCachedAnalysis(game, memo.byMove)
+    if (merged > 0) {
+      return {
+        autoEngine: {
+          from: memo.from,
+          to: memo.to,
+          moves: memo.moveCount,
+          seconds: memo.seconds,
+          engine: memo.engine,
+          model: memo.model,
+          source: memo.source,
+          cached: true,
+        },
+      }
     }
   }
   const totalMoves = game.moves.length
@@ -1018,7 +1020,12 @@ export async function autoComputeIfNeeded(ctx, cfg, game, opts = {}) {
     }
     // 记进缓存：同一盘棋的后续读取（面板/工具）直接复用，不再重跑引擎
     ANALYSIS_CACHE.set(memoKey, {
-      moves: game.moves,
+      // 只存**分析字段**，不存整份 moves：缓存是"上一版文件"的快照，
+      // 而指纹不覆盖 C[] 注释 —— 直接用缓存覆盖 moves 会把刚写回的讲解抹掉
+      // （真机踩过：注释写回后，面板的 comments 恒为空）。
+      byMove: game.moves
+        .map((m) => ({ number: m.number, analysis: m.analysis }))
+        .filter((entry) => entry.analysis !== undefined),
       from,
       to,
       moveCount: result.moves,
@@ -1067,7 +1074,39 @@ async function writeAnalysisBack(ctx, exec, sandboxPolicy, game) {
   return { moves: injected.written.length, missing: injected.missing.length }
 }
 
-/** 补算结果缓存的上限（条目数；每条是一份棋谱的 moves 数组）。 */
+/** 补算结果缓存的上限（条目数；每条是一份棋谱的逐手分析）。 */
 const ANALYSIS_CACHE_MAX = 8
 /** 补算结果缓存：key = 棋谱指纹 + 搜索量，value = 该次补算的逐手分析。 */
 const ANALYSIS_CACHE = new Map()
+
+/**
+ * 把缓存里的逐手分析并回**刚解析出来的** moves 上。
+ *
+ * 为什么不直接用缓存的 moves 覆盖：解析结果里还带着 `C[]` 注释等只属于"这一版
+ * 文件"的字段，而缓存键（棋谱指纹）只覆盖手顺与规则参数 —— 讲解写回后指纹不变，
+ * 整份覆盖会把新写的注释抹掉（真机症状：讲解已写回，面板 comments 恒为空）。
+ * 合并只替换 `analysis`，且保留新旧都有的自有字段（如 comment）。
+ *
+ * @param {object} game parseGame 的返回值（原地修改其 moves）
+ * @param {Array<{number: number, analysis: object}>} byMove 缓存下来的逐手分析
+ * @returns {number} 实际并回分析的手数（0 表示缓存与这份棋谱对不上，应按未命中处理）
+ */
+export function mergeCachedAnalysis(game, byMove) {
+  if (!Array.isArray(byMove) || byMove.length === 0) return 0
+  const table = new Map()
+  for (const entry of byMove) {
+    if (entry !== undefined && entry !== null && entry.analysis !== undefined) {
+      table.set(entry.number, entry.analysis)
+    }
+  }
+  let merged = 0
+  for (const move of game?.moves ?? []) {
+    const analysis = table.get(move.number)
+    if (analysis === undefined) continue
+    // 先摊开新解析出的自有字段（comment 等），再盖上缓存的分析字段
+    const own = move.analysis === undefined || move.analysis === null ? {} : move.analysis
+    move.analysis = { ...own, ...analysis }
+    merged += 1
+  }
+  return merged
+}

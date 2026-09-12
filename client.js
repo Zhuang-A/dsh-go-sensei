@@ -384,6 +384,19 @@ window.__ModuleLoader__.load({
         }
       }
 
+      // 已写回的讲解：有讲解的手在棋子左上角点一个小方点（与 Lizzieyzy 的
+      // 注释节点标记同一语义），学生一眼看出"哪几手有老师的话"
+      var noteMoves = Array.isArray(opts.noteMoves) ? opts.noteMoves : []
+      for (var nm = 0; nm < noteMoves.length; nm++) {
+        var noted = moves[noteMoves[nm] - 1]
+        if (noted === undefined || noted.x < 0) continue
+        kids.push(React.createElement('rect', {
+          key: 'note' + noteMoves[nm],
+          x: pos(noted.x) - radius * 0.98, y: pos(noted.y) - radius * 0.98,
+          width: radius * 0.6, height: radius * 0.6, fill: '#7c8cff', pointerEvents: 'none',
+        }))
+      }
+
       // 最后一手：反色小实心圆点，半径 0.22 格宽（Lizzieyzy 的最后一手指示）
       var lastIndex = Math.max(0, Math.min(opts.upto, moves.length)) - 1
       var last = lastIndex >= 0 ? moves[lastIndex] : null
@@ -507,6 +520,40 @@ window.__ModuleLoader__.load({
       if (!data || !data.comments) return ''
       var text = data.comments[String(moveNumber)]
       return typeof text === 'string' ? text : ''
+    }
+
+    /** 有讲解的手数（升序）：用来做「◀讲解 / 讲解▶」跳转与盘上标记。 */
+    function commentedMoves(data) {
+      var out = []
+      if (!data || !data.comments) return out
+      for (var key in data.comments) {
+        if (!Object.prototype.hasOwnProperty.call(data.comments, key)) continue
+        var n = parseInt(key, 10)
+        if (Number.isFinite(n) && n > 0 && typeof data.comments[key] === 'string' && data.comments[key] !== '') {
+          out.push(n)
+        }
+      }
+      out.sort(function (a, b) { return a - b })
+      return out
+    }
+
+    /**
+     * 在升序手数表里取上/下一处（走到头绕回另一端）。
+     * 问题手与讲解两套跳转共用同一条规则，免得行为不一致。
+     */
+    function nextInList(list, cur, direction) {
+      if (!Array.isArray(list) || list.length === 0) return null
+      var i
+      if (direction > 0) {
+        for (i = 0; i < list.length; i++) {
+          if (list[i] > cur) return list[i]
+        }
+        return list[0]
+      }
+      for (i = list.length - 1; i >= 0; i--) {
+        if (list[i] < cur) return list[i]
+      }
+      return list[list.length - 1]
     }
 
     /**
@@ -683,6 +730,10 @@ window.__ModuleLoader__.load({
       var total = board === null ? 0 : board.moves.length
       var cur = Math.max(0, Math.min(store.upto, total))
       var curMove = board !== null && cur > 0 ? board.moves[cur - 1] : null
+      // 有讲解的手（已写回棋谱的 C[] 注释）：跳转按钮与盘上小方点都用它
+      var noteMoves = commentedMoves(data)
+      var nextNote = nextInList(noteMoves, cur, 1)
+      var prevNote = nextInList(noteMoves, cur, -1)
       var problem = null
       for (var pi = 0; pi < list.length; pi++) {
         if (list[pi].moveNumber === cur) { problem = list[pi]; break }
@@ -827,6 +878,16 @@ window.__ModuleLoader__.load({
           title: nextProblem === null ? '这盘棋没有发现明显问题手' : '跳到下一个恶点（第 ' + nextProblem + ' 手）',
           onClick: function () { if (nextProblem !== null) senseiPatch({ upto: nextProblem }) },
         }, '恶点▶'),
+        React.createElement('button', {
+          className: 'dgs-jump', disabled: prevNote === null,
+          title: prevNote === null ? '这盘棋还没有写回讲解' : '跳到上一处讲解（第 ' + prevNote + ' 手）',
+          onClick: function () { if (prevNote !== null) senseiPatch({ upto: prevNote }) },
+        }, '◀讲解'),
+        React.createElement('button', {
+          className: 'dgs-jump', disabled: nextNote === null,
+          title: nextNote === null ? '这盘棋还没有写回讲解' : '跳到下一处讲解（第 ' + nextNote + ' 手）',
+          onClick: function () { if (nextNote !== null) senseiPatch({ upto: nextNote }) },
+        }, '讲解▶'),
         React.createElement('input', {
           type: 'range', min: 0, max: total, value: cur,
           title: '拖动快速定位',
@@ -874,6 +935,7 @@ window.__ModuleLoader__.load({
             renderBoard({
               board: board, upto: cur, problem: problemPointOf(problem, curMove),
               marks: problemMarks, pv: pvPoints,
+              noteMoves: noteMoves,
               hintLabel: hint && hint.label ? hint.label : '',
             }),
             React.createElement('div', { className: 'dgs-note' },
@@ -1199,6 +1261,10 @@ window.__ModuleLoader__.load({
         if (typeof list[qi].moveNumber === 'number' && list[qi].moveNumber > 0) problemMoves.push(list[qi].moveNumber)
       }
       problemMoves.sort(function (a, b) { return a - b })
+      // 有讲解的手（已写回棋谱的 C[] 注释）：跳转按钮与盘上小方点都用它
+      var noteMoves = commentedMoves(data)
+      var nextNote = nextInList(noteMoves, cur, 1)
+      var prevNote = nextInList(noteMoves, cur, -1)
       var nextProblem = null
       var prevProblem = null
       if (problemMoves.length > 0) {
@@ -1321,6 +1387,18 @@ window.__ModuleLoader__.load({
                 title: nextProblem === null ? '这盘棋没有发现明显问题手' : '跳到下一个恶点（第 ' + nextProblem + ' 手；到头绕回第一个）',
                 onClick: function () { if (nextProblem !== null) setUpto(nextProblem) },
               }, '恶点▶'),
+              React.createElement('button', {
+                className: 'dgs-jump',
+                disabled: prevNote === null,
+                title: prevNote === null ? '这盘棋还没有写回讲解' : '跳到上一处讲解（第 ' + prevNote + ' 手）',
+                onClick: function () { if (prevNote !== null) setUpto(prevNote) },
+              }, '◀讲解'),
+              React.createElement('button', {
+                className: 'dgs-jump',
+                disabled: nextNote === null,
+                title: nextNote === null ? '这盘棋还没有写回讲解' : '跳到下一处讲解（第 ' + nextNote + ' 手）',
+                onClick: function () { if (nextNote !== null) setUpto(nextNote) },
+              }, '讲解▶'),
               React.createElement('input', {
                 type: 'range', min: 0, max: total, value: cur,
                 title: '拖动快速定位',
@@ -1349,8 +1427,15 @@ window.__ModuleLoader__.load({
                       '（共 ' + problemMarks.length + ' 处，紫＞红＞橙）　点列表任意一行跳到那一手')
                   : '点棋盘交叉点可就该点提问；「▸」把棋盘收起来',
             ),
-            // 已写回棋谱的讲解：翻到哪一手就读到哪一手
-            commentBox(commentOf(data, cur)),
+            // 已写回棋谱的讲解：翻到哪一手就读到哪一手；这一手没有就指明去哪找
+            (function () {
+              var box = commentBox(commentOf(data, cur))
+              if (box !== null) return box
+              if (noteMoves.length === 0) return null
+              return React.createElement('div', { className: 'dgs-note dgs-notehint' },
+                '这一手没有讲解。本局共 ' + noteMoves.length + ' 处（第 '
+                + noteMoves.slice(0, 8).join('、') + (noteMoves.length > 8 ? '…' : '') + ' 手），用「讲解▶」跳过去。')
+            })(),
           )
           kids.push(React.createElement('div', { className: 'dgs-split', key: 'split' }, boardCol,
             React.createElement('div', { className: 'dgs-col-list' }, listEl)))
@@ -1575,6 +1660,8 @@ window.__ModuleLoader__.load({
       var problemMoves = list.map(function (c) { return c.moveNumber }).filter(function (n) {
         return typeof n === 'number'
       }).sort(function (a, b) { return a - b })
+      // 有讲解的手（已写回棋谱的 C[] 注释）：跳转按钮与盘上小方点都用它
+      var noteMoves = commentedMoves(data)
 
       function jumpProblem(direction) {
         if (problemMoves.length === 0) return
@@ -1620,6 +1707,7 @@ window.__ModuleLoader__.load({
             upto: cur,
             problem: problemPoint,
             pv: pvPoints,
+            noteMoves: noteMoves,
             hintLabel: hint && hint.label ? hint.label : '',
           })))
         kids.push(React.createElement('div', { className: 'dgs-ctl', key: 'ctl' },
@@ -1635,6 +1723,22 @@ window.__ModuleLoader__.load({
             className: 'dgs-jump', disabled: problemMoves.length === 0,
             onClick: function () { jumpProblem(1) }, title: '下一处问题手',
           }, '恶点▶'),
+          React.createElement('button', {
+            className: 'dgs-jump', disabled: noteMoves.length === 0,
+            onClick: function () {
+              var target = nextInList(noteMoves, cur, -1)
+              if (target !== null) setUpto(target)
+            },
+            title: noteMoves.length === 0 ? '这盘棋还没有写回讲解' : '上一处讲解',
+          }, '◀讲解'),
+          React.createElement('button', {
+            className: 'dgs-jump', disabled: noteMoves.length === 0,
+            onClick: function () {
+              var target = nextInList(noteMoves, cur, 1)
+              if (target !== null) setUpto(target)
+            },
+            title: noteMoves.length === 0 ? '这盘棋还没有写回讲解' : '下一处讲解',
+          }, '讲解▶'),
           React.createElement('input', {
             type: 'range', min: 0, max: total, value: cur,
             onChange: function (event) { setUpto(Number(event.target.value)) },

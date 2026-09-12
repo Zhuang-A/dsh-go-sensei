@@ -12,7 +12,7 @@ import { dirname, join, resolve, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { apply, Config } from '../index.mjs'
 import { parseGame, parseLz } from '../src/sgf.js'
-import { effectiveEngineConfig, compact } from '../src/tools.js'
+import { effectiveEngineConfig, compact, mergeCachedAnalysis } from '../src/tools.js'
 import { resolveEngine } from '../src/engine-resolve.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -686,4 +686,33 @@ test('effectiveEngineConfig + resolveEngine: engineDir 覆盖配置里的 kataGo
   assert.equal(untouched.source, 'config')
 
   rmSync(dir, { recursive: true, force: true })
+})
+
+test('mergeCachedAnalysis: 缓存只并回分析字段，不抹掉刚解析出的注释', () => {
+  // 真机回归：讲解写回后指纹不变（注释不在指纹里），旧实现用整份 moves 覆盖，
+  // 于是面板 comments 恒为空 —— 用户看到的就是"讲了解释写回去了，棋盘上却没有"。
+  const game = {
+    moves: [
+      { number: 1, color: 'B', analysis: { moves: 1, comment: '这手太急：该先补断点。' } },
+      { number: 2, color: 'W', analysis: null },
+      { number: 3, color: 'B', analysis: { moves: 1, comment: '这里该走大场。' } },
+    ],
+  }
+  const merged = mergeCachedAnalysis(game, [
+    { number: 1, analysis: { lz: { winratePct: 62.5 } } },
+    { number: 2, analysis: { lz: { winratePct: 40 } } },
+  ])
+  assert.equal(merged, 2)
+  assert.equal(game.moves[0].analysis.comment, '这手太急：该先补断点。', '注释必须保留')
+  assert.equal(game.moves[0].analysis.lz.winratePct, 62.5, '分析要并回来')
+  assert.equal(game.moves[1].analysis.lz.winratePct, 40, '原本没有 analysis 的手也能补上')
+  assert.equal(game.moves[2].analysis.comment, '这里该走大场。', '没被缓存覆盖的手原样保留')
+})
+
+test('mergeCachedAnalysis: 对不上时返回 0（调用方按未命中处理，不会拿错分析）', () => {
+  const game = { moves: [{ number: 5, color: 'B', analysis: null }] }
+  assert.equal(mergeCachedAnalysis(game, [{ number: 1, analysis: { lz: {} } }]), 0)
+  assert.equal(mergeCachedAnalysis(game, []), 0)
+  assert.equal(mergeCachedAnalysis(game, undefined), 0)
+  assert.equal(game.moves[0].analysis, null, '未命中不得改动 moves')
 })
