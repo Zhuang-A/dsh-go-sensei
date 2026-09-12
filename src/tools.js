@@ -668,6 +668,42 @@ function buildReportSkeleton(game, cfg) {
   return lines.join('\n')
 }
 
+/**
+ * 把「单次调用的引擎覆盖」合成成有效配置（go_engine_analyze 的临时换引擎口子）。
+ *
+ * 语义：
+ *  - 只给 `kataGoPath` / `kataGoConfig` / `kataGoModel`：**逐项覆盖**，其余沿用配置；
+ *  - 给了 `engineDir`：视为「改用这一整个引擎目录」——目录里的可执行文件、analysis 配置、
+ *    权重优先，未同时显式指定的逐项路径**不再继承**。否则配置里的 `kataGoPath` 会压过
+ *    本次传入的 `engineDir`，「临时换引擎」静默失效（实测踩过：传了 engineDir，回来的
+ *    仍是"配置指定的引擎"）。
+ *
+ * @param {object} cfg 插件配置
+ * @param {object} [args] 工具入参
+ * @returns {object} 供 `resolveEngine` 使用的配置
+ */
+export function effectiveEngineConfig(cfg, args = {}) {
+  const pick = (key) => {
+    const value = args?.[key]
+    return typeof value === 'string' && value.trim() !== '' ? value : undefined
+  }
+  const next = { ...cfg }
+  const engineDir = pick('engineDir')
+  if (engineDir === undefined) {
+    for (const key of ['kataGoPath', 'kataGoConfig', 'kataGoModel']) {
+      const value = pick(key)
+      if (value !== undefined) next[key] = value
+    }
+    return next
+  }
+  next.engineDir = engineDir
+  for (const key of ['kataGoPath', 'kataGoConfig', 'kataGoModel']) {
+    const value = pick(key)
+    next[key] = value !== undefined ? value : ''
+  }
+  return next
+}
+
 function goEngineAnalyze(ctx, cfg, cache, policy) {
   return {
     name: 'go_engine_analyze',
@@ -710,15 +746,9 @@ function goEngineAnalyze(ctx, cfg, cache, policy) {
     isConcurrencySafe: () => false,
     timeoutMs: 300000,
     async execute(args, exec) {
-      // 单次调用覆盖 = 「临时换引擎/换权重」的口子：覆盖项合并进 cfg 后走同一套解析，
-      // 因此只需维护 resolveEngine 一处优先级规则。
-      const effective = {
-        ...cfg,
-        ...(typeof args.engineDir === 'string' ? { engineDir: args.engineDir } : {}),
-        ...(typeof args.kataGoPath === 'string' ? { kataGoPath: args.kataGoPath } : {}),
-        ...(typeof args.kataGoConfig === 'string' ? { kataGoConfig: args.kataGoConfig } : {}),
-        ...(typeof args.kataGoModel === 'string' ? { kataGoModel: args.kataGoModel } : {}),
-      }
+      // 单次调用覆盖 = 「临时换引擎/换权重」的口子：覆盖项经 effectiveEngineConfig
+      // 合成后走同一套 resolveEngine 解析，优先级规则只维护一处。
+      const effective = effectiveEngineConfig(cfg, args)
       const engine = resolveEngine(effective)
       if (!engine.available) {
         throw new Error(engine.hint !== '' ? engine.hint : '没有可用的 KataGo 引擎')

@@ -12,6 +12,8 @@ import { dirname, join, resolve, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { apply, Config } from '../index.mjs'
 import { parseGame, parseLz } from '../src/sgf.js'
+import { effectiveEngineConfig } from '../src/tools.js'
+import { resolveEngine } from '../src/engine-resolve.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const fixture = (name) => join(here, 'fixtures', name)
@@ -550,4 +552,62 @@ test('真实带分析棋谱全链路（解析→复盘→写回→报告）', as
   const report = await call(ctx.registered.get('go_export_report'), WORKSPACE, { path: 'real.sgf' })
   assert.ok(existsSync(report.outPath))
   assert.equal(basename(report.outPath), 'real.review.md')
+})
+
+// ---------------------------------------------------------------------------
+// 单次调用的引擎覆盖（go_engine_analyze 的"临时换引擎"口子）
+// ---------------------------------------------------------------------------
+
+test('effectiveEngineConfig: engineDir 换整目录，单项路径只覆盖该项', () => {
+  const cfg = {
+    engineDir: '',
+    kataGoPath: 'C:/pack/katago.exe',
+    kataGoConfig: 'C:/pack/a.cfg',
+    kataGoModel: 'C:/pack/m.bin.gz',
+  }
+  // 只给 engineDir：不再继承配置里的逐项路径 —— 否则会被配置的 kataGoPath 压掉
+  const whole = effectiveEngineConfig(cfg, { engineDir: 'D:/mine' })
+  assert.equal(whole.engineDir, 'D:/mine')
+  assert.equal(whole.kataGoPath, '')
+  assert.equal(whole.kataGoConfig, '')
+  assert.equal(whole.kataGoModel, '')
+
+  // engineDir + 单项：该项仍生效
+  const mixed = effectiveEngineConfig(cfg, { engineDir: 'D:/mine', kataGoModel: 'D:/x.bin.gz' })
+  assert.equal(mixed.engineDir, 'D:/mine')
+  assert.equal(mixed.kataGoPath, '')
+  assert.equal(mixed.kataGoModel, 'D:/x.bin.gz')
+
+  // 只给单项：逐项覆盖，其余沿用配置
+  const one = effectiveEngineConfig(cfg, { kataGoModel: 'D:/x.bin.gz' })
+  assert.equal(one.kataGoPath, 'C:/pack/katago.exe')
+  assert.equal(one.kataGoConfig, 'C:/pack/a.cfg')
+  assert.equal(one.kataGoModel, 'D:/x.bin.gz')
+
+  // 空串/空白不算覆盖
+  const blank = effectiveEngineConfig(cfg, { engineDir: '   ', kataGoPath: '' })
+  assert.equal(blank.engineDir, '')
+  assert.equal(blank.kataGoPath, 'C:/pack/katago.exe')
+})
+
+test('effectiveEngineConfig + resolveEngine: engineDir 覆盖配置里的 kataGoPath', () => {
+  const dir = join(here, 'tmp-engine-cfg')
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'katago.exe'), 'stub')
+  writeFileSync(join(dir, 'analysis_example.cfg'), 'reportAnalysisWinratesAs = BLACK\n')
+  writeFileSync(join(dir, 'w.bin.gz'), Buffer.alloc(2048))
+
+  const cfg = { engineDir: NO_ENGINE_DIR, kataGoPath: 'C:/pack/katago.exe', kataGoConfig: '', kataGoModel: '' }
+  const resolved = resolveEngine(effectiveEngineConfig(cfg, { engineDir: dir }))
+  assert.equal(resolved.source, 'engineDir')
+  assert.equal(resolved.kataGoPath, join(dir, 'katago.exe'))
+  assert.equal(resolved.configPath, join(dir, 'analysis_example.cfg'))
+  assert.equal(resolved.modelPath, join(dir, 'w.bin.gz'))
+
+  // 没有覆盖时仍走配置指定的引擎
+  const untouched = resolveEngine(effectiveEngineConfig(cfg, {}))
+  assert.equal(untouched.source, 'config')
+
+  rmSync(dir, { recursive: true, force: true })
 })

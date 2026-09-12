@@ -183,7 +183,7 @@ dsh plugin --profile web remove dsh-go-sensei        # 卸载
 | **换更强的权重**（如 b28，约 270 MB） | 把 `.bin.gz` 丢进 `<插件目录>/engine/`，插件自动挑其中**最大**的那个 |
 | **指定某个权重文件** | 配置 `kataGoModel: D:/katago/kata1-b28c512nbt-….bin.gz` |
 | **换引擎或换后端**（CUDA / 纯 CPU 版 / 别的版本） | 配置 `engineDir: D:/katago`，该目录里放可执行文件 + analysis 配置 + 权重即可 |
-| **只临时换一次**（不动配置） | 让 Sensei 在 `go_engine_analyze` 里带上 `engineDir` / `kataGoPath` / `kataGoConfig` / `kataGoModel` 参数 |
+| **只临时换一次**（不动配置） | 让 Sensei 在 `go_engine_analyze` 里带上 `engineDir` / `kataGoPath` / `kataGoConfig` / `kataGoModel` 参数：带 `engineDir`＝整个引擎目录换掉（目录内自动发现），只带某一项＝只覆盖那一项 |
 | **调搜索量**（越大越准越慢） | 配置 `maxVisits`（默认 100；业余复盘 60~200 都合理） |
 
 生效时机要分清：权重与路径**每次调用都重新解析**，所以往 `engine/` 里丢一个新权重，下一盘复盘就用上了；而 `go_engine_analyze` 这个工具本身注册与否在插件加载时决定，改了 `engineDir` / `kataGoPath` 记得**重启 `dsh web`**。想强制重算某盘棋（不吃缓存），用 `go_engine_analyze` 指定手数区间。
@@ -272,6 +272,7 @@ Using OpenCL backend
 - **许可**：引擎与权重按 KataGo 官方 MIT 许可随插件分发（第三方组件声明见 `engine/LICENSE.txt`），上游条款以官方发布为准。
 - **体积**：仓库因此约 110 MB，clone 会慢一些；不需要自带引擎的话，删掉 `engine/` 即可（插件会退回"自己装 / 纯棋理"两条路）。
 - **显卡**：OpenCL 后端要求显卡驱动带 OpenCL 运行时；驱动太旧或纯远程桌面环境可能起不来，换成 CPU（eigen）版最稳。
+- **首次运行会写调优缓存**：第一次补算要做 OpenCL 调优（本机实测同一查询首次 **214 秒**、第二次 **8.7 秒**），缓存落在 `engine/KataGoData/`（已在 `.gitignore` 里，删掉下次会重新调优）；运行日志在 `engine/analysis_logs/`。
 
 ### 常见装机坑
 
@@ -281,7 +282,7 @@ Using OpenCL backend
 | 引擎起不来 / 一闪而过 | 只拷了 exe 没拷 DLL；或后端和自己的显卡不匹配（用 `katago.exe version` 验证） |
 | `Could not find key` | 配置文件用错了——需要 analysis 配置，不是 GTP 配置 |
 | `Must be a integer or half-integer from -150.0 to 150.0`（`field` 却写着 `rules`） | 这是**贴目**超范围/非半整数，不是规则字符串的问题（KataGo v1.16.4 实测会把字段误标为 `rules`）。插件已把棋谱 `KM[]` 就近吸附到 0.5 的倍数并夹到 `[-150, 150]`；仍报则检查棋谱贴目 |
-| 第一次补算等很久 | 每次补算都要新起一个引擎进程并加载模型（首次还有 OpenCL 调优），几十秒到一两分钟都属正常 |
+| 第一次补算等很久 | 每次补算都要新起一个引擎进程并加载模型，**首次运行还要做 OpenCL 调优**（本机实测首次 214 秒、第二次 8.7 秒），之后一直快；调优缓存见上文 |
 | 补算太慢 | 把 `maxVisits` 调小（60~100 足够业余复盘用）；或换更小的模型 |
 | 补算被拒 / 报子进程不可用 | 引擎查询被拒会把引擎原始错误带回；受限沙箱下启动子进程也可能被系统拒绝，工具会照实说明 |
 
