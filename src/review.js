@@ -22,9 +22,22 @@ export const SCORE_DELTA_BY_LABEL = {
 
 export const SEVERITY_ORDER = { blunder: 0, mistake: 1, inaccuracy: 2 }
 
-/** 四舍五入到 1 位小数；NaN/undefined 原样返回。 */
+/**
+ * 四舍五入到 1 位小数；NaN/undefined 返回 undefined。
+ *
+ * **必须把 -0 归一成 0**：`Math.round(-0.2)` 返回 `-0`，于是
+ * `round1(-0.02)` 也是 `-0`。而 DSH 的 lossless-JSON 边界
+ * （@deepseek-ai/dsh-util-values 的 walkJsonValue）明确拒收 `-0`
+ * （`!Number.isFinite(v) || Object.is(v, -0)` → 非法），整次工具调用会以
+ * "value is not lossless JSON" 失败。真实触发场景：一手棋落子后胜率几乎没降
+ * （wBefore - wAfter ≈ -0.0002），但目差掉够阈值 → 该候选被收录，
+ * winrateLoss 带着 -0 出门，go_review_moves / go_engine_analyze 双双报错。
+ * 见 test/review.test.mjs 的 "-0" 回归用例。
+ */
 export function round1(n) {
-  return n === undefined || n === null || Number.isNaN(n) ? undefined : Math.round(n * 10) / 10
+  if (n === undefined || n === null || !Number.isFinite(Number(n))) return undefined
+  const r = Math.round(Number(n) * 10) / 10
+  return Object.is(r, -0) ? 0 : r
 }
 
 /**

@@ -252,8 +252,11 @@ function toLzLikeAnalysis(mi, moveColor, opts = {}) {
     playouts: String(mi.visits ?? ''),
   }
   if (mi.scoreMean !== undefined) {
-    // scoreMean 与 winrate 同口径：黑方视角领先 → 换成对手视角
-    lz.scoreLeadOpponent = moveColor === 'B' ? -mi.scoreMean : mi.scoreMean
+    // scoreMean 与 winrate 同口径：黑方视角领先 → 换成对手视角。
+    // 归一 -0：scoreMean 恰为 0 时 `-0` 不是合法 lossless JSON，工具返回值会被
+    // 运行时整体拒收（同 review.js 的 round1）。
+    const lead = moveColor === 'B' ? -mi.scoreMean : mi.scoreMean
+    lz.scoreLeadOpponent = Object.is(lead, -0) ? 0 : lead
   }
   if (mi.scoreStdev !== undefined) lz.stdev = mi.scoreStdev
   return { lz }

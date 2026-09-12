@@ -37,6 +37,44 @@ test('round1: 一位小数', () => {
   assert.equal(round1(undefined), undefined)
 })
 
+// 回归：Math.round(-0.2) === -0，若原样返回会让工具返回值为非法 lossless JSON，
+// go_review_moves / go_engine_analyze 在**有引擎数据**时整次调用报
+// "value is not lossless JSON"（纯棋谱路径反而正常，故极易漏检）。
+test('round1: 归一 -0（-0 不是合法 lossless JSON）', () => {
+  assert.ok(Object.is(Math.round(-0.2), -0), '前提：Math.round(-0.2) 确实是 -0')
+  assert.ok(!Object.is(round1(-0.02), -0), 'round1 不得返回 -0')
+  assert.equal(round1(-0.02), 0)
+  assert.equal(round1(-0.04), 0)
+  assert.equal(round1(-0.5), -0.5, '真正的负数不能被抹平')
+  assert.equal(round1(NaN), undefined)
+  assert.equal(round1(Infinity), undefined)
+})
+
+// 回归：胜率几乎没降（-0.02 个百分点）但目差掉够阈值时，候选会被收录，
+// winrateLoss 必须是 0 而不是 -0 —— 这正是真机上报 invalid output 的形态。
+test('reviewGame: 只靠目差命中时 winrateLoss 不得为 -0', () => {
+  const mk = (number, color, winratePct, scoreLeadBlack) => ({
+    number,
+    color,
+    coord: number === 1 ? 'qd' : 'dd',
+    pass: false,
+    analysis: { scoreLeadBlack, lz: { winratePct, engine: 'KataGo', playouts: '100' } },
+  })
+  const game = {
+    info: { size: 19, komi: 0, handicap: 0, result: 'B+0', players: {} },
+    moves: [
+      mk(1, 'B', 50.0, -5), // 黑落后 5 目；白方视角胜率 50.0%
+      mk(2, 'W', 50.02, 5), // 白方视角胜率 50.02%（微升 0.02）→ 落差 -0.02 → round1(-0.2)
+    ],
+  }
+  const { candidates } = reviewGame(game, { winrateThreshold: 0.03, scoreThreshold: 3 })
+  assert.equal(candidates.length, 1)
+  assert.equal(candidates[0].moveNumber, 2)
+  assert.ok(!Object.is(candidates[0].winrateLoss, -0), 'winrateLoss 不得为 -0')
+  assert.equal(candidates[0].winrateLoss, 0)
+  assert.equal(candidates[0].scoreLoss, 10) // 目差通道独立命中
+})
+
 test('reviewGame: 合成棋谱命中 3 个问题手且分级正确', () => {
   const game = loadGame('synthetic-analysis.sgf')
   const { mode, candidates, summary } = reviewGame(game)

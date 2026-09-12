@@ -12,7 +12,7 @@ import { dirname, join, resolve, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { apply, Config } from '../index.mjs'
 import { parseGame, parseLz } from '../src/sgf.js'
-import { effectiveEngineConfig } from '../src/tools.js'
+import { effectiveEngineConfig, compact } from '../src/tools.js'
 import { resolveEngine } from '../src/engine-resolve.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -334,6 +334,35 @@ test('go_position_context: theory 模式带 engineNote 且仍是合法 JSON', as
 test('go_review_moves / go_parse_sgf: 返回值为合法 lossless JSON', async () => {
   await callJson(ctx.registered.get('go_review_moves'), WORKSPACE, { path: 'game.sgf' })
   await callJson(ctx.registered.get('go_parse_sgf'), WORKSPACE, { path: 'game.sgf' })
+})
+
+// 回归：compact 是工具返回值的出口兜底，必须同时处理 undefined / -0 / 非有限数。
+// 真机故障形态：引擎补算把 round1(-0.2) 的 -0 带进 winrateLoss，
+// 运行时 walkJsonValue 的 `!Number.isFinite(v) || Object.is(v, -0)` 判非法，
+// go_review_moves / go_engine_analyze 在有 KataGo 数据时整次调用失败。
+test('compact: 剔 undefined、归一 -0、剔非有限数', () => {
+  const cleaned = compact({
+    keep: 'x',
+    zero: -0,
+    nan: NaN,
+    inf: Infinity,
+    ninf: -Infinity,
+    gone: undefined,
+    nul: null,
+    flag: false,
+    list: [1, NaN, -0, undefined, 'a'],
+    nested: { a: undefined, b: -0, c: 2 },
+  })
+  assert.deepEqual(cleaned, {
+    keep: 'x',
+    zero: 0,
+    nul: null,
+    flag: false,
+    list: [1, 0, 'a'],
+    nested: { b: 0, c: 2 },
+  })
+  assert.ok(!Object.is(cleaned.zero, -0))
+  assert.ok(isLosslessJson(cleaned), 'compact 的输出必须过 lossless-JSON 边界')
 })
 
 test('go_parse_sgf: 缺段位/日期等属性的棋谱仍是合法 JSON（无 undefined 属性）', async () => {

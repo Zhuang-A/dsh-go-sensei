@@ -86,25 +86,40 @@ function textBlock(lines) {
 }
 
 /**
- * 递归剔除值为 undefined 的对象属性与数组项。
+ * 递归清洗工具返回值，使其一定是 lossless JSON。
  *
- * 工具返回值必须整体是 lossless JSON：属性值为 undefined 的对象被运行时
- * （dsh-util-values 的 walkJsonValue）判为非法，整次调用会以
- * "value is not lossless JSON" 失败 —— JSON.stringify 会静默丢键，故本地不易发现。
- * 可选字段一律走这里清洗，而不是写成 `key: maybeUndefined`。
+ * 运行时（@deepseek-ai/dsh-util-values 的 walkJsonValue）拒收三类值，任一出现
+ * 整次调用都会以 "value is not lossless JSON" 失败：
+ *   1. `undefined`（JSON.stringify 会静默丢键，故本地不易发现）→ 剔除；
+ *   2. `-0`（`Object.is(v, -0)` 判非法）→ 归一成 `0`；
+ *   3. `NaN` / `±Infinity`（`!Number.isFinite(v)` 判非法）→ 剔除该键。
+ * 第 2 条是实测踩出来的：引擎补算时 `round1(-0.0002 * 100)` 通过
+ * `Math.round(-0.2)` 产出 `-0`，让 go_review_moves / go_engine_analyze 在
+ * 有 KataGo 数据的局面下直接报错（纯棋谱反而正常）。见 src/review.js 的 round1。
+ *
+ * 这里是**出口兜底**：源头（review.js / engine.js）已各自归一，出口再兜一层，
+ * 保证以后新增字段也不会把非法值带过边界。可选字段一律走这里清洗，
+ * 而不是写成 `key: maybeUndefined`。
  * @template T
  * @param {T} value
  * @returns {T} 清洗后的副本（非对象值原样返回）
  */
-function compact(value) {
+export function compact(value) {
   if (Array.isArray(value)) {
-    return value.filter((v) => v !== undefined).map((v) => compact(v))
+    // 先逐项清洗再剔除：NaN/Infinity 会被清洗成 undefined，必须在这一步之后过滤，
+    // 否则数组里会残留空洞（长度不变但元素为 undefined，同样非法）。
+    return value.map((v) => compact(v)).filter((v) => v !== undefined)
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return undefined
+    return Object.is(value, -0) ? 0 : value
   }
   if (value !== null && typeof value === 'object') {
     const out = {}
     for (const [k, v] of Object.entries(value)) {
-      if (v === undefined) continue
-      out[k] = compact(v)
+      const cleaned = compact(v)
+      if (cleaned === undefined) continue
+      out[k] = cleaned
     }
     return out
   }
