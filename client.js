@@ -154,13 +154,17 @@ window.__ModuleLoader__.load({
       return col + String(size - y)
     }
 
-    /** KataGo 风格标签（'R16'）-> {x, y}；解析不了返回 null。 */
+    /**
+     * KataGo 风格标签（'R16'）-> {x, y}；解析不了或落在盘外返回 null。
+     * 小棋盘（9/13 路）上引擎不会给出路数外的点，但标签来自棋谱/引擎文本，
+     * 挡一道越界免得把标记画到盘外。
+     */
     function parsePointLabel(label, size) {
       var m = /^([A-Za-z])(\d{1,2})$/.exec(String(label == null ? '' : label))
       if (m === null) return null
       var x = BOARD_COLS.indexOf(m[1].toUpperCase())
       var row = parseInt(m[2], 10)
-      if (x < 0 || !(row >= 1 && row <= size)) return null
+      if (x < 0 || x >= size || !(row >= 1 && row <= size)) return null
       return { x: x, y: size - row }
     }
 
@@ -231,12 +235,20 @@ window.__ModuleLoader__.load({
 
     /**
      * 摆出「前 upto 手」的局面（含 AB/AW 摆子）。
+     *
+     * 结果按「同一个 board 对象 + 同一手数」缓存：面板每敲一个字符都会重渲染，
+     * 而重算一次要重放整局棋；用对象标识做键既便宜，也不会把两盘棋搞混。
+     * （返回的数组由调用方只读使用，不再复制。）
+     *
      * @param {{ size: number, moves: object[], setup?: object }} board 服务端 compactBoard 的产物
      * @param {number} upto 显示到第几手（0 = 开局）
-     * @returns {number[]} 盘面网格
+     * @returns {number[]} 盘面网格（0 空 / 1 黑 / 2 白，下标 = y * size + x）
      */
     function boardAt(board, upto) {
       var size = board.size
+      var moves = board.moves || []
+      var limit = Math.max(0, Math.min(upto, moves.length))
+      if (boardCache.board === board && boardCache.upto === limit) return boardCache.grid
       var grid = emptyGrid(size)
       var setup = board.setup || {}
       var black = setup.black || []
@@ -244,15 +256,19 @@ window.__ModuleLoader__.load({
       var i
       for (i = 0; i < black.length; i++) grid[black[i][1] * size + black[i][0]] = 1
       for (i = 0; i < white.length; i++) grid[white[i][1] * size + white[i][0]] = 2
-      var moves = board.moves || []
-      var limit = Math.max(0, Math.min(upto, moves.length))
       for (i = 0; i < limit; i++) {
         var m = moves[i]
         if (m.x < 0 || m.y < 0) continue
         playStone(grid, size, m.x, m.y, m.c === 'B' ? 1 : 2)
       }
+      boardCache.board = board
+      boardCache.upto = limit
+      boardCache.grid = grid
       return grid
     }
+
+    /** 盘面缓存：{ board 对象标识, 手数 } -> 网格。 */
+    var boardCache = { board: null, upto: -1, grid: null }
 
     /** 星位（19/13/9 路常用坐标，其余路数不画）。 */
     function starPoints(size) {
@@ -381,8 +397,10 @@ window.__ModuleLoader__.load({
         }
       })
 
-      // 首选点的胜率：橙底黑字（Lizzieyzy drawStringForOrder 的信息条样式）
-      if (opts.hintLabel && pv.length > 0) {
+      // 首选点的胜率：橙底黑字（Lizzieyzy drawStringForOrder 的信息条样式）。
+      // pv[0] 可能解析失败（候选标签不是坐标，比如 'pass' 或空字符串）——
+      // 那时只能不画信息条：渲染期抛错会整块面板一起挂掉。
+      if (opts.hintLabel && pv.length > 0 && pv[0] !== null && pv[0] !== undefined) {
         var text = String(opts.hintLabel)
         var boxW = text.length * 1.55 + 1.6
         var boxX = Math.max(0, Math.min(BOARD_VIEW - boxW, pos(pv[0].x) + radius * 0.9))
@@ -439,6 +457,27 @@ window.__ModuleLoader__.load({
     /** 取路径的末段（跨 Windows/Unix 两种分隔符）。 */
     function baseName(path) {
       return String(path == null ? '' : path).replace(/\\/g, '/').split('/').pop()
+    }
+
+    /** 路径归一化：反斜杠转正斜杠、去掉尾部斜杠、转小写（Windows 大小写不敏感）。 */
+    function normPath(path) {
+      return String(path == null ? '' : path).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+    }
+
+    /**
+     * 判断两个路径是不是同一个文件。
+     *
+     * 只在文件名上比会把「两盘都叫 game.sgf 的棋」认成一盘（跳到错的手数而不是载入）；
+     * 只在完整路径上比又会在「面板里是绝对路径、工具调用里是相对路径」时永远认不出，
+     * 于是每轮都重新载入。所以：能整体相等或后缀包含就按路径认，剩下才退回文件名。
+     */
+    function sameFile(a, b) {
+      var x = normPath(a)
+      var y = normPath(b)
+      if (x === '' || y === '') return false
+      if (x === y) return true
+      if (x.indexOf('/') < 0 || y.indexOf('/') < 0) return baseName(x) === baseName(y)
+      return x.length > y.length ? x.endsWith('/' + y) : y.endsWith('/' + x)
     }
 
     /** 棋盘表头状态：「第 5/106 手 · 黑 Q16」。 */
@@ -600,9 +639,8 @@ window.__ModuleLoader__.load({
 
       /** 把指针落到棋盘上：同一盘棋就跳手数，另一盘棋就自动载入。 */
       function applyFocus(f) {
-        var loaded = data && data.path ? baseName(data.path).toLowerCase() : ''
-        var wanted = baseName(f.name || f.path || '').toLowerCase()
-        if (loaded === '' || wanted === '' || wanted !== loaded) {
+        var sameGame = data && data.path ? sameFile(data.path, f.path || f.name || '') : false
+        if (!sameGame) {
           // 别急着反复重试：路径解析不了时（相对路径基准不对）20 秒内只试一次
           var key = String(f.path || '') + '|' + String(f.cwd || '')
           var last = focusPointer.tried[key] || 0
@@ -626,7 +664,9 @@ window.__ModuleLoader__.load({
       function askPoint(x, y) {
         if (!data || !data.board) return
         var label = boardLabel(x, y, data.board.size)
-        insert('追问：第 ' + currentUpto() + ' 手之后的局面，如果下在 ' + label
+        var cur = currentUpto()
+        insert('追问：' + (cur > 0 ? '第 ' + cur + ' 手之后的局面，' : '开局（第 0 手），')
+          + '如果下在 ' + label
           + ' 会怎样？请讲讲这一手的价值与后续变化。'
           + (data.path ? '（棋谱：' + data.path + '）' : ''))
       }
@@ -828,6 +868,8 @@ window.__ModuleLoader__.load({
       boardAt: boardAt,
       starPoints: starPoints,
       baseName: baseName,
+      sameFile: sameFile,
+      renderBoard: renderBoard,
     }
     return module.exports
   },

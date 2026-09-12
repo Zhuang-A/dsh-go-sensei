@@ -21,6 +21,17 @@ test('gameFingerprint: 参数差异影响指纹', () => {
   assert.notEqual(gameFingerprint(GAME_A), gameFingerprint(withKomi))
 })
 
+test('gameFingerprint: 摆子必须进指纹（两道只有 AB/AW 的死活题不能撞键）', () => {
+  const problemA = parseGame('(;GM[1]FF[4]SZ[19]KM[7.5]AB[dd][pp])')
+  const problemB = parseGame('(;GM[1]FF[4]SZ[19]KM[7.5]AB[dd][qq])')
+  assert.equal(problemA.moves.length, 0, '题目型棋谱没有着手')
+  assert.notEqual(gameFingerprint(problemA), gameFingerprint(problemB))
+  // 同一摆子仍是同一指纹；颜色也是指纹的一部分
+  assert.equal(gameFingerprint(problemA), gameFingerprint(parseGame('(;GM[1]FF[4]SZ[19]KM[7.5]AB[dd][pp])')))
+  const swapped = parseGame('(;GM[1]FF[4]SZ[19]KM[7.5]AW[dd][pp])')
+  assert.notEqual(gameFingerprint(problemA), gameFingerprint(swapped))
+})
+
 test('ReviewCache: 命中与未命中', () => {
   const cache = new ReviewCache()
   const key = cache.keyFor(GAME_A, { level: '18K' })

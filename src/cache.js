@@ -7,12 +7,19 @@ import { createHash } from 'node:crypto'
 
 /**
  * @param {object} game parseGame 的返回值
- * @returns {string} 与讲解无关的棋局指纹（主变化线 + 规则参数）
+ * @returns {string} 与讲解无关的棋局指纹（主变化线 + 摆子 + 规则参数）
  */
 export function gameFingerprint(game) {
   const info = game?.info ?? {}
   const seq = (game?.moves ?? []).map((m) => `${m.color}${m.coord ?? 'tt'}`).join('')
-  const raw = [info.size, info.komi, info.handicap, info.rule ?? '', info.result ?? '', seq].join('|')
+  // 摆子必须进指纹：同一贴目/规则下的两道死活题（只有 AB/AW、没有着手）
+  // 若不算进去就会撞成同一个键，第二题会拿到第一题的缓存结果。
+  const setup = game?.setup ?? {}
+  const stones = [
+    ...(setup.black ?? []).map((c) => `B${c}`),
+    ...(setup.white ?? []).map((c) => `W${c}`),
+  ].sort().join('')
+  const raw = [info.size, info.komi, info.handicap, info.rule ?? '', info.result ?? '', seq, stones].join('|')
   return createHash('sha256').update(raw).digest('hex').slice(0, 16)
 }
 

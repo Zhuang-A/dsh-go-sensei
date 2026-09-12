@@ -478,6 +478,57 @@ test('client: 棋盘纯规则（落子/提子/摆子/坐标换算）', () => {
   assert.equal(boardLabel(15, 3, 19), 'Q16')
   assert.deepEqual(parsePointLabel('Q16', 19), { x: 15, y: 3 })
   assert.equal(parsePointLabel('I5', 19), null, '字母 I 不是合法列')
+  assert.equal(parsePointLabel('K5', 9), null, '9 路只有 A..J，K 列越界')
+  assert.deepEqual(parsePointLabel('J9', 9), { x: 8, y: 0 }, '9 路的角点仍要认')
+  assert.equal(parsePointLabel('Q20', 19), null, '行号越界')
+})
+
+test('client: 路径同一性判断（同名不同盘的棋不能被当成同一盘）', () => {
+  const { plugin } = loadClient()
+  const { sameFile } = plugin.__internals
+  assert.equal(typeof sameFile, 'function', '__internals 应暴露 sameFile')
+
+  assert.equal(sameFile('C:/a/b/game.sgf', 'C:\\a\\b\\game.sgf'), true, '分隔符与大小写无关')
+  assert.equal(sameFile('C:/a/b/game.sgf', 'game.sgf'), true, '一方只有文件名时按文件名比')
+  assert.equal(sameFile('C:/x/review-check/_accept/game.sgf', 'review-check/_accept/game.sgf'), true,
+    '相对路径是绝对路径的后缀')
+  assert.equal(sameFile('C:/a/game.sgf', 'D:/b/game.sgf'), false, '同名但不同目录不是同一盘')
+  assert.equal(sameFile('', 'game.sgf'), false, '空路径不匹配任何东西')
+})
+
+test('client: 棋盘渲染对畸形候选数据不抛错（首选标签解析不出来时）', () => {
+  const { plugin, react } = loadClient()
+  const { renderBoard } = plugin.__internals
+  assert.equal(typeof renderBoard, 'function')
+
+  react.reset()
+  // 'pass' / 空标签都解析不出坐标：整块面板不能因此崩掉
+  const tree = renderBoard({
+    board: CAPTURE_BOARD, upto: 5, problem: null, pv: [null, null], hintLabel: 'pass', onPick: null,
+  })
+  const nodes = walk(tree)
+  assert.ok(nodes.some((n) => n.type === 'svg'), '仍应画出棋盘')
+  assert.ok(!nodes.some((n) => n.type === 'rect' && n.props.fill === '#ffc800'), '解析不出坐标时不画信息条')
+  assert.ok(!nodes.some((n) => n.type === 'circle' && n.props.stroke === '#0000ff'), '也不画首选蓝圈')
+})
+
+test('client: 变化图落在实战已占的点上时不画蓝点（免得像把子叠在子上）', () => {
+  const { plugin, react } = loadClient()
+  const { renderBoard } = plugin.__internals
+  const board = {
+    size: 9,
+    moves: [{ c: 'B', x: 2, y: 2 }],
+    setup: { black: [], white: [] },
+  }
+  react.reset()
+  // pv[1] 正落在第 1 手黑子上，pv[2] 是空点
+  const tree = renderBoard({
+    board, upto: 1, problem: null, hintLabel: '',
+    pv: [{ x: 4, y: 4 }, { x: 2, y: 2 }, { x: 5, y: 5 }], onPick: null,
+  })
+  const dots = walk(tree).filter((n) => n.type === 'circle' && n.props.fill === '#1668ff')
+  assert.equal(dots.length, 1, '只画落在空点上的那一手')
+  assert.equal(dots[0].props.cx, 8 + 5 * (84 / 8), '留下的是 pv[2]（序号 3）')
 })
 
 test('路由: /go-sensei/review 一并返回棋盘数据（尺寸/手顺/摆子）', async () => {
