@@ -42,7 +42,7 @@
 ## 5 分钟上手
 
 ```powershell
-# ① 装插件（在插件的上一级目录执行；把 ./dsh-go-sensei 换成你的实际路径）
+# ① 装插件（在插件的上一级目录执行；下面这行是作者机器上的路径，换成你自己的）
 cd C:\dsh\WeiQi
 dsh plugin --profile web add ./dsh-go-sensei
 
@@ -181,8 +181,8 @@ dsh plugin --profile web remove dsh-go-sensei        # 卸载
 | 你想做什么 | 怎么改 |
 |---|---|
 | **换更强的权重**（如 b28，约 270 MB） | 把 `.bin.gz` 丢进 `<插件目录>/engine/`，插件自动挑其中**最大**的那个 |
-| **指定某个权重文件** | 配置 `kataGoModel: D:/katago/kata1-b28c512nbt-….bin.gz` |
-| **换引擎或换后端**（CUDA / 纯 CPU 版 / 别的版本） | 配置 `engineDir: D:/katago`，该目录里放可执行文件 + analysis 配置 + 权重即可 |
+| **指定某个权重文件** | 配置 `kataGoModel: <权重文件的完整路径>`（下载的 `.bin.gz` 放哪就填哪） |
+| **换引擎或换后端**（CUDA / 纯 CPU 版 / 别的版本） | 配置 `engineDir: <你的引擎目录>`，该目录里放可执行文件 + analysis 配置 + 权重即可 |
 | **只临时换一次**（不动配置） | 让 Sensei 在 `go_engine_analyze` 里带上 `engineDir` / `kataGoPath` / `kataGoConfig` / `kataGoModel` 参数：带 `engineDir`＝整个引擎目录换掉（目录内自动发现），只带某一项＝只覆盖那一项 |
 | **调搜索量**（越大越准越慢） | 配置 `maxVisits`（默认 100；业余复盘 60~200 都合理） |
 
@@ -237,7 +237,8 @@ dsh plugin --profile web remove dsh-go-sensei        # 卸载
 **步骤 4：先自己验证一次引擎**
 
 ```powershell
-D:\katago\katago.exe version
+# 尖括号是占位符，换成你实际的位置（本文档别处的 D:\katago 只是示例目录名）
+<你解压引擎的位置>\katago.exe version
 ```
 
 正常输出（本机实测）：
@@ -258,11 +259,12 @@ Using OpenCL backend
 ```yaml
 - id: go-sensei
   config:
-    engineDir: D:/katago          # 该目录里有引擎、analysis 配置和权重
+    engineDir: <你的引擎目录>      # 该目录里有 katago 可执行文件、analysis 配置、权重
     maxVisits: 100
 ```
 
-（也可以更细：`kataGoPath` 指可执行文件、`kataGoConfig` 指配置文件、`kataGoModel` 指权重，三者各自覆盖 `engineDir` 里的自动发现。）
+（`<你的引擎目录>` 是占位符——填你自己解压引擎的位置，别照抄本文档里的示例目录名。
+也可以更细：`kataGoPath` 指可执行文件、`kataGoConfig` 指配置文件、`kataGoModel` 指权重，三者各自覆盖 `engineDir` 里的自动发现。）
 
 重启 `dsh web`。之后凡是**没有分析数据、19 路**的棋谱，`go_review_moves` 与 Web 面板都会**自动补算**，不需要你手动调工具；补算失败不会打断复盘，会降级成纯棋理模式并把失败原因如实带回。
 
