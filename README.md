@@ -470,6 +470,20 @@ node scripts/demo.mjs <sgf路径> [起始手] [结束手]
 
 `test/schema.test.mjs` 直接 import 运行时校验器，对每个工具的两份 schema 逐条断言并显式禁止 `type` 数组——改完 schema 跑一次 `npm test` 就能拦住这类启动级故障。
 
+### 工具返回值必须是 lossless JSON（`-0` 也算非法）
+
+DSH 在工具边界上用 `@deepseek-ai/dsh-util-values` 的 `walkJsonValue` 校验返回值（源码里的判定是 `!Number.isFinite(v) || Object.is(v, -0)`），三类值会导致整次调用以 **`value is not lossless JSON`** 失败：
+
+| 非法值 | 为什么本地测不出来 | 怎么处理 |
+|---|---|---|
+| `undefined`（含对象属性 / 数组元素） | `JSON.stringify` 会静默丢键，看着"没事" | 可选字段别写成 `key: maybeUndefined`，走 `compact()` 清洗 |
+| **`-0`** | 打印出来就是 `0`，肉眼与断言都不易发现 | 归一成 `0`（`Object.is(v, -0) ? 0 : v`） |
+| `NaN` / `±Infinity` | 同上 | 归一或剔除该键 |
+
+**实测触发场景**（0.1.4 → 0.2.0 之间修掉的 bug，症状很迷惑）：一手棋胜率几乎没动、目差却掉够阈值时，该手仍会被收录为问题手，而 `winrateLoss` 走 `round1((wBefore - wAfter) * 100)`，原始差是浮点误差级（实测 **-1.1e-14%**）→ `Math.round(-1.1e-11)` 得到 `-0`。于是 **`go_review_moves` / `go_engine_analyze` 只在有 AI 分析数据的局面下报错，纯棋谱复盘反而一切正常**。
+
+现状：源头各自归一（`src/review.js` 的 `round1`、`src/engine.js` 的 `scoreLeadOpponent`），出口再兜一层（`src/tools.js` 的 `compact()`：剔 `undefined`、`-0`→`0`、剔非有限数，并先清洗后过滤以免数组留空洞）；回归用例在 `test/review.test.mjs` 与 `test/tools.test.mjs`。**这套夹具上就能复现**：`test/fixtures/real-analysis.sgf` 有 5 处（第 33、72、73、74、75 手）会让旧公式产出 `-0`。单测里那套校验器与运行时同语义，所以这类值在本地就会被拦住。
+
 ### 仓库约定
 
 - 换行策略见 `.gitattributes`：源码统一 LF（不依赖各机器的 `core.autocrlf`）；`test/fixtures/*.sgf` 标 `-text`，按**字节原样**提交——真实野狐导出的夹具本身是 CRLF，一旦被 EOL 规范化改写，逐字节依赖夹具的解析测试就会失真。
