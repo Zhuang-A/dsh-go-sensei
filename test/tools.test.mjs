@@ -172,7 +172,7 @@ before(() => {
   rmSync(WORKSPACE, { recursive: true, force: true })
   mkdirSync(WORKSPACE, { recursive: true })
   copyFileSync(fixture('synthetic-analysis.sgf'), join(WORKSPACE, 'game.sgf'))
-  copyFileSync(fixture('lizzieyzy-real.sgf'), join(WORKSPACE, 'real.sgf'))
+  copyFileSync(fixture('real-analysis.sgf'), join(WORKSPACE, 'real.sgf'))
   gameSgfInWorkspace = join(WORKSPACE, 'game.sgf')
   ctx = makeCtx(WORKSPACE)
   apply(ctx, CFG)
@@ -457,7 +457,7 @@ test('写盘契约: 工具返回值均为合法 lossless JSON', async () => {
 })
 
 // ---------------------------------------------------------------------------
-// Lizzieyzy 数据通道回归
+// LZ 分析属性数据通道回归
 // ---------------------------------------------------------------------------
 
 test('LZ 解析: playouts 带 k/M 量级后缀时头部仍可解析', () => {
@@ -476,8 +476,8 @@ test('LZ 解析: playouts 带 k/M 量级后缀时头部仍可解析', () => {
   assert.equal(mega.playouts, '1.2M')
 })
 
-test('LZ 解析: 真实 Lizzieyzy 棋谱每手都能取到胜率（含 k 后缀手）', () => {
-  const game = parseGame(readFileSync(fixture('lizzieyzy-real.sgf'), 'utf8'))
+test('LZ 解析: 真实带分析棋谱每手都能取到胜率（含 k 后缀手）', () => {
+  const game = parseGame(readFileSync(fixture('real-analysis.sgf'), 'utf8'))
   const missing = game.moves
     .filter((m) => m.analysis?.lz !== undefined && m.analysis.lz.winratePct === undefined)
     .map((m) => m.number)
@@ -488,7 +488,7 @@ test('LZ 解析: 真实 Lizzieyzy 棋谱每手都能取到胜率（含 k 后缀�
 })
 
 test('LZ 解析: 行棋方胜率通道与 C[] 注释通道一致（真实棋谱）', () => {
-  const game = parseGame(readFileSync(fixture('lizzieyzy-real.sgf'), 'utf8'))
+  const game = parseGame(readFileSync(fixture('real-analysis.sgf'), 'utf8'))
   // LZ 头部胜率为落子者视角；C[] 注释标签亦为落子者视角，两者应互相印证。
   let checked = 0
   for (const mv of game.moves) {
@@ -508,7 +508,7 @@ test('LZ 解析: 行棋方胜率通道与 C[] 注释通道一致（真实棋谱�
 // 该缺陷已修复（injectComments 改为 @sabaki/sgf 树遍历），故直接作为回归测试运行。
 test('go_write_review: 带变化图的真实棋谱应能写回全部主线手数', async () => {
   const target = join(WORKSPACE, 'variation.sgf')
-  copyFileSync(fixture('lizzieyzy-real.sgf'), target)
+  copyFileSync(fixture('real-analysis.sgf'), target)
   const game = parseGame(readFileSync(target, 'utf8'))
   const last = game.moves.length
   const result = await call(ctx.registered.get('go_write_review'), WORKSPACE, {
@@ -520,7 +520,7 @@ test('go_write_review: 带变化图的真实棋谱应能写回全部主线手数
   })
   assert.deepEqual(result.written, [21, last])
   assert.deepEqual(result.missing, [])
-  // 写回后棋谱仍完整：手数与变化图不变，原有 Lizzieyzy 注释保留
+  // 写回后棋谱仍完整：手数与变化图不变，原有分析注释保留
   const back = parseGame(readFileSync(target, 'utf8'))
   assert.equal(back.moves.length, last)
   assert.equal(back.stats.variations, game.stats.variations)
@@ -534,7 +534,7 @@ test('Config: 导出 Schema 且默认值齐全', () => {
   assert.ok(defaults)
 })
 
-test('真实 Lizzieyzy 棋谱全链路（解析→复盘→写回→报告）', async () => {
+test('真实带分析棋谱全链路（解析→复盘→写回→报告）', async () => {
   const parseValue = await call(ctx.registered.get('go_parse_sgf'), WORKSPACE, { path: 'real.sgf' })
   assert.equal(parseValue.info.app, 'Lizzie: 2.5.3')
   const reviewValue = await call(ctx.registered.get('go_review_moves'), WORKSPACE, { path: 'real.sgf' })

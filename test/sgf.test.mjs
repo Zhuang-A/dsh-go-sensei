@@ -39,7 +39,7 @@ test('decodeBuffer: 原始 GBK 文件回退 GBK 解码', () => {
 })
 
 test('repairMojibakeField: 干净的双重 mojibake 可回修', () => {
-  // '胜率' 的 UTF-8 字节被按 GBK 解码 = '鑳滅巼'（Lizzieyzy 注释实测形态）
+  // '胜率' 的 UTF-8 字节被按 GBK 解码 = '鑳滅巼'（第三方 GUI 注释实测形态）
   const mojibake = iconv.decode(iconv.encode('胜率', 'utf8'), 'gbk')
   assert.equal(mojibake, '鑳滅巼')
   assert.equal(repairMojibakeField(mojibake), '胜率')
@@ -88,7 +88,7 @@ test('parseGame: LZ 属性解析（引擎/胜率/候选/PV，KataGo 坐标）', 
   assert.deepEqual(move4.analysis.lz.candidates[0].pv, ['C17', 'N17', 'D16', 'F6'])
 })
 
-test('parseGame: C[] 注释分析提取（Lizzieyzy formatComment，落子者视角约定）', () => {
+test('parseGame: C[] 注释分析提取（第三方 GUI 注释格式，落子者视角约定）', () => {
   const game = parseGame(readFixture('synthetic-analysis.sgf').toString('utf8'))
   const ca = game.moves[3].analysis.commentAnalysis
   assert.equal(ca.winratePct, 22)
@@ -155,8 +155,8 @@ test('parseGame: 真实野狐棋谱（无分析，GBK/双重 mojibake 名）', (
   assert.equal(game.info.result, 'B+R')
 })
 
-test('parseGame: 真实 Lizzieyzy 带分析棋谱', () => {
-  const buf = readFixture('lizzieyzy-real.sgf')
+test('parseGame: 真实带分析棋谱', () => {
+  const buf = readFixture('real-analysis.sgf')
   const { text } = decodeBuffer(buf)
   const game = parseGame(text)
   assert.equal(game.info.app, 'Lizzie: 2.5.3')
@@ -266,11 +266,11 @@ test('injectComments: 变化图与主线在写回后均按树结构保留', () =
   assert.equal(reparsed.stats.variations, 1)
 })
 
-// 回归：Lizzieyzy 把实战进行写成第一个子节点，形如 `](;B[de]…)(;B[fd]…)`。
+// 回归：带分析棋谱把实战进行写成第一个子节点，形如 `](;B[de]…)(;B[fd]…)`。
 // 早期字符扫描把每个 '(' 都当旁支跳过，导致分叉点之后的手数全部判为不存在：
 // 106 手的真实棋谱只认到第 14 手（write-back 覆盖率 13%）。
 test('injectComments: 变叉之后的手数仍可写回（早期只认到第 14 手）', () => {
-  const real = readFileSync(fixture('lizzieyzy-real.sgf'), 'utf8')
+  const real = readFileSync(fixture('real-analysis.sgf'), 'utf8')
   const game = parseGame(real)
   assert.equal(game.moves.length, 106)
   assert.equal(game.stats.variations, 2)
@@ -284,7 +284,7 @@ test('injectComments: 变叉之后的手数仍可写回（早期只认到第 14 
   const back = parseGame(r.text)
   assert.equal(back.moves.length, 106, '写回后手数不变')
   assert.equal(back.stats.variations, 2, '写回后变化图不变')
-  assert.ok(back.moves[20].analysis.comment.includes('胜率'), '原有 Lizzieyzy 分析注释保留')
+  assert.ok(back.moves[20].analysis.comment.includes('胜率'), '原有分析注释保留')
   assert.ok(back.moves[20].analysis.comment.includes('分叉之后'), '新讲解已追加')
   assert.equal(back.moves[last - 1].analysis.comment, '末手')
 })

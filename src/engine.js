@@ -187,7 +187,7 @@ export function parseKataAnalysisOutput(stdout) {
 function toLzCandidates(moveInfos, maxCandidates = 3, opts = {}) {
   const frame = opts.winrateFrame === 'mover' ? 'mover' : 'black'
   // 该 turn 的行棋方 = 刚落子者的对手。LZ 约定里候选点的 winrate 记的是**该行棋方**视角
-  // （实测：lizzieyzy-real.sgf 第 21 手节点头部黑方 1.1%，其首选候选 F16 记 98.9%，
+  // （实测：real-analysis.sgf 第 21 手节点头部黑方 1.1%，其首选候选 F16 记 98.9%，
   //  即该节点行棋方白方的胜率）。故引擎的固定黑方口径必须换算，否则同一手棋旁边
   // 「头部落差（落子者视角）」与「候选百分比」是两个口径。
   // 见 review-check/_compare-lz-kata.mjs。
@@ -359,7 +359,7 @@ export async function runKataAnalyze(spawn, opts) {
     // move.color = 该手落子者；口径换算必须知道它（见 toLzLikeAnalysis）
     const analysis = toLzLikeAnalysis(moveInfos[0], move.color, { winrateFrame: frame })
     // 候选来自该 turn 的全部 moveInfos（按 order 升序），而非仅有最优那一手 ——
-    // 这样补算结果与消费 Lizzieyzy 棋谱时的"每手 ≤3 候选"形态一致。
+    // 这样补算结果与消费带分析棋谱时的「每手 ≤3 候选」形态一致。
     // 口径必须与该 turn 的行棋方一致（move.color 是刚落子者），见 toLzCandidates。
     analysis.lz.candidates = toLzCandidates(moveInfos, 3, { winrateFrame: frame, moveColor: move.color })
     move.analysis = analysis

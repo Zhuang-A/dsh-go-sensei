@@ -165,7 +165,7 @@ test('client: 点问题手一行 → inputActions.setDraft（真插入，非剪�
     submit() {},
   }
 
-  const gamePath = fixture('lizzieyzy-real.sgf')
+  const gamePath = fixture('real-analysis.sgf')
   const candidates = [
     { moveNumber: 21, color: 'B', coord: 'ff', coordLabel: 'F14', label: '大恶手', winrateLoss: 98.8, scoreLoss: 46.2, pv: [{ label: 'F16', winratePct: 98.9 }] },
     { moveNumber: 23, color: 'B', coord: 'fe', coordLabel: 'F15', label: '大恶手', winrateLoss: 81.3, scoreLoss: 22.1, pv: [{ label: 'F16', winratePct: 99.6 }] },
@@ -287,7 +287,7 @@ test('路由: 正常读取真实棋谱并返回问题手（含裁剪字段）', 
   assert.ok(route, '路由应被注册')
   assert.equal(route.kind, 'exact')
 
-  const r = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent(fixture('lizzieyzy-real.sgf')))
+  const r = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent(fixture('real-analysis.sgf')))
   assert.equal(r.status, 200)
   assert.equal(r.body.ok, true)
   assert.equal(r.body.data.moveCount, 106)
@@ -305,7 +305,7 @@ test('路由: cwd 参数控制相对路径解析基准', async () => {
   const ctx = makeRouteCtx()
   apply(ctx, Config(NO_ENGINE_CFG))
   const route = ctx.routes.find((r) => r.path === '/go-sensei/review')
-  const r = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent('lizzieyzy-real.sgf')
+  const r = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent('real-analysis.sgf')
     + '&cwd=' + encodeURIComponent(join(here, 'fixtures')))
   assert.equal(r.status, 200)
   assert.equal(r.body.data.moveCount, 106)
@@ -357,7 +357,7 @@ test('路由: 用 tools/result 记下的工作区根解析相对路径', async (
   const route = ctx.routes.find((r) => r.path === '/go-sensei/review')
 
   // 记根之前：相对路径解析不到
-  const before = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent('lizzieyzy-real.sgf'))
+  const before = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent('real-analysis.sgf'))
   assert.equal(before.status, 404, '未记根时相对路径应 404')
 
   // 模拟模型调用 go_parse_sgf 成功：观察者记住会话 cwd
@@ -366,7 +366,7 @@ test('路由: 用 tools/result 记下的工作区根解析相对路径', async (
   listener({ name: 'go_parse_sgf', agent: { session: { header: { cwd: join(here, 'fixtures') } } } })
 
   // 记根之后：同一相对路径命中
-  const after = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent('lizzieyzy-real.sgf'))
+  const after = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent('real-analysis.sgf'))
   assert.equal(after.status, 200)
   assert.equal(after.body.data.moveCount, 106)
 
@@ -428,7 +428,7 @@ test('路由: 已知根之下按 basename 有界发现（用户只写 game.sgf �
 
   // 纯文件名 + 深度 1 的子目录：应被发现
   const r = await callRoute(ctx.routes.find((x) => x.path === '/go-sensei/review'),
-    '/go-sensei/review?path=' + encodeURIComponent('lizzieyzy-real.sgf'))
+    '/go-sensei/review?path=' + encodeURIComponent('real-analysis.sgf'))
   assert.equal(r.status, 200, JSON.stringify(r.body))
   assert.equal(r.body.data.moveCount, 106)
 })

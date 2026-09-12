@@ -4,7 +4,7 @@
 //  1. 编码自愈：UTF-8 严格解码失败回退 GBK；对"UTF-8 被按 GBK 误解码"的双重
 //     mojibake 文本（野狐/部分国产导出器常见）尝试无损回修，回修不干净则保留原文。
 //  2. 结构化解析：基于 @sabaki/sgf 解析主变化线，产出棋局信息 + 每手元数据。
-//  3. 分析数据提取：支持 KataGo 风格属性（WV/DM/PV）与 Lizzieyzy 的
+//  3. 分析数据提取：支持 KataGo 风格属性（WV/DM/PV）与第三方 GUI 的
 //     "Move N 胜率 (差值) (引擎 / 计算量)" 注释格式（其 SGFParser 不读 WV/DM，
 //     只把分析写进 C[] 注释——实测源码确认）。
 //  4. 注释回写：token 级扫描向主变化线指定手插入/合并 C[] 注释，除注入点外
@@ -75,7 +75,7 @@ export function coordLabel(coord, size = 19) {
   return { label: `${col}${row}`, pass: false, x, y }
 }
 
-// KataGo/Lizzieyzy 候选点坐标为 "字母+行号"（如 R16、Q4），行号自下往上。
+// 分析数据里的候选点坐标为「字母+行号」（如 R16、Q4），行号自下往上。
 const KATA_COLUMNS = 'ABCDEFGHJKLMNOPQRSTUVWXYZ'
 
 /**
@@ -114,14 +114,14 @@ export function kataCoordList(coords, size = 19) {
 }
 
 // ---------------------------------------------------------------------------
-// 分析数据提取（三通道：KataGo 属性 WV/DM/PV；Lizzieyzy LZ/LZOP；
-// Lizzieyzy formatComment 的 C[] 文本。实测 2.5.3：LZ 头部为
+// 分析数据提取（三通道：KataGo 属性 WV/DM/PV；LZ/LZOP 分析属性；
+// 第三方 GUI 写进 C[] 的分析文本。实测该 GUI 2.5.3：LZ 头部为
 // "引擎 黑方胜率% 计算量 scoreMean 不确定度"，scoreMean 为白方视角领先；
 // C[] 为 "黑棋 胜率: x% (±y%)\n领先: z (Δ)\n(引擎 / 计算量)"，黑方视角。）
 // ---------------------------------------------------------------------------
 
 /**
- * 解析 Lizzieyzy LZ/LZOP 属性值。
+ * 解析第三方 GUI 写入的 LZ/LZOP 分析属性。
  * 实测约定（2.5.3，config winrateAlwaysBlack=false 默认）：
  *   头部 winrate = 落子者（根节点为行棋方）的胜率；
  *   头部 score = 对手视角领先（= 落子者领先取负）。
@@ -133,7 +133,7 @@ export function parseLz(value) {
   if (typeof value !== 'string' || value.trim() === '') return null
   const out = { candidates: [] }
   const lines = value.split('\n')
-  // playouts 允许 k/M 量级后缀（如 "3.9k" / "1.2M"）：Lizzieyzy 分析量超过 999 后
+  // playouts 允许 k/M 量级后缀（如 "3.9k" / "1.2M"）：第三方 GUI 的分析量超过 999 后
   // 会改写成这种紧凑写法，早期只接受纯数字会让该手整条头部解析失败（winrate 丢失）。
   const head = /^(\S+)\s+([\d.]+)\s+([\d.]+[kKmM]?)\s+(-?[\d.]+)\s+([\d.]+)/.exec(lines[0]?.trim() ?? '')
   if (head) {
@@ -162,7 +162,7 @@ export function parseLz(value) {
   return out
 }
 
-// Lizzieyzy formatComment 格式："Move <N> 黑胜率: <x>% (±y%) (引擎 / 计算量)"，
+// 第三方 GUI 的分析注释格式："Move <N> 黑胜率: <x>% (±y%) (引擎 / 计算量)"，
 // 以及 KataGo 注释行式 "engine winrate playouts scoreMean ..."。
 // 以下正则尽量宽松，按注释常见形态提取数值。
 
@@ -178,7 +178,7 @@ const COMMENT_STDEV_PATTERN = /不确定度\s*[:：]?\s*([\d.]+)/
 const COMMENT_ENGINE_PATTERN = /\(([^()/]{1,40})\s*\/\s*([^()]{0,20})\)/
 
 /**
- * 从注释文本中提取 Lizzieyzy/KataGo 风格分析数字（formatComment 产物）。
+ * 从注释文本中提取分析数字（第三方 GUI / KataGo 的注释产物）。
  * 实测约定：胜率标签（黑棋/白棋）= 落子者颜色，数值 = 落子者胜率；
  * "领先" = 落子者视角领先（正 = 落子者领先）。
  * @param {string} comment 注释全文
@@ -277,7 +277,7 @@ export function parseGame(text) {
     },
   }
 
-  // 统计主变化线之外的旁支数量（Lizzieyzy 保存的变化图即旁支）。
+  // 统计主变化线之外的旁支数量（第三方 GUI 保存的变化图即旁支）。
   let variations = 0
   const moves = []
   let node = root
@@ -312,7 +312,7 @@ export function parseGame(text) {
 }
 
 /**
- * 从单个节点属性提取分析数据（KataGo 属性 + Lizzieyzy LZ/C 三通道）。
+ * 从单个节点属性提取分析数据（KataGo 属性 + LZ 分析属性 + C[] 注释三通道）。
  */
 function extractAnalysis(data, coord, isPass, size) {
   const analysis = { moves: isPass ? 0 : 1 }
@@ -430,10 +430,10 @@ function escapeComment(text) {
  * 再整树重新序列化。
  *
  * 为什么不自己扫描括号：SGF 的旁支括号与"主线继续"在文本上无法用朴素深度计数
- * 区分。Lizzieyzy 保存分析时把实战进行写成**第一个子节点**，而形如
+ * 区分。带分析的棋谱常把实战进行写成**第一个子节点**，而形如
  * `](;B[de]…)(;B[fd]…)` 的写法看起来像"旁支紧随其后"，早期实现据此无条件跳过
  * 每个 `(`，结果跳过了真正的主线：106 手的棋谱只认到第 14 手，其余手全部
- * 被判为"不存在"而无法写回（实测 lizzieyzy-real.sgf）。
+ * 被判为"不存在"而无法写回（实测 real-analysis.sgf）。
  * 交给解析器处理树结构即不存在这一歧义。
  *
  * 代价：输出为重新序列化的 SGF（属性集合与顺序保持，手数/旁支不丢），

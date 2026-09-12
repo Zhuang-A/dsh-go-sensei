@@ -99,8 +99,8 @@ test('reviewGame: 纯棋谱（无分析）降级 theory 模式', () => {
 
 // 回归：候选点必须是「落子者自己改下的着法 + 落子者自己视角」。
 // 旧实现取本手节点 → 拿到的是对手应手，且引擎通道还是固定黑方口径（实测差 98.9%↔1.1%）。
-test('reviewGame: 候选取上一手节点且为落子者视角（真实 Lizzieyzy 棋谱）', () => {
-  const game = loadGame('lizzieyzy-real.sgf')
+test('reviewGame: 候选取上一手节点且为落子者视角（真实带分析棋谱）', () => {
+  const game = loadGame('real-analysis.sgf')
   const { candidates } = reviewGame(game)
   const m21 = candidates.find((c) => c.moveNumber === 21)
   assert.ok(m21, '第 21 手（黑 F14）应被标记为问题手')
@@ -139,8 +139,8 @@ test('reviewGame: 虚着手不参与判定', () => {
   assert.equal(candidates.length, 0)
 })
 
-test('reviewGame: 真实 Lizzieyzy 棋谱能产出候选且数据自洽', () => {
-  const game = loadGame('lizzieyzy-real.sgf')
+test('reviewGame: 真实带分析棋谱能产出候选且数据自洽', () => {
+  const game = loadGame('real-analysis.sgf')
   const { mode, candidates, summary } = reviewGame(game)
   assert.equal(mode, 'analysis')
   assert.ok(summary.analyzedMoves >= summary.totalMoves * 0.5, `分析覆盖率应过半：${summary.analyzedMoves}/${summary.totalMoves}`)

@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { parseGame } from '../src/sgf.js'
 import { buildKataJsonQuery, parseKataAnalysisOutput, runKataAnalyze, normalizeKomi, extractKataErrors, readWinrateFrame } from '../src/engine.js'
+import { resolveEngine, PACKAGE_DIR } from '../src/engine-resolve.js'
 
 const GAME = parseGame('(;GM[1]FF[4]SZ[19]KM[7.5]RU[Chinese];B[pd];W[dp];B[qp];W[dd])')
 
@@ -189,10 +190,11 @@ test('parseKataAnalysisOutput: 跳过 pass/resign 与噪声行', () => {
 
 // 真实引擎集成测试（需要本机 KataGo；无 KATAGO_PATH 时跳过）
 const KATAGO_PATH = process.env.KATAGO_PATH
-const ENGINE_DIR = 'C:/AI_GO-main/Lizzieyzy-KataGo-Portable_v1.1/engine_18b'
-const realKataGo = KATAGO_PATH ?? ENGINE_DIR + '/katago.exe'
-const realConfig = ENGINE_DIR + '/analysis_example.cfg'
-const realModel = ENGINE_DIR + '/kata1-b18c384nbt-s9996604416-d4316597426.bin.gz'
+// 默认用随包分发的引擎：任何人 clone 后都能跑真机测试，不再依赖某台机器的路径。
+const bundled = resolveEngine({ engineDir: join(PACKAGE_DIR, 'engine') })
+const realKataGo = KATAGO_PATH ?? bundled.kataGoPath
+const realConfig = bundled.configPath
+const realModel = bundled.modelPath
 
 function spawnSyncAdapter(exe, config, model) {
   return (spec) => {
@@ -308,7 +310,7 @@ function runWithFakeEngine(stdout, configText, range) {
 // 回归：候选点的 winrate 在 LZ 约定里记的是「该 turn 行棋方」视角，而引擎配置写死
 // reportAnalysisWinratesAs = BLACK（固定黑方）。不换算就会出现同一手棋旁边
 // 「头部落差（落子者视角）」与「候选百分比（黑方视角）」两个口径 —— 实测第 21 手
-// 候选 F16 在 Lizzieyzy 文件里记 98.9%（白方视角），旧实现输出 1.1%。
+// 候选 F16 在参考分析棋谱里记 98.9%（白方视角），旧实现输出 1.1%。
 test('runKataAnalyze: 候选点胜率换算到该 turn 行棋方视角', async () => {
   const stdout = [
     // turn2 = 白 dp 之后 → 行棋方为黑 → 黑方口径原样使用

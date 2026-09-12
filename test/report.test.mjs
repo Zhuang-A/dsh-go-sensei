@@ -57,7 +57,7 @@ const exec = (cwd) => ({ callId: 'c', name: 'go_export_report', arguments: {}, a
 // extractUserNotes：从混合注释里剔掉引擎分析行
 // ---------------------------------------------------------------------------
 
-test('extractUserNotes: 剔除 Lizzieyzy 分析行，保留人写的讲解', () => {
+test('extractUserNotes: 剔除引擎分析行，保留人写的讲解', () => {
   const comment = [
     '黑棋 胜率: 1.1% (-98.9%)',
     '领先: -14.2 (-46.2) 不确定度: 15.3',
@@ -98,8 +98,8 @@ test('extractUserNotes: 空/非字符串安全', () => {
   assert.deepEqual(extractUserNotes(null), [])
 })
 
-test('extractUserNotes: 真实 Lizzieyzy 棋谱无讲解时取不到内容', () => {
-  const game = parseGame(readFileSync(fixture('lizzieyzy-real.sgf'), 'utf8'))
+test('extractUserNotes: 真实带分析棋谱无讲解时取不到内容', () => {
+  const game = parseGame(readFileSync(fixture('real-analysis.sgf'), 'utf8'))
   const withNotes = game.moves.filter((m) => extractUserNotes(m.analysis?.comment).length > 0)
   assert.equal(withNotes.length, 0, '原始分析谱里不应被误判出讲解')
 })
@@ -109,7 +109,7 @@ test('extractUserNotes: 真实 Lizzieyzy 棋谱无讲解时取不到内容', () 
 // ---------------------------------------------------------------------------
 
 test('buildReportSkeleton: 未写回讲解时给出明确提示', () => {
-  const game = parseGame(readFileSync(fixture('lizzieyzy-real.sgf'), 'utf8'))
+  const game = parseGame(readFileSync(fixture('real-analysis.sgf'), 'utf8'))
   const md = buildReportSkeleton(game, CFG)
   assert.ok(md.includes('## 逐手讲解'))
   assert.ok(md.includes('棋谱中尚无复盘讲解'), '应提示尚无讲解')
@@ -117,7 +117,7 @@ test('buildReportSkeleton: 未写回讲解时给出明确提示', () => {
 })
 
 test('buildReportSkeleton: 已写回的讲解被汇总进"逐手讲解"', () => {
-  const src = readFileSync(fixture('lizzieyzy-real.sgf'), 'utf8')
+  const src = readFileSync(fixture('real-analysis.sgf'), 'utf8')
   const { text } = injectComments(src, [
     { moveNumber: 21, comment: '第 21 手讲解：这手应该下在 F16。' },
     { moveNumber: 50, comment: '第 50 手讲解：偏保守。' },
@@ -133,7 +133,7 @@ test('buildReportSkeleton: 已写回的讲解被汇总进"逐手讲解"', () => 
 })
 
 test('buildReportSkeleton: 报告同时含问题手表格与讲解', () => {
-  const src = readFileSync(fixture('lizzieyzy-real.sgf'), 'utf8')
+  const src = readFileSync(fixture('real-analysis.sgf'), 'utf8')
   const { text } = injectComments(src, [{ moveNumber: 21, comment: '讲解内容 X' }])
   const md = buildReportSkeleton(parseGame(text), CFG)
   assert.ok(md.includes('| 手数 | 方 | 位置 | 标签 |'), '含问题手表头')
@@ -191,7 +191,7 @@ test('go_export_report: 端到端写回讲解后导出，报告含讲解', async
   rmSync(WORK, { recursive: true, force: true })
   mkdirSync(WORK, { recursive: true })
   const target = join(WORK, 'game.sgf')
-  writeFileSync(target, readFileSync(fixture('lizzieyzy-real.sgf')))
+  writeFileSync(target, readFileSync(fixture('real-analysis.sgf')))
   const ctx = makeCtx(WORK)
   apply(ctx, CFG)
 
