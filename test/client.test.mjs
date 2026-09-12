@@ -432,3 +432,223 @@ test('路由: 已知根之下按 basename 有界发现（用户只写 game.sgf �
   assert.equal(r.status, 200, JSON.stringify(r.body))
   assert.equal(r.body.data.moveCount, 106)
 })
+
+// ---------------------------------------------------------------------------
+// 内置棋盘：Host 数据（board 字段 / 讲解指针）、Client 渲染与规则
+// ---------------------------------------------------------------------------
+
+/** 数一数渲染出的棋子（棋子的 className 标记了黑白）。 */
+function stoneCounts(tree) {
+  const nodes = walk(tree)
+  const pick = (mark) => nodes.filter((n) => n.type === 'circle'
+    && String(n.props.className || '').includes(mark)).length
+  return { black: pick('dgs-stone-b'), white: pick('dgs-stone-w') }
+}
+
+/** 5 手的小局面：最后一手提掉中间的白子，用来验证"棋盘要按规则画"。 */
+const CAPTURE_BOARD = {
+  size: 19,
+  komi: 7.5,
+  handicap: 0,
+  moves: [
+    { c: 'B', x: 2, y: 3 },
+    { c: 'W', x: 3, y: 3 },
+    { c: 'B', x: 4, y: 3 },
+    { c: 'B', x: 3, y: 2 },
+    { c: 'B', x: 3, y: 4 },
+  ],
+  setup: { black: [], white: [] },
+}
+
+test('client: 棋盘纯规则（落子/提子/摆子/坐标换算）', () => {
+  const { plugin } = loadClient()
+  const { boardAt, boardLabel, parsePointLabel } = plugin.__internals
+  assert.equal(typeof boardAt, 'function', '__internals 应暴露棋盘规则供单测')
+
+  assert.equal(boardAt(CAPTURE_BOARD, 4)[3 * 19 + 3], 2, '第 4 手后白子还在')
+  assert.equal(boardAt(CAPTURE_BOARD, 5)[3 * 19 + 3], 0, '第 5 手应提掉白子')
+  assert.equal(boardAt(CAPTURE_BOARD, 0).filter((v) => v !== 0).length, 0, '开局空盘')
+
+  const handicap = { size: 9, moves: [], setup: { black: [[2, 2], [6, 6]], white: [[4, 4]] } }
+  const grid = boardAt(handicap, 0)
+  assert.equal(grid[2 * 9 + 2], 1)
+  assert.equal(grid[6 * 9 + 6], 1)
+  assert.equal(grid[4 * 9 + 4], 2)
+
+  assert.equal(boardLabel(15, 3, 19), 'Q16')
+  assert.deepEqual(parsePointLabel('Q16', 19), { x: 15, y: 3 })
+  assert.equal(parsePointLabel('I5', 19), null, '字母 I 不是合法列')
+})
+
+test('路由: /go-sensei/review 一并返回棋盘数据（尺寸/手顺/摆子）', async () => {
+  const ctx = makeRouteCtx()
+  apply(ctx, Config(NO_ENGINE_CFG))
+  const route = ctx.routes.find((r) => r.path === '/go-sensei/review')
+
+  const r = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent(fixture('synthetic-analysis.sgf')))
+  assert.equal(r.status, 200)
+  const board = r.body.data.board
+  assert.ok(board, '应返回 board 字段（客户端画盘只靠它）')
+  assert.equal(board.size, 19)
+  assert.equal(board.moves.length, r.body.data.moveCount)
+  // 首手 B:pd —— SGF 坐标 pd 对应 x=15,y=3，客户端据此落子
+  assert.deepEqual(board.moves[0], { c: 'B', x: 15, y: 3 })
+  assert.deepEqual(board.setup, { black: [], white: [] })
+
+  const real = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent(fixture('real-analysis.sgf')))
+  assert.equal(real.status, 200)
+  assert.equal(real.body.data.board.moves.length, 106, '手顺长度必须与手数一致')
+  assert.ok(real.body.data.players, '面板表头要显示棋手名')
+})
+
+test('路由: /go-sensei/focus 跟随讲解（工具调用 -> 局面指针）', async () => {
+  const ctx = makeRouteCtx()
+  apply(ctx, Config(NO_ENGINE_CFG))
+  const listener = ctx.listeners.get('tools/result')
+  const focusRoute = ctx.routes.find((r) => r.path === '/go-sensei/focus')
+  assert.ok(focusRoute, '应注册 /go-sensei/focus')
+
+  let r = await callRoute(focusRoute, '/go-sensei/focus')
+  assert.equal(r.body.ok, true)
+  assert.equal(r.body.focus, null, '还没有讲解时指针为空')
+
+  const at = (name, args, extra) => listener({ name, arguments: args, agent: { session: { header: { cwd: 'C:/dsh/WeiQi' } } } }, extra)
+
+  at('go_position_context', { path: 'review-check/_accept/game.sgf', moveNumber: 21 })
+  r = await callRoute(focusRoute, '/go-sensei/focus')
+  assert.equal(r.body.focus.name, 'game.sgf')
+  assert.equal(r.body.focus.moveNumber, 21)
+  assert.equal(r.body.focus.cwd, 'C:/dsh/WeiQi')
+  assert.equal(r.body.focus.kind, 'context')
+  assert.equal(r.body.focus.seq, 1)
+
+  // 失败的调用不改变讲解位置（模型试错路径很常见）
+  at('go_position_context', { path: 'nope.sgf', moveNumber: 99 }, { isError: true })
+  r = await callRoute(focusRoute, '/go-sensei/focus')
+  assert.equal(r.body.focus.moveNumber, 21)
+  assert.equal(r.body.focus.seq, 1)
+
+  // 回写注释：正在讲的位置 = 第一条注释的手数
+  at('go_write_review', { path: 'game.sgf', entries: [{ moveNumber: 33, comment: 'x' }, { moveNumber: 47, comment: 'y' }] })
+  r = await callRoute(focusRoute, '/go-sensei/focus')
+  assert.equal(r.body.focus.moveNumber, 33)
+  assert.equal(r.body.focus.kind, 'write')
+  assert.equal(r.body.focus.seq, 2)
+
+  // 只读棋谱：知道在讲哪一盘，但不知道第几手
+  at('go_parse_sgf', { path: 'other.sgf' })
+  r = await callRoute(focusRoute, '/go-sensei/focus')
+  assert.equal(r.body.focus.name, 'other.sgf')
+  assert.equal(Object.hasOwn(r.body.focus, 'moveNumber'), false)
+
+  // 非 go_ 工具不碰指针
+  listener({ name: 'bash', arguments: { path: 'x.sgf', moveNumber: 1 }, agent: { session: { header: { cwd: 'C:/dsh/WeiQi' } } } })
+  r = await callRoute(focusRoute, '/go-sensei/focus')
+  assert.equal(r.body.focus.name, 'other.sgf')
+})
+
+test('client: 棋盘可收起；点问题手自动展开并跳到那一手（含红圈/绿圈）', async () => {
+  const { registered, react } = loadClient()
+  const drafts = []
+  const actions = {
+    setDraft: (text) => drafts.push(text),
+    addAttachments: () => false,
+    removeAttachment() {},
+    pruneAttachments() {},
+    submit() {},
+  }
+  const gamePath = fixture('real-analysis.sgf')
+  const candidates = [{
+    moveNumber: 3,
+    color: 'B',
+    coord: 'ed',
+    coordLabel: 'E16',
+    label: '失误',
+    labelKey: 'mistake',
+    winrateLoss: 12.3,
+    scoreLoss: 4.5,
+    pv: [{ label: 'Q16', winratePct: 55.5 }, { label: 'D4', winratePct: 48.2 }],
+  }]
+  globalThis.fetch = async (url) => ({
+    ok: true,
+    json: async () => (String(url).includes('/go-sensei/focus')
+      ? { ok: true, focus: null }
+      : {
+          ok: true,
+          data: {
+            path: gamePath, mode: 'analysis', level: '18K', moveCount: 5, variations: 0,
+            candidates, board: CAPTURE_BOARD,
+            players: { black: '甲', white: '乙' },
+          },
+        }),
+  })
+
+  const props = { inputActions: actions, useSession: () => ({ header: { cwd: 'C:/dsh/WeiQi' } }) }
+  react.reset()
+  let tree = registered[0].component(props)
+  walk(tree).find((n) => n.type === 'button' && texts([n]).includes('展开')).props.onClick()
+  react.reset()
+  tree = registered[0].component(props)
+  walk(tree).find((n) => n.type === 'input').props.onChange({ target: { value: gamePath } })
+  react.reset()
+  tree = registered[0].component(props)
+  walk(tree).find((n) => n.type === 'button' && texts([n]).includes('读取问题手')).props.onClick()
+  await new Promise((r) => setTimeout(r, 30))
+  react.reset()
+  tree = registered[0].component(props)
+
+  // 收起态：只有表头，没有 svg；表头给出当前手
+  assert.ok(texts(walk(tree)).join('|').includes('棋盘 ▸'), '应有收起态的棋盘入口')
+  assert.equal(walk(tree).find((n) => n.type === 'svg'), undefined, '收起时不应渲染棋盘')
+
+  // 点问题手：自动展开 + 跳到第 3 手 + 插入追问语
+  const items = walk(tree).filter((n) => n.type === 'button' && n.props.className === 'dgs-item')
+  assert.equal(items.length, 1)
+  items[0].props.onClick()
+  assert.ok(drafts[0].includes('第 3 手'), drafts[0])
+  react.reset()
+  tree = registered[0].component(props)
+  const svg = walk(tree).find((n) => n.type === 'svg')
+  assert.ok(svg, '点问题手后棋盘应自动展开')
+  assert.equal(svg.props['data-dgs-board'], '19')
+  assert.equal(stoneCounts(tree).black, 2, '第 3 手时盘上 2 颗黑子')
+  assert.equal(stoneCounts(tree).white, 1)
+  const nodes = walk(tree)
+  assert.ok(nodes.some((n) => n.type === 'circle' && n.props.stroke === '#d01013'),
+    '问题手圆圈按严重度取色（失误 = Lizzieyzy 的 (208,16,19)）')
+  const bestRing = nodes.find((n) => n.type === 'circle' && n.props.stroke === '#0000ff')
+  assert.ok(bestRing, 'AI 首选应有蓝圈（Lizzieyzy showBlueRing）')
+  assert.ok(nodes.some((n) => n.type === 'circle' && n.props.fill === 'rgba(0, 255, 255, 0.5)'),
+    'AI 首选应是青色实心圆')
+  // Q16 -> x=15,y=3 -> pos = 8 + 15*(84/18) = 78, 8 + 3*(84/18) = 22
+  assert.ok(Math.abs(bestRing.props.cx - 78) < 0.01 && Math.abs(bestRing.props.cy - 22) < 0.01,
+    `蓝圈应在 Q16（实际 ${bestRing.props.cx},${bestRing.props.cy}）`)
+  assert.ok(nodes.some((n) => n.type === 'rect' && n.props.fill === '#ffc800'), '首选点胜率用橙底信息条')
+  assert.ok(nodes.some((n) => n.type === 'circle' && n.props.fill === '#1668ff'), '变化图第 2 手应有蓝点')
+  const text = texts(nodes).join('|')
+  assert.ok(text.includes('AI 首选 Q16'), text)
+  assert.ok(text.includes('○ 实战 3 手 E16'), text)
+  assert.ok(text.includes('D4'), '说明行应给出变化图后续')
+
+  // 步进：⏮ 回开局 → ▶ 一手；⏭ 回末手（提子生效，白子消失）
+  const click = (label) => {
+    const button = walk(tree).find((n) => n.type === 'button' && texts([n]).includes(label))
+    assert.ok(button, `找不到按钮 ${label}`)
+    button.props.onClick()
+    react.reset()
+    tree = registered[0].component(props)
+  }
+  click('⏮')
+  assert.equal(stoneCounts(tree).black + stoneCounts(tree).white, 0, '开局空盘')
+  assert.ok(texts(walk(tree)).join('|').includes('开局'), '表头应显示开局')
+  click('▶')
+  assert.equal(stoneCounts(tree).black, 1)
+  click('⏭')
+  const end = stoneCounts(tree)
+  assert.equal(end.black, 4, '末手前黑 4 子')
+  assert.equal(end.white, 0, '末手提掉白子')
+
+  // 再点一次「棋盘 ▾」应收起（可收起）
+  click('棋盘 ▾')
+  assert.equal(walk(tree).find((n) => n.type === 'svg'), undefined, '收起后棋盘应消失')
+})

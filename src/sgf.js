@@ -238,7 +238,8 @@ function nodeDataAsObject(data) {
  * @param {string} text SGF 文本
  * @returns {object} 见下方结构
  *   { info: { size, komi, handicap, result, players: {black, white, blackRank, whiteRank},
- *             date, gameName, rule, app, event }, moves: [...], stats: { games, variations, encodingNote } }
+ *             date, gameName, rule, app, event }, moves: [...],
+ *     setup: { black: string[], white: string[] }, stats: { games, variations, encodingNote } }
  *   每手: { number, color: 'B'|'W', coord, pass, analysis: { winrateWhite?, scoreLeadBlack?, pv?,
  *             comment?, commentAnalysis?, moves } | null }
  */
@@ -308,7 +309,32 @@ export function parseGame(text) {
     node = child
   }
 
-  return { info, moves, stats: { games: trees.length, variations, moves: number } }
+  // 盘上初始就有的子（让子局、死活题、复盘摆图）：AB/AW 是根节点属性，
+  // 不是着手，所以不在 moves 里。面板棋盘缺了它们就会少子，故单独返回。
+  const setup = {
+    black: extractSetup(rootData.AB, info.size),
+    white: extractSetup(rootData.AW, info.size),
+  }
+
+  return { info, moves, setup, stats: { games: trees.length, variations, moves: number } }
+}
+
+/**
+ * 提取根节点的摆子坐标（AB/AW），过滤虚着与越界坐标。
+ * @param {unknown} value SGF 属性值数组（如 ['dd','pp']）
+ * @param {number} size 棋盘路数
+ * @returns {string[]} 合法的 SGF 坐标数组
+ */
+function extractSetup(value, size) {
+  if (!Array.isArray(value)) return []
+  const out = []
+  for (const raw of value) {
+    const coord = String(raw ?? '')
+    const at = coordLabel(coord, size)
+    if (at.pass || at.x < 0 || at.y < 0 || at.x >= size || at.y >= size) continue
+    out.push(coord)
+  }
+  return out
 }
 
 /**

@@ -66,6 +66,21 @@ window.__ModuleLoader__.load({
       '[data-dgs] .dgs-badge { margin-left: auto; font-size: 10px; padding: 0 6px;',
       '  border-radius: 999px; border: 1px solid currentColor; }',
       '[data-dgs] .dgs-l2 { font-size: 11px; color: var(--dsw-alias-label-secondary, #9aa4b2); }',
+      // ── 内置棋盘（可收起）──────────────────────────────────────────────
+      '[data-dgs] .dgs-boardwrap { border-top: 1px dashed var(--dsw-alias-border-l1, rgba(255,255,255,.12));',
+      '  margin-top: 8px; padding-top: 6px; }',
+      '[data-dgs] .dgs-boardhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }',
+      '[data-dgs] .dgs-boardhead .dgs-sub { flex: 1; min-width: 0; }',
+      '[data-dgs] .dgs-split { display: flex; gap: 12px; align-items: flex-start; margin-top: 6px; }',
+      '[data-dgs] .dgs-col-board { flex: 0 0 auto; width: 300px; max-width: 46%; }',
+      '[data-dgs] .dgs-col-list { flex: 1; min-width: 0; }',
+      '[data-dgs] .dgs-board { display: block; width: 100%; height: auto; border-radius: 6px; }',
+      '[data-dgs] .dgs-ctl { display: flex; align-items: center; gap: 4px; margin-top: 6px; }',
+      '[data-dgs] .dgs-ctl button { padding: 2px 7px; }',
+      '[data-dgs] input[type=range] { flex: 1; min-width: 0; padding: 0; background: transparent; border: none; }',
+      '[data-dgs] .dgs-note { font-size: 11px; color: var(--dsw-alias-label-secondary, #9aa4b2); margin-top: 4px; }',
+      '[data-dgs] .dgs-prob { color: var(--dsw-alias-state-error-primary, #e5534b); }',
+      '[data-dgs] .dgs-rec { color: var(--dsw-alias-state-success-primary, #3fb950); }',
     ].join('\n')
 
     /** 注入样式（幂等；只插一次，避免重复注册时堆积）。 */
@@ -88,6 +103,359 @@ window.__ModuleLoader__.load({
       if (text.indexOf('失误') >= 0) return 'var(--dsw-alias-state-warn-primary, #d29922)'
       return 'var(--dsw-alias-label-secondary, #9aa4b2)'
     }
+
+    // -----------------------------------------------------------------------
+    // 内置棋盘：规则 + 渲染
+    //
+    // 为什么规则要写在客户端：让子、提子、虚着之后，盘面无法由"手顺列表"
+    // 直接得出——中间某一步可能整块被提掉。判死活是画对棋盘的最小前提，
+    // 所以这里带一份只做"落子/提子"的迷你规则（不含劫争判定：复盘场景下
+    // 每一手都是棋谱上真实存在的着手，不会出现需要判劫的非法手）。
+    // -----------------------------------------------------------------------
+
+    /** 列标（跳过 I，与 sgf.js coordLabel 一致）。 */
+    var BOARD_COLS = 'ABCDEFGHJKLMNOPQRST'
+    /** SVG 视口是 100x100 的无量纲坐标，实际尺寸交给 CSS。 */
+    var BOARD_VIEW = 100
+    /** 边距：给坐标标注留出的空间（视口单位）。 */
+    var BOARD_PAD = 8
+
+    // ── 与 Lizzieyzy 对齐的视觉约定 ────────────────────────────────────────
+    // 参照其 FloatBoardRenderer.java：drawMoveRankMark（最后一手 = 反色小圆点，
+    // 半径 = 0.22 × 格宽）、drawMoveRankMarkCircle:1052（失误按严重度取
+    // 紫/红/橙三档色）、drawLeelazSuggestions:1498（AI 首选 = 青色实心圆 +
+    // 蓝色外圈，showBlueRing 默认开；其余候选按计算量在红→绿之间取色）、
+    // drawStringForOrder:2811（推荐点信息 = 橙底黑字）、drawGoban:2892
+    // （网格纯黑、外框线加粗、白子黑色描边）。用户平时看惯了这套配色，
+    // 讲解时两边的"哪个点是什么意思"才对得上。
+    var LAST_MOVE_R = 0.22
+    var BEST_FILL = 'rgba(0, 255, 255, 0.5)' // theme best-move-color [0,255,255,240]
+    var BEST_RING = '#0000ff' // Color.BLUE（showBlueRing）
+    var BEST_INFO_BG = '#ffc800' // Color.ORANGE
+    var PV_BLUE = '#1668ff'
+    var MARK_COLORS = {
+      blunder: '#9b1996', // (155,25,150) 最严重一档
+      mistake: '#d01013', // (208,16,19)
+      inaccuracy: '#c88c32', // (200,140,50)
+    }
+
+    /** 问题手标记色：优先按 labelKey，回退按中文标签（老版本 Host 不带 key）。 */
+    function markColor(labelKey, labelText) {
+      if (labelKey !== undefined && MARK_COLORS[labelKey] !== undefined) return MARK_COLORS[labelKey]
+      var text = String(labelText == null ? '' : labelText)
+      if (text.indexOf('大恶手') >= 0) return MARK_COLORS.blunder
+      if (text.indexOf('失误') >= 0) return MARK_COLORS.mistake
+      return MARK_COLORS.inaccuracy
+    }
+
+    /** 交叉点 -> 人类标签（如 (15,3) -> 'Q16'）。 */
+    function boardLabel(x, y, size) {
+      var col = x >= 0 && x < BOARD_COLS.length ? BOARD_COLS.charAt(x) : String(x)
+      return col + String(size - y)
+    }
+
+    /** KataGo 风格标签（'R16'）-> {x, y}；解析不了返回 null。 */
+    function parsePointLabel(label, size) {
+      var m = /^([A-Za-z])(\d{1,2})$/.exec(String(label == null ? '' : label))
+      if (m === null) return null
+      var x = BOARD_COLS.indexOf(m[1].toUpperCase())
+      var row = parseInt(m[2], 10)
+      if (x < 0 || !(row >= 1 && row <= size)) return null
+      return { x: x, y: size - row }
+    }
+
+    /** 空盘：0 空、1 黑、2 白；下标 = y * size + x。 */
+    function emptyGrid(size) {
+      var grid = new Array(size * size)
+      for (var i = 0; i < grid.length; i++) grid[i] = 0
+      return grid
+    }
+
+    /**
+     * 取 (x,y) 所在棋串的同色点与气数（气点去重）。空点返回 null。
+     * @returns {{ stones: number[][], libs: number }|null}
+     */
+    function groupAt(grid, size, x, y) {
+      var color = grid[y * size + x]
+      if (color === 0) return null
+      var stones = []
+      var libs = 0
+      var seen = {}
+      var stack = [[x, y]]
+      seen[y * size + x] = true
+      while (stack.length > 0) {
+        var p = stack.pop()
+        stones.push(p)
+        var nb = [[p[0] + 1, p[1]], [p[0] - 1, p[1]], [p[0], p[1] + 1], [p[0], p[1] - 1]]
+        for (var i = 0; i < nb.length; i++) {
+          var nx = nb[i][0]
+          var ny = nb[i][1]
+          if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue
+          var key = ny * size + nx
+          if (seen[key] === true) continue
+          seen[key] = true
+          var v = grid[key]
+          if (v === 0) libs += 1
+          else if (v === color) stack.push([nx, ny])
+        }
+      }
+      return { stones: stones, libs: libs }
+    }
+
+    /** 落子并提掉无气的对方棋串；返回被提子数。 */
+    function playStone(grid, size, x, y, color) {
+      grid[y * size + x] = color
+      var opp = color === 1 ? 2 : 1
+      var captured = 0
+      var nb = [[x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]]
+      for (var i = 0; i < nb.length; i++) {
+        var nx = nb[i][0]
+        var ny = nb[i][1]
+        if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue
+        if (grid[ny * size + nx] !== opp) continue
+        var g = groupAt(grid, size, nx, ny)
+        if (g !== null && g.libs === 0) {
+          for (var j = 0; j < g.stones.length; j++) {
+            grid[g.stones[j][1] * size + g.stones[j][0]] = 0
+            captured += 1
+          }
+        }
+      }
+      var own = groupAt(grid, size, x, y)
+      if (own !== null && own.libs === 0) {
+        // 自杀：真实棋谱不会出现，防御性清掉，免得不合规则的谱把棋盘画坏
+        for (var k = 0; k < own.stones.length; k++) grid[own.stones[k][1] * size + own.stones[k][0]] = 0
+      }
+      return captured
+    }
+
+    /**
+     * 摆出「前 upto 手」的局面（含 AB/AW 摆子）。
+     * @param {{ size: number, moves: object[], setup?: object }} board 服务端 compactBoard 的产物
+     * @param {number} upto 显示到第几手（0 = 开局）
+     * @returns {number[]} 盘面网格
+     */
+    function boardAt(board, upto) {
+      var size = board.size
+      var grid = emptyGrid(size)
+      var setup = board.setup || {}
+      var black = setup.black || []
+      var white = setup.white || []
+      var i
+      for (i = 0; i < black.length; i++) grid[black[i][1] * size + black[i][0]] = 1
+      for (i = 0; i < white.length; i++) grid[white[i][1] * size + white[i][0]] = 2
+      var moves = board.moves || []
+      var limit = Math.max(0, Math.min(upto, moves.length))
+      for (i = 0; i < limit; i++) {
+        var m = moves[i]
+        if (m.x < 0 || m.y < 0) continue
+        playStone(grid, size, m.x, m.y, m.c === 'B' ? 1 : 2)
+      }
+      return grid
+    }
+
+    /** 星位（19/13/9 路常用坐标，其余路数不画）。 */
+    function starPoints(size) {
+      var base = size === 19 ? [3, 9, 15] : size === 13 ? [3, 6, 9] : size === 9 ? [2, 4, 6] : []
+      var out = []
+      for (var i = 0; i < base.length; i++) {
+        for (var j = 0; j < base.length; j++) out.push([base[i], base[j]])
+      }
+      return out
+    }
+
+    /**
+     * 画一张棋盘（SVG）。
+     * @param {object} opts
+     * @param {object} opts.board 服务端棋盘数据
+     * @param {number} opts.upto 显示到第几手
+     * @param {object|null} opts.problem 当前手的问题手标记（{x, y, key, label}）或 null
+     * @param {Array<object|null>} [opts.pv] 变化图前几手的坐标（第 0 项 = AI 首选）
+     * @param {string} [opts.hintLabel] 首选点旁的信息文本（胜率等）
+     * @param {function} [opts.onPick] 点击交叉点回调 (x, y)
+     * @returns {object} React 元素
+     */
+    function renderBoard(opts) {
+      var size = opts.board.size
+      var moves = opts.board.moves || []
+      var grid = boardAt(opts.board, opts.upto)
+      var step = (BOARD_VIEW - BOARD_PAD * 2) / Math.max(1, size - 1)
+      var pos = function (i) { return BOARD_PAD + i * step }
+      var radius = step * 0.46
+      var kids = []
+
+      kids.push(React.createElement('rect', {
+        key: 'bg', x: 0, y: 0, width: BOARD_VIEW, height: BOARD_VIEW, rx: 1.5, fill: 'url(#dgs-wood)',
+      }))
+      var i
+      // 网格：纯黑 + 外框加粗（Lizzieyzy drawGoban 的 borderStroke/normalStroke 之分）
+      for (i = 0; i < size; i++) {
+        var edge = i === 0 || i === size - 1
+        var lineW = edge ? 0.55 : 0.28
+        kids.push(React.createElement('line', {
+          key: 'h' + i, x1: pos(0), y1: pos(i), x2: pos(size - 1), y2: pos(i),
+          stroke: '#111111', strokeWidth: lineW,
+        }))
+        kids.push(React.createElement('line', {
+          key: 'v' + i, x1: pos(i), y1: pos(0), x2: pos(i), y2: pos(size - 1),
+          stroke: '#111111', strokeWidth: lineW,
+        }))
+      }
+      starPoints(size).forEach(function (p, index) {
+        kids.push(React.createElement('circle', {
+          key: 'star' + index, cx: pos(p[0]), cy: pos(p[1]), r: 0.75, fill: '#111111',
+        }))
+      })
+      // 坐标：列标在上、行号在左（讲解里说"Q16"时，学生能在盘上直接找到）
+      for (i = 0; i < size; i++) {
+        kids.push(React.createElement('text', {
+          key: 'col' + i, x: pos(i), y: BOARD_PAD / 2 + 1.4, fontSize: 2.8, fill: '#111111',
+          textAnchor: 'middle',
+        }, BOARD_COLS.charAt(i)))
+        kids.push(React.createElement('text', {
+          key: 'row' + i, x: BOARD_PAD / 2, y: pos(i) + 1.1, fontSize: 2.8, fill: '#111111',
+          textAnchor: 'middle',
+        }, String(size - i)))
+      }
+
+      // 棋子（白子带黑色描边，与 Lizzieyzy drawStoneSimple 一致）
+      for (var y = 0; y < size; y++) {
+        for (var x = 0; x < size; x++) {
+          var v = grid[y * size + x]
+          if (v === 0) continue
+          var isBlack = v === 1
+          kids.push(React.createElement('circle', {
+            key: 'st' + x + '_' + y,
+            className: isBlack ? 'dgs-stone dgs-stone-b' : 'dgs-stone dgs-stone-w',
+            cx: pos(x), cy: pos(y), r: radius,
+            fill: isBlack ? 'url(#dgs-black)' : 'url(#dgs-white)',
+            stroke: isBlack ? 'none' : '#111111',
+            strokeWidth: isBlack ? 0 : Math.max(0.12, radius / 16),
+          }))
+        }
+      }
+
+      // 最后一手：反色小实心圆点，半径 0.22 格宽（Lizzieyzy 的最后一手指示）
+      var lastIndex = Math.max(0, Math.min(opts.upto, moves.length)) - 1
+      var last = lastIndex >= 0 ? moves[lastIndex] : null
+      if (last !== null && last.x >= 0) {
+        kids.push(React.createElement('circle', {
+          key: 'last', cx: pos(last.x), cy: pos(last.y), r: step * LAST_MOVE_R,
+          fill: last.c === 'B' ? '#f3f4f6' : '#141519', pointerEvents: 'none',
+        }))
+      }
+
+      // 问题手：按严重度取色画圈（紫/红/橙），一眼看出"这一手错得有多重"
+      if (opts.problem !== null && opts.problem !== undefined) {
+        kids.push(React.createElement('circle', {
+          key: 'problem', cx: pos(opts.problem.x), cy: pos(opts.problem.y), r: radius * 1.12,
+          fill: 'none', stroke: markColor(opts.problem.key, opts.problem.label),
+          strokeWidth: 0.7, pointerEvents: 'none',
+        }))
+      }
+
+      // 变化图（PV）：首选点 = 青色实心圆 + 蓝圈；后续几手 = 蓝点 + 序号
+      var pv = Array.isArray(opts.pv) ? opts.pv : []
+      pv.forEach(function (p, index) {
+        if (p === null || p === undefined) return
+        if (index === 0) {
+          kids.push(React.createElement('circle', {
+            key: 'best', cx: pos(p.x), cy: pos(p.y), r: radius + 0.2, fill: BEST_FILL,
+            pointerEvents: 'none',
+          }))
+          kids.push(React.createElement('circle', {
+            key: 'bestring', cx: pos(p.x), cy: pos(p.y), r: radius + 0.6, fill: 'none',
+            stroke: BEST_RING, strokeWidth: 0.45, pointerEvents: 'none',
+          }))
+        } else if (grid[p.y * size + p.x] === 0) {
+          // 变化图的手如果落在实战已占的点上（那条变化与当前局面无关），不画——
+          // 画上去会像是把子叠在子上，反而误导
+          kids.push(React.createElement('circle', {
+            key: 'pv' + index, cx: pos(p.x), cy: pos(p.y), r: radius * 0.58, fill: PV_BLUE,
+            pointerEvents: 'none',
+          }))
+          kids.push(React.createElement('text', {
+            key: 'pvt' + index, x: pos(p.x), y: pos(p.y) + 0.85, fontSize: 2.3, fill: '#ffffff',
+            textAnchor: 'middle', pointerEvents: 'none',
+          }, String(index + 1)))
+        }
+      })
+
+      // 首选点的胜率：橙底黑字（Lizzieyzy drawStringForOrder 的信息条样式）
+      if (opts.hintLabel && pv.length > 0) {
+        var text = String(opts.hintLabel)
+        var boxW = text.length * 1.55 + 1.6
+        var boxX = Math.max(0, Math.min(BOARD_VIEW - boxW, pos(pv[0].x) + radius * 0.9))
+        var boxY = Math.max(0, pos(pv[0].y) - radius * 2.6)
+        kids.push(React.createElement('rect', {
+          key: 'hinlabelbg', x: boxX, y: boxY, width: boxW, height: 3.4, fill: BEST_INFO_BG,
+          pointerEvents: 'none',
+        }))
+        kids.push(React.createElement('text', {
+          key: 'hinlabel', x: boxX + boxW / 2, y: boxY + 2.5, fontSize: 2.5, fill: '#000000',
+          textAnchor: 'middle', pointerEvents: 'none',
+        }, text))
+      }
+
+      if (typeof opts.onPick === 'function') {
+        kids.push(React.createElement('rect', {
+          key: 'hit', x: 0, y: 0, width: BOARD_VIEW, height: BOARD_VIEW, fill: 'transparent',
+          style: { cursor: 'crosshair' },
+          onClick: function (event) {
+            try {
+              var box = event.currentTarget.getBoundingClientRect()
+              var px = (event.clientX - box.left) / (box.width || 1) * BOARD_VIEW
+              var py = (event.clientY - box.top) / (box.height || 1) * BOARD_VIEW
+              var gx = Math.round((px - BOARD_PAD) / step)
+              var gy = Math.round((py - BOARD_PAD) / step)
+              opts.onPick(Math.max(0, Math.min(size - 1, gx)), Math.max(0, Math.min(size - 1, gy)))
+            } catch (error) {
+              /* 点击失败绝不能影响面板 */
+            }
+          },
+        }))
+      }
+
+      kids.unshift(React.createElement('defs', { key: 'defs' },
+        React.createElement('linearGradient', { id: 'dgs-wood', x1: '0', y1: '0', x2: '0', y2: '1' },
+          React.createElement('stop', { offset: '0%', stopColor: '#e8c383' }),
+          React.createElement('stop', { offset: '100%', stopColor: '#d6a75d' })),
+        React.createElement('radialGradient', { id: 'dgs-black', cx: '35%', cy: '30%', r: '78%' },
+          React.createElement('stop', { offset: '0%', stopColor: '#5c6169' }),
+          React.createElement('stop', { offset: '55%', stopColor: '#22242a' }),
+          React.createElement('stop', { offset: '100%', stopColor: '#0b0c0f' })),
+        React.createElement('radialGradient', { id: 'dgs-white', cx: '35%', cy: '30%', r: '78%' },
+          React.createElement('stop', { offset: '0%', stopColor: '#ffffff' }),
+          React.createElement('stop', { offset: '62%', stopColor: '#edeff3' }),
+          React.createElement('stop', { offset: '100%', stopColor: '#c3c9d2' })),
+      ))
+
+      return React.createElement('svg', {
+        className: 'dgs-board', viewBox: '0 0 ' + BOARD_VIEW + ' ' + BOARD_VIEW,
+        xmlns: 'http://www.w3.org/2000/svg', 'data-dgs-board': String(size),
+      }, kids)
+    }
+
+    /** 取路径的末段（跨 Windows/Unix 两种分隔符）。 */
+    function baseName(path) {
+      return String(path == null ? '' : path).replace(/\\/g, '/').split('/').pop()
+    }
+
+    /** 棋盘表头状态：「第 5/106 手 · 黑 Q16」。 */
+    function boardStatusText(board, cur, move) {
+      var total = board.moves.length
+      if (cur <= 0) return '开局 · 共 ' + total + ' 手'
+      var who = move && move.c === 'B' ? '黑' : '白'
+      var where = move && move.x >= 0 ? boardLabel(move.x, move.y, board.size) : '虚着'
+      return '第 ' + cur + '/' + total + ' 手 · ' + who + ' ' + where
+    }
+
+    /**
+     * 「跟随讲解」游标（面板级）：记住已处理到哪一次工具调用，
+     * 避免每轮轮询都把同一条指针重复应用；tried 记录失败过的自动载入，
+     * 防止路径解析不了时每 3 秒重试一次。
+     */
+    var focusPointer = { seq: 0, tried: {} }
 
     /** 由服务端读取到的候选，拼出可直接发送的追问语。 */
     function followUpText(candidate, path) {
@@ -138,6 +506,18 @@ window.__ModuleLoader__.load({
       var openState = React.useState(false)
       var open = openState[0]
       var setOpen = openState[1]
+      // 内置棋盘：收起态只留一行表头；展开后才有棋盘本体与控制条
+      var boardOpenState = React.useState(false)
+      var boardOpen = boardOpenState[0]
+      var setBoardOpen = boardOpenState[1]
+      // 棋盘显示到第几手（0 = 开局）；载入棋谱后默认停在末手
+      var uptoState = React.useState(0)
+      var upto = uptoState[0]
+      var setUpto = uptoState[1]
+      // 跟随讲解：Sensei 讲到哪一手，棋盘就跳到哪一手
+      var followState = React.useState(true)
+      var follow = followState[0]
+      var setFollow = followState[1]
 
       // 会话工作区根：客户端快照里没有 cwd 字段，这里只作「锦上添花」尝试；
       // 真正可靠的基准由 Host 用 tools/result 记下的工作区根提供。
@@ -151,18 +531,28 @@ window.__ModuleLoader__.load({
         cwd = ''
       }
 
-      function load() {
-        var target = String(path || '').trim()
-        if (target === '') { setErr('请先填写 SGF 路径'); return }
+      /**
+       * 读取棋谱。cwdOverride 用于「跟随讲解」自动载入 —— 那时路径来自
+       * 工具调用参数（可能是相对某个会话工作区的相对路径），基准与当前
+       * 会话 cwd 未必相同，必须带上 Host 记下的那个。
+       */
+      function loadTarget(target, cwdOverride) {
+        var wanted = String(target == null ? '' : target).trim()
+        if (wanted === '') { setErr('请先填写 SGF 路径'); return }
+        var base = String(cwdOverride == null ? '' : cwdOverride) || cwd
         setBusy(true); setErr(''); setNotice(''); setHint('')
-        var url = '/go-sensei/review?path=' + encodeURIComponent(target)
-          + (cwd ? '&cwd=' + encodeURIComponent(cwd) : '')
+        var url = '/go-sensei/review?path=' + encodeURIComponent(wanted)
+          + (base ? '&cwd=' + encodeURIComponent(base) : '')
         fetch(url)
           .then(function (response) { return response.json().catch(function () { return {} }) })
           .then(function (body) {
             setBusy(false)
-            if (body && body.ok === true) { setData(body.data) }
-            else {
+            if (body && body.ok === true) {
+              setData(body.data)
+              // 载入即停在末手：复盘通常从终局往回看
+              var board = body.data && body.data.board ? body.data.board : null
+              setUpto(board && Array.isArray(board.moves) ? board.moves.length : 0)
+            } else {
               setData(null)
               setErr(body && body.error ? String(body.error) : '读取失败')
               if (body && body.hint) setHint(String(body.hint))
@@ -173,9 +563,86 @@ window.__ModuleLoader__.load({
           })
       }
 
+      function load() {
+        loadTarget(path, '')
+      }
+
       function insert(text) {
         actions.setDraft(text)
         setNotice('已插入输入框，回车即可发送')
+      }
+
+      /** 当前棋盘显示到第几手（对手数上限做了夹取）。 */
+      function currentUpto() {
+        var total = data && data.board && Array.isArray(data.board.moves) ? data.board.moves.length : 0
+        return Math.max(0, Math.min(upto, total))
+      }
+
+      /**
+       * 跟随讲解：轮询 Host 记下的「正在讲解的局面」指针。
+       *
+       * 为什么是轮询而不是推送：讲解发生在服务端的工具调用里，棋盘在浏览器；
+       * 两者之间没有现成的会话通道。这条指针只读内存、不读盘，3 秒一次的
+       * 代价可以忽略，而且只在"面板展开 + 棋盘展开 + 跟随开启"时才轮询。
+       */
+      function pollFocus() {
+        fetch('/go-sensei/focus')
+          .then(function (response) { return response.json().catch(function () { return {} }) })
+          .then(function (body) {
+            var f = body && body.ok === true ? body.focus : null
+            if (!f || typeof f.seq !== 'number') return
+            if (f.seq === focusPointer.seq && data) return
+            focusPointer.seq = f.seq
+            applyFocus(f)
+          })
+          .catch(function () { /* 轮询失败静默重试 */ })
+      }
+
+      /** 把指针落到棋盘上：同一盘棋就跳手数，另一盘棋就自动载入。 */
+      function applyFocus(f) {
+        var loaded = data && data.path ? baseName(data.path).toLowerCase() : ''
+        var wanted = baseName(f.name || f.path || '').toLowerCase()
+        if (loaded === '' || wanted === '' || wanted !== loaded) {
+          // 别急着反复重试：路径解析不了时（相对路径基准不对）20 秒内只试一次
+          var key = String(f.path || '') + '|' + String(f.cwd || '')
+          var last = focusPointer.tried[key] || 0
+          if (Date.now() - last < 20000) return
+          focusPointer.tried[key] = Date.now()
+          setPath(String(f.path || ''))
+          loadTarget(f.path, f.cwd)
+          return
+        }
+        if (typeof f.moveNumber === 'number' && f.moveNumber > 0) setUpto(f.moveNumber)
+      }
+
+      React.useEffect(function () {
+        if (!open || !boardOpen || !follow) return undefined
+        var timer = setInterval(pollFocus, 3000)
+        pollFocus()
+        return function () { clearInterval(timer) }
+      }, [open, boardOpen, follow, data])
+
+      /** 点棋盘交叉点 → 就这个点插入追问。 */
+      function askPoint(x, y) {
+        if (!data || !data.board) return
+        var label = boardLabel(x, y, data.board.size)
+        insert('追问：第 ' + currentUpto() + ' 手之后的局面，如果下在 ' + label
+          + ' 会怎样？请讲讲这一手的价值与后续变化。'
+          + (data.path ? '（棋谱：' + data.path + '）' : ''))
+      }
+
+      /**
+       * 点问题手一行：棋盘跳到那一手（并自动展开棋盘），同时把追问语插进输入框。
+       * 讲解场景里这两件事本来就该一起发生——看到问题手，也想立刻看到盘面。
+       */
+      function pickCandidate(candidate) {
+        if (data && data.board) {
+          setBoardOpen(true)
+          if (typeof candidate.moveNumber === 'number' && candidate.moveNumber > 0) {
+            setUpto(candidate.moveNumber)
+          }
+        }
+        insert(followUpText(candidate, data ? data.path : ''))
       }
 
       var head = React.createElement('div', { className: 'dgs-head' },
@@ -204,38 +671,121 @@ window.__ModuleLoader__.load({
 
       if (data) {
         var list = Array.isArray(data.candidates) ? data.candidates : []
+        var board = data.board && Array.isArray(data.board.moves) ? data.board : null
+        var total = board === null ? 0 : board.moves.length
+        var cur = Math.max(0, Math.min(upto, total))
+        var curMove = board !== null && cur > 0 ? board.moves[cur - 1] : null
+        // 当前手就是问题手吗？（问题手的 moveNumber 指"第 N 手"，即走完 N 手后的局面）
+        var problem = null
+        for (var pi = 0; pi < list.length; pi++) {
+          if (list[pi].moveNumber === cur) { problem = list[pi]; break }
+        }
+        var hint = problem && problem.pv && problem.pv[0] ? problem.pv[0] : null
+        // 变化图前几手：与 Lizzieyzy 一样在盘上按序标出（首选 = 青圆蓝圈，后续 = 蓝点序号）
+        var pvPoints = board === null || problem === null || !Array.isArray(problem.pv)
+          ? []
+          : problem.pv.slice(0, 3).map(function (p) { return parsePointLabel(p && p.label, board.size) })
+        var problemPoint = problem !== null && curMove !== null && curMove.x >= 0
+          ? { x: curMove.x, y: curMove.y, key: problem.labelKey, label: problem.label }
+          : null
+
         kids.push(React.createElement('div', { className: 'dgs-sub', key: 'meta' },
           (data.mode === 'analysis' ? 'AI 分析' : '纯棋理') + ' · 难度 ' + String(data.level || '-')
           + ' · ' + String(data.moveCount || 0) + ' 手 / ' + String(data.variations || 0) + ' 变化图'
           + ' · ' + list.length + ' 个问题手'))
-        if (list.length === 0) {
-          kids.push(React.createElement('div', { className: 'dgs-sub', key: 'none' }, '未发现明显问题手（或棋谱无分析数据）'))
-        } else {
-          kids.push(React.createElement('div', { className: 'dgs-list', key: 'list' },
-            list.map(function (candidate, index) {
-              var top = candidate.pv && candidate.pv[0] ? candidate.pv[0] : null
-              return React.createElement('button', {
-                className: 'dgs-item',
-                key: String(candidate.moveNumber) + '-' + index,
-                title: '点击把追问语插入输入框',
-                onClick: function () { insert(followUpText(candidate, data.path)) },
-              },
-                React.createElement('div', { className: 'dgs-l1' },
-                  React.createElement('span', { className: 'dgs-mv' }, '第 ' + candidate.moveNumber + ' 手'),
-                  React.createElement('span', null, candidate.color === 'B' ? '黑' : '白'),
-                  React.createElement('span', { className: 'dgs-coord' }, candidate.coordLabel || candidate.coord || ''),
-                  React.createElement('span', {
-                    className: 'dgs-badge',
-                    style: { color: severityColor(candidate.label) },
-                  }, candidate.label || ''),
-                ),
-                React.createElement('div', { className: 'dgs-l2' },
-                  '−' + (candidate.winrateLoss == null ? '?' : candidate.winrateLoss) + '% 胜率'
-                  + (candidate.scoreLoss == null ? '' : ' / ' + candidate.scoreLoss + ' 目')
-                  + (top && top.label ? ' · AI 首选：' + top.label : '')),
-              )
-            }),
+
+        // ── 棋盘表头（收起态只留这一行）─────────────────────────────────
+        if (board !== null) {
+          kids.push(React.createElement('div', { className: 'dgs-boardwrap', key: 'boardhead' },
+            React.createElement('div', { className: 'dgs-boardhead' },
+              React.createElement('button', {
+                className: 'dgs-boardtoggle',
+                title: boardOpen ? '收起棋盘' : '展开棋盘（也可以直接点某个问题手，棋盘会自动展开并跳到那一手）',
+                onClick: function () { setBoardOpen(!boardOpen) },
+              }, boardOpen ? '棋盘 ▾' : '棋盘 ▸'),
+              React.createElement('span', { className: 'dgs-sub' }, boardStatusText(board, cur, curMove)),
+              boardOpen
+                ? React.createElement('button', {
+                    className: 'dgs-follow',
+                    title: '开启后：Sensei 在对话里讲到哪一盘、第几手，棋盘自动跟过去',
+                    onClick: function () { setFollow(!follow) },
+                  }, follow ? '跟随讲解 ✓' : '跟随讲解 ✕')
+                : null,
+            ),
           ))
+        }
+
+        var listEl = list.length === 0
+          ? React.createElement('div', { className: 'dgs-sub', key: 'none' }, '未发现明显问题手（或棋谱无分析数据）')
+          : React.createElement('div', { className: 'dgs-list', key: 'list' },
+              list.map(function (candidate, index) {
+                var top = candidate.pv && candidate.pv[0] ? candidate.pv[0] : null
+                return React.createElement('button', {
+                  className: 'dgs-item',
+                  key: String(candidate.moveNumber) + '-' + index,
+                  title: '点击：棋盘跳到这一手，并把追问语插入输入框',
+                  onClick: function () { pickCandidate(candidate) },
+                },
+                  React.createElement('div', { className: 'dgs-l1' },
+                    React.createElement('span', { className: 'dgs-mv' }, '第 ' + candidate.moveNumber + ' 手'),
+                    React.createElement('span', null, candidate.color === 'B' ? '黑' : '白'),
+                    React.createElement('span', { className: 'dgs-coord' }, candidate.coordLabel || candidate.coord || ''),
+                    React.createElement('span', {
+                      className: 'dgs-badge',
+                      style: { color: severityColor(candidate.label) },
+                    }, candidate.label || ''),
+                  ),
+                  React.createElement('div', { className: 'dgs-l2' },
+                    '−' + (candidate.winrateLoss == null ? '?' : candidate.winrateLoss) + '% 胜率'
+                    + (candidate.scoreLoss == null ? '' : ' / ' + candidate.scoreLoss + ' 目')
+                    + (top && top.label ? ' · AI 首选：' + top.label : '')),
+                )
+              }),
+            )
+
+        if (boardOpen && board !== null) {
+          var boardCol = React.createElement('div', { className: 'dgs-col-board' },
+            renderBoard({
+              board: board,
+              upto: cur,
+              problem: problemPoint,
+              pv: pvPoints,
+              hintLabel: hint && hint.label ? hint.label : '',
+              onPick: askPoint,
+            }),
+            React.createElement('div', { className: 'dgs-ctl' },
+              React.createElement('button', { onClick: function () { setUpto(0) }, title: '回到开局' }, '⏮'),
+              React.createElement('button', { onClick: function () { setUpto(Math.max(0, cur - 1)) }, title: '上一手' }, '◀'),
+              React.createElement('button', { onClick: function () { setUpto(Math.min(total, cur + 1)) }, title: '下一手' }, '▶'),
+              React.createElement('button', { onClick: function () { setUpto(total) }, title: '跳到末手' }, '⏭'),
+              React.createElement('input', {
+                type: 'range', min: 0, max: total, value: cur,
+                title: '拖动快速定位',
+                onChange: function (event) { setUpto(Number(event.target.value)) },
+              }),
+            ),
+            React.createElement('div', { className: 'dgs-note' },
+              problem !== null
+                ? React.createElement('span', null,
+                    React.createElement('span', { className: 'dgs-prob' },
+                      '○ 实战 ' + String(problem.moveNumber) + ' 手 ' + String(problem.coordLabel || '')),
+                    hint && hint.label
+                      ? React.createElement('span', null,
+                          '　',
+                          React.createElement('span', { className: 'dgs-rec' }, '◌ AI 首选 ' + String(hint.label)),
+                          hint.winratePct == null ? '' : '（胜率 ' + String(hint.winratePct) + '%）',
+                          pvPoints.length > 1
+                            ? ' → ' + problem.pv.slice(1).map(function (p) { return String(p && p.label ? p.label : '') })
+                                .filter(function (t) { return t !== ''; }).join(', ')
+                            : '')
+                      : null)
+                : '点棋盘交叉点可就该点提问；「▸」把棋盘收起来',
+            ),
+          )
+          kids.push(React.createElement('div', { className: 'dgs-split', key: 'split' }, boardCol,
+            React.createElement('div', { className: 'dgs-col-list' }, listEl)))
+        } else {
+          kids.push(listEl)
         }
       }
 
@@ -266,6 +816,18 @@ window.__ModuleLoader__.load({
       } catch (error) {
         // 面板注册失败绝不能影响插件其余部分（工具与服务端半照常工作）
       }
+    }
+    // 棋盘规则是纯函数，但只存在于这个单文件 bundle 里（浏览器半零构建、无模块系统），
+    // 所以显式暴露给单测：React 桩只能验证"渲染出了什么"，验证不了提子算得对不对。
+    // 生产路径不读它，宿主 Client 装载器也只认 name/inject/apply。
+    exports.__internals = {
+      boardLabel: boardLabel,
+      parsePointLabel: parsePointLabel,
+      groupAt: groupAt,
+      playStone: playStone,
+      boardAt: boardAt,
+      starPoints: starPoints,
+      baseName: baseName,
     }
     return module.exports
   },

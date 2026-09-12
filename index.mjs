@@ -5,10 +5,11 @@
 // 注册是 effect：工具与提示词段随插件 fiber 自动装卸。
 
 import Schema from '@deepseek-ai/schemastery'
+import { basename } from 'node:path'
 import { registerGoTools, autoComputeIfNeeded } from './src/tools.js'
 import { ReviewCache } from './src/cache.js'
 import { RANKS, reviewGame, inferLevel } from './src/review.js'
-import { parseGame, decodeBuffer } from './src/sgf.js'
+import { parseGame, decodeBuffer, coordLabel } from './src/sgf.js'
 
 export const name = 'go-sensei'
 // 硬依赖：tools 注册工具、systemPrompt 挂人设段、fs 读写棋谱。
@@ -84,6 +85,8 @@ function compactForPanel(candidate) {
     coord: candidate.coord ?? '',
     coordLabel: candidate.coordLabel ?? '',
     label: candidate.label?.label ?? '',
+    // 等级 key 供棋盘按严重度取色（大恶手/失误/不精确 → 紫/红/橙，与 Lizzieyzy 同色系）
+    labelKey: candidate.label?.key ?? '',
     winrateLoss: candidate.winrateLoss ?? null,
     scoreLoss: candidate.scoreLoss ?? null,
     pv: (candidate.pv ?? []).slice(0, 3).map((p) => ({
@@ -96,6 +99,76 @@ function compactForPanel(candidate) {
 /** 面板默认基准目录：无 cwd 参数时的回退（浏览器会带上当前会话工作区）。 */
 function panelDefaultRoot() {
   return process.cwd()
+}
+
+/**
+ * 棋盘数据：把主变化线与摆子压成坐标整数，浏览器直接画，不必自己解析 SGF。
+ *
+ * 为什么与问题手同一路由返回：客户端拿不到 game（它既不能读盘也不能调工具），
+ * 单独开一条棋盘路由等于同一份棋谱再读一次、再解析一次；而棋盘与问题手永远
+ * 是同一局，同一次请求里一起给出既省事又不会二者不同步。
+ *
+ * @param {object} game parseGame 的返回值
+ * @returns {{ size: number, komi: number, handicap: number,
+ *             moves: Array<{c: string, x: number, y: number}>,
+ *             setup: { black: number[][], white: number[][] } }}
+ */
+function compactBoard(game) {
+  const size = game.info?.size ?? 19
+  /** 坐标 -> [x, y]；虚着/越界返回 null。 */
+  const point = (coord) => {
+    const at = coordLabel(coord ?? '', size)
+    if (at.pass || at.x < 0 || at.y < 0 || at.x >= size || at.y >= size) return null
+    return [at.x, at.y]
+  }
+  return {
+    size,
+    komi: game.info?.komi ?? 0,
+    handicap: game.info?.handicap ?? 0,
+    // 虚着用 x=y=-1 表示（棋盘不落子，但手顺要保留，否则手数对不上）
+    moves: (game.moves ?? []).map((m) => {
+      const p = m.pass ? null : point(m.coord)
+      return p === null ? { c: m.color, x: -1, y: -1 } : { c: m.color, x: p[0], y: p[1] }
+    }),
+    setup: {
+      black: (game.setup?.black ?? []).map(point).filter((p) => p !== null),
+      white: (game.setup?.white ?? []).map(point).filter((p) => p !== null),
+    },
+  }
+}
+
+/**
+ * 工具调用 -> 「正在讲解的局面」的语义类别。
+ * 面板棋盘靠它跟随讲解：模型讲到哪一手，棋盘就跳到哪一手。
+ */
+const FOCUS_KINDS = {
+  go_parse_sgf: 'parse',
+  go_review_moves: 'review',
+  go_position_context: 'context',
+  go_engine_analyze: 'engine',
+  go_write_review: 'write',
+}
+
+/**
+ * 从工具参数里取「这次调用在讲第几手」。
+ * - go_position_context：参数里的 moveNumber 就是它；
+ * - go_write_review：正在回写的注释手数就是讲解位置（取第一条）；
+ * - 其余（读谱/找问题手/补算）：只知道在讲这盘棋，不知道第几手。
+ * @param {string} kind FOCUS_KINDS 的值
+ * @param {object|undefined} args 工具调用参数
+ * @returns {number|undefined}
+ */
+function focusMoveNumber(kind, args) {
+  if (kind === 'context') {
+    const n = Math.trunc(Number(args?.moveNumber))
+    return Number.isFinite(n) && n > 0 ? n : undefined
+  }
+  if (kind === 'write') {
+    const first = Array.isArray(args?.entries) ? args.entries[0] : undefined
+    const n = Math.trunc(Number(first?.moveNumber))
+    return Number.isFinite(n) && n > 0 ? n : undefined
+  }
+  return undefined
 }
 
 /**
@@ -123,13 +196,37 @@ function registerPanelRoute(ctx, cfg) {
    * 这里把它记下来，作为面板相对路径的解析基准。
    */
   const roots = []
-  ctx.on('tools/result', (exec) => {
+  /**
+   * 「正在讲解的局面」指针：模型每次调用 go_* 工具就更新一次，
+   * 面板棋盘轮询 /go-sensei/focus 后自动载入同一盘棋并跳到同一手。
+   *
+   * 为什么记在 Host：讲解发生在对话里（工具调用），而棋盘在浏览器里；
+   * 两边唯一的共同信源就是 Host 观察到的工具调用。seq 单调递增，
+   * 客户端据此判断"这条指针我处理过没有"，不必比较对象内容。
+   */
+  const focus = { seq: 0, value: null }
+  ctx.on('tools/result', (exec, result) => {
     try {
       const name = exec?.name
       if (typeof name !== 'string' || name.indexOf('go_') !== 0) return
       const cwd = exec?.agent?.session?.header?.cwd
-      if (typeof cwd !== 'string' || cwd === '') return
-      rememberRoot(cwd)
+      if (typeof cwd === 'string' && cwd !== '') rememberRoot(cwd)
+      // 失败的调用不改变讲解位置（模型经常先试错路径）
+      if (result !== undefined && result?.isError === true) return
+      const kind = FOCUS_KINDS[name]
+      if (kind === undefined) return
+      const rawPath = typeof exec?.arguments?.path === 'string' ? exec.arguments.path.trim() : ''
+      if (rawPath === '') return
+      const moveNumber = focusMoveNumber(kind, exec.arguments)
+      focus.seq += 1
+      focus.value = {
+        seq: focus.seq,
+        path: rawPath,
+        cwd: typeof cwd === 'string' ? cwd : '',
+        name: basename(rawPath),
+        kind,
+        ...(moveNumber !== undefined ? { moveNumber } : {}),
+      }
     } catch {
       /* 观察者绝不干扰工具链路 */
     }
@@ -152,6 +249,17 @@ function registerPanelRoute(ctx, cfg) {
         res.setHeader('content-type', 'application/json; charset=utf-8')
         res.setHeader('cache-control', 'no-store')
         res.end(JSON.stringify({ ok: true, roots: roots.slice() }))
+      },
+    })
+    // 「正在讲解的局面」指针：棋盘跟随讲解用的轻量轮询端点（纯内存，不读盘）
+    webCtx.webServer.register({
+      kind: 'exact',
+      path: '/go-sensei/focus',
+      handler: (req, res) => {
+        res.statusCode = 200
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('cache-control', 'no-store')
+        res.end(JSON.stringify({ ok: true, focus: focus.value }))
       },
     })
     webCtx.webServer.register({
@@ -254,6 +362,11 @@ function registerPanelRoute(ctx, cfg) {
               moveCount: game.moves.length,
               variations: game.stats.variations,
               candidates: review.candidates.map(compactForPanel),
+              board: compactBoard(game),
+              // 棋盘表头要显示"谁跟谁下、结果如何"，这些是讲解时最常用的一句话背景
+              ...(game.info.players ? { players: game.info.players } : {}),
+              ...(game.info.result !== undefined ? { result: game.info.result } : {}),
+              ...(game.info.date !== undefined ? { date: game.info.date } : {}),
               ...(autoEngine !== undefined ? { autoEngine } : {}),
             },
           })

@@ -76,6 +76,25 @@ test('parseGame: 每手坐标与颜色', () => {
   ])
 })
 
+test('parseGame: 根节点 AB/AW 摆子（让子局、死活题都要画出来）', () => {
+  const game = parseGame('(;GM[1]FF[4]SZ[19]HA[3]AB[dd][pp][dp]AW[jj];W[pd];B[qf])')
+  assert.deepEqual(game.setup, { black: ['dd', 'pp', 'dp'], white: ['jj'] })
+  assert.equal(game.info.handicap, 3)
+  assert.equal(game.moves.length, 2, '摆子不算着手')
+})
+
+test('parseGame: 无摆子时 setup 形状稳定（两个空数组）', () => {
+  const game = parseGame('(;GM[1]SZ[19];B[pd];W[dp])')
+  assert.deepEqual(game.setup, { black: [], white: [] })
+})
+
+test('parseGame: 摆子过滤虚着与越界坐标（tt / 小棋盘路数外）', () => {
+  const game = parseGame('(;GM[1]SZ[9]AB[dd][tt][jj])')
+  // 9 路只有 a..i：tt 是虚着，jj 越界，两者都丢
+  assert.deepEqual(game.setup.black, ['dd'])
+  assert.deepEqual(game.setup.white, [])
+})
+
 test('parseGame: LZ 属性解析（引擎/胜率/候选/PV，KataGo 坐标）', () => {
   const game = parseGame(readFixture('synthetic-analysis.sgf').toString('utf8'))
   const move4 = game.moves[3] // W dd
