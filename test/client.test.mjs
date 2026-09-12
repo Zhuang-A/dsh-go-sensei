@@ -154,6 +154,55 @@ test('client: 展开后渲染路径输入框与读取按钮', () => {
   assert.ok(String(input.props.placeholder).includes('SGF'))
 })
 
+test('client: 未载入棋谱时也给出棋盘入口与跟随开关（否则跟随永远带不进棋谱）', () => {
+  const { registered, react } = loadClient()
+  const props = { inputActions: { setDraft() {} } }
+  react.reset()
+  let tree = registered[0].component(props)
+  walk(tree).find((n) => n.type === 'button' && texts([n]).includes('展开')).props.onClick()
+  react.reset()
+  tree = registered[0].component(props)
+
+  let all = texts(walk(tree)).join('|')
+  assert.ok(all.includes('棋盘 ▸'), `应有棋盘入口：${all}`)
+  assert.ok(all.includes('未载入棋谱'), '应说明还没载入棋谱')
+  assert.ok(all.includes('跟随讲解 ✓'), '跟随开关在没有棋谱时也要能按')
+
+  // 展开棋盘：给出「跟随会自动带出棋谱」的说明，而不是一片空白
+  walk(tree).find((n) => n.type === 'button' && texts([n]).includes('棋盘 ▸')).props.onClick()
+  react.reset()
+  tree = registered[0].component(props)
+  all = texts(walk(tree)).join('|')
+  assert.ok(all.includes('跟随讲解已开'), `展开后应给出说明：${all}`)
+  assert.equal(walk(tree).find((n) => n.type === 'svg'), undefined, '没有棋谱时不画棋盘')
+})
+
+test('client: 手动读取会「认掉」当前指针，旧讲解不再抢走用户选的棋谱', async () => {
+  const { registered, react, plugin } = loadClient()
+  const gamePath = fixture('real-analysis.sgf')
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({ ok: true, data: { path: gamePath, mode: 'analysis', level: '18K', moveCount: 106, variations: 2, candidates: [], board: null } }),
+  })
+  // 模拟「已经见过 seq=4 的指针（例如别的会话留下的）但还没应用」
+  plugin.__internals.focusPointer.seen = 4
+  plugin.__internals.focusPointer.seq = 0
+
+  const props = { inputActions: { setDraft() {} } }
+  react.reset()
+  let tree = registered[0].component(props)
+  walk(tree).find((n) => n.type === 'button' && texts([n]).includes('展开')).props.onClick()
+  react.reset()
+  tree = registered[0].component(props)
+  walk(tree).find((n) => n.type === 'input').props.onChange({ target: { value: gamePath } })
+  react.reset()
+  tree = registered[0].component(props)
+  walk(tree).find((n) => n.type === 'button' && texts([n]).includes('读取问题手')).props.onClick()
+  await new Promise((r) => setTimeout(r, 30))
+
+  assert.equal(plugin.__internals.focusPointer.seq, 4, '手动读取后应把已见过的指针认成已应用')
+})
+
 test('client: 点问题手一行 → inputActions.setDraft（真插入，非剪贴板）', async () => {
   const { registered, react } = loadClient()
   const drafts = []

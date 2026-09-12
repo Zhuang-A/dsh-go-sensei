@@ -490,11 +490,12 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 「跟随讲解」游标（面板级）：记住已处理到哪一次工具调用，
-     * 避免每轮轮询都把同一条指针重复应用；tried 记录失败过的自动载入，
-     * 防止路径解析不了时每 3 秒重试一次。
+     * 「跟随讲解」游标（面板级）。
+     * - seq：已经**应用**到棋盘的指针序号（同一件旧事不再重复应用）；
+     * - seen：已经**见过**的最大序号（用户手动载入时用它把旧指针认掉）；
+     * - tried：失败过的自动载入，防止路径解析不了时每 3 秒重试一次。
      */
-    var focusPointer = { seq: 0, tried: {} }
+    var focusPointer = { seq: 0, seen: 0, tried: {} }
 
     /** 由服务端读取到的候选，拼出可直接发送的追问语。 */
     function followUpText(candidate, path) {
@@ -604,6 +605,10 @@ window.__ModuleLoader__.load({
 
       function load() {
         loadTarget(path, '')
+        // 手动读取＝用户此刻的选择：把已经见过的指针「认掉」，免得下一次轮询
+        // 又用同一件旧事（比如别的会话留下的指针）把用户刚选的棋谱换掉。
+        // 只有**新**的讲解事件（seq 更大）才会再切走。
+        focusPointer.seq = focusPointer.seen
       }
 
       function insert(text) {
@@ -630,7 +635,9 @@ window.__ModuleLoader__.load({
           .then(function (body) {
             var f = body && body.ok === true ? body.focus : null
             if (!f || typeof f.seq !== 'number') return
-            if (f.seq === focusPointer.seq && data) return
+            if (f.seq > focusPointer.seen) focusPointer.seen = f.seq
+            // seq 不比"已应用"更新就什么都不做：同一件旧事不该反复抢走用户选的棋谱
+            if (f.seq <= focusPointer.seq) return
             focusPointer.seq = f.seq
             applyFocus(f)
           })
@@ -647,6 +654,8 @@ window.__ModuleLoader__.load({
           if (Date.now() - last < 20000) return
           focusPointer.tried[key] = Date.now()
           setPath(String(f.path || ''))
+          // 跟随把一盘棋带进来时顺手把棋盘展开：否则用户只看到表头，还是得再点一下
+          setBoardOpen(true)
           loadTarget(f.path, f.cwd)
           return
         }
@@ -654,7 +663,10 @@ window.__ModuleLoader__.load({
       }
 
       React.useEffect(function () {
-        if (!open || !boardOpen || !follow) return undefined
+        if (!open || !follow) return undefined
+        // 已有棋谱但棋盘收着时不轮询（省请求）；**还没载入棋谱时必须轮询**，
+        // 否则「跟随讲解」永远等不到 Sensei 正在讲的那盘棋（实测踩过这个死角）。
+        if (data !== null && !boardOpen) return undefined
         var timer = setInterval(pollFocus, 3000)
         pollFocus()
         return function () { clearInterval(timer) }
@@ -709,51 +721,59 @@ window.__ModuleLoader__.load({
       if (err) kids.push(React.createElement('div', { className: 'dgs-err', key: 'e' }, err))
       if (hint) kids.push(React.createElement('div', { className: 'dgs-sub', key: 'h' }, hint))
 
-      if (data) {
-        var list = Array.isArray(data.candidates) ? data.candidates : []
-        var board = data.board && Array.isArray(data.board.moves) ? data.board : null
-        var total = board === null ? 0 : board.moves.length
-        var cur = Math.max(0, Math.min(upto, total))
-        var curMove = board !== null && cur > 0 ? board.moves[cur - 1] : null
-        // 当前手就是问题手吗？（问题手的 moveNumber 指"第 N 手"，即走完 N 手后的局面）
-        var problem = null
+      // 棋盘状态先算出来：表头在**没载入棋谱时也要在**，否则用户没有开启「跟随讲解」
+      // 的入口——而那正是"Sensei 讲到哪一盘，棋盘自动带出来"的唯一开关（实测踩过）。
+      var list = data && Array.isArray(data.candidates) ? data.candidates : []
+      var board = data && data.board && Array.isArray(data.board.moves) ? data.board : null
+      var total = board === null ? 0 : board.moves.length
+      var cur = Math.max(0, Math.min(upto, total))
+      var curMove = board !== null && cur > 0 ? board.moves[cur - 1] : null
+      // 当前手就是问题手吗？（问题手的 moveNumber 指"第 N 手"，即走完 N 手后的局面）
+      var problem = null
+      if (board !== null) {
         for (var pi = 0; pi < list.length; pi++) {
           if (list[pi].moveNumber === cur) { problem = list[pi]; break }
         }
-        var hint = problem && problem.pv && problem.pv[0] ? problem.pv[0] : null
-        // 变化图前几手：与 Lizzieyzy 一样在盘上按序标出（首选 = 青圆蓝圈，后续 = 蓝点序号）
-        var pvPoints = board === null || problem === null || !Array.isArray(problem.pv)
-          ? []
-          : problem.pv.slice(0, 3).map(function (p) { return parsePointLabel(p && p.label, board.size) })
-        var problemPoint = problem !== null && curMove !== null && curMove.x >= 0
-          ? { x: curMove.x, y: curMove.y, key: problem.labelKey, label: problem.label }
-          : null
+      }
+      var hint = problem && problem.pv && problem.pv[0] ? problem.pv[0] : null
+      // 变化图前几手：与 Lizzieyzy 一样在盘上按序标出（首选 = 青圆蓝圈，后续 = 蓝点序号）
+      var pvPoints = board === null || problem === null || !Array.isArray(problem.pv)
+        ? []
+        : problem.pv.slice(0, 3).map(function (p) { return parsePointLabel(p && p.label, board.size) })
+      var problemPoint = problem !== null && curMove !== null && curMove.x >= 0
+        ? { x: curMove.x, y: curMove.y, key: problem.labelKey, label: problem.label }
+        : null
 
+      // ── 棋盘表头（收起态只留这一行；未载入棋谱时说明状态并给出开启跟随的入口）──
+      kids.push(React.createElement('div', { className: 'dgs-boardwrap', key: 'boardhead' },
+        React.createElement('div', { className: 'dgs-boardhead' },
+          React.createElement('button', {
+            className: 'dgs-boardtoggle',
+            title: boardOpen ? '收起棋盘' : '展开棋盘（点问题手也会自动展开并跳到那一手）',
+            onClick: function () { setBoardOpen(!boardOpen) },
+          }, boardOpen ? '棋盘 ▾' : '棋盘 ▸'),
+          React.createElement('span', { className: 'dgs-sub' },
+            board === null ? '未载入棋谱' : boardStatusText(board, cur, curMove)),
+          React.createElement('button', {
+            className: 'dgs-follow',
+            title: '开启后：Sensei 在对话里讲到哪一盘、第几手，棋盘自动跟过去',
+            onClick: function () { setFollow(!follow) },
+          }, follow ? '跟随讲解 ✓' : '跟随讲解 ✕'),
+        ),
+      ))
+
+      if (boardOpen && board === null) {
+        kids.push(React.createElement('div', { className: 'dgs-sub', key: 'noboard' },
+          follow
+            ? '跟随讲解已开：Sensei 在对话里读到哪盘棋，棋盘会自动载入并跳到正在讲的那一手。也可以在上面填路径点「读取问题手」。'
+            : '还没有棋谱：填路径后点「读取问题手」，或把「跟随讲解」打开，等 Sensei 讲到一盘棋时自动载入。'))
+      }
+
+      if (data) {
         kids.push(React.createElement('div', { className: 'dgs-sub', key: 'meta' },
           (data.mode === 'analysis' ? 'AI 分析' : '纯棋理') + ' · 难度 ' + String(data.level || '-')
           + ' · ' + String(data.moveCount || 0) + ' 手 / ' + String(data.variations || 0) + ' 变化图'
           + ' · ' + list.length + ' 个问题手'))
-
-        // ── 棋盘表头（收起态只留这一行）─────────────────────────────────
-        if (board !== null) {
-          kids.push(React.createElement('div', { className: 'dgs-boardwrap', key: 'boardhead' },
-            React.createElement('div', { className: 'dgs-boardhead' },
-              React.createElement('button', {
-                className: 'dgs-boardtoggle',
-                title: boardOpen ? '收起棋盘' : '展开棋盘（也可以直接点某个问题手，棋盘会自动展开并跳到那一手）',
-                onClick: function () { setBoardOpen(!boardOpen) },
-              }, boardOpen ? '棋盘 ▾' : '棋盘 ▸'),
-              React.createElement('span', { className: 'dgs-sub' }, boardStatusText(board, cur, curMove)),
-              boardOpen
-                ? React.createElement('button', {
-                    className: 'dgs-follow',
-                    title: '开启后：Sensei 在对话里讲到哪一盘、第几手，棋盘自动跟过去',
-                    onClick: function () { setFollow(!follow) },
-                  }, follow ? '跟随讲解 ✓' : '跟随讲解 ✕')
-                : null,
-            ),
-          ))
-        }
 
         var listEl = list.length === 0
           ? React.createElement('div', { className: 'dgs-sub', key: 'none' }, '未发现明显问题手（或棋谱无分析数据）')
@@ -870,6 +890,7 @@ window.__ModuleLoader__.load({
       baseName: baseName,
       sameFile: sameFile,
       renderBoard: renderBoard,
+      focusPointer: focusPointer,
     }
     return module.exports
   },
