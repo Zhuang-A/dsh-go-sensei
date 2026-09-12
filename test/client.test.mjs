@@ -111,13 +111,76 @@ test('client: 工厂返回 Cordis 插件形状（name/apply，且不声明硬注
   assert.deepEqual(plugin.inject, [])
 })
 
-test('client: 面板注册到 conversation.composer.dock（该插槽才有 inputActions）', () => {
+test('client: 三处注册（dock 面板 / 左侧栏图标 / 主区域整页棋盘）', () => {
   const { registered, injected } = loadClient()
-  assert.deepEqual(injected, ['conversation.composer.dock'])
-  assert.equal(registered.length, 1)
+  assert.deepEqual(injected, ['conversation.composer.dock', 'sidebar.panellist', 'main'])
+  assert.equal(registered.length, 3)
+  // ① 输入框下方的面板：只有 composer 系列插槽给 inputActions，插入追问靠它
   assert.equal(registered[0].options.name, 'conversation.composer.dock')
   assert.equal(registered[0].options.id, 'go-sensei-panel')
   assert.equal(typeof registered[0].component, 'function')
+  // ② 左侧栏图标位：外壳自己渲染按钮与标签，我们只给图标（叠加注册，不覆盖原生控件）
+  assert.equal(registered[1].options.name, 'sidebar.panellist')
+  assert.equal(registered[1].options.id, 'go-sensei-board')
+  assert.equal(registered[1].options.label, 'Sensei 棋盘')
+  // ③ 对应的主区域面板，key 与图标位 id 一致（外壳按 id 把两者对上）
+  assert.equal(registered[2].options.name, 'main')
+  assert.equal(registered[2].options.key, 'go-sensei-board')
+  assert.equal(registered[2].options.key, registered[1].options.id)
+})
+
+test('client: 整页棋盘——空状态给两条路，有棋谱时左右排布并同步手数', () => {
+  const { registered, react, plugin } = loadClient()
+  const { senseiStore, senseiPatch } = plugin.__internals
+  const page = registered.find((r) => r.options.name === 'main').component
+
+  // 空状态：说清怎么把棋谱弄进来（dock 读取 / 跟随讲解自动载入）
+  senseiPatch({ data: null, upto: 0 })
+  react.reset()
+  let tree = page({})
+  let text = texts(walk(tree)).join('|')
+  assert.ok(text.includes('还没有棋谱'), text)
+  assert.ok(text.includes('跟随讲解'), text)
+  assert.ok(!walk(tree).some((n) => n.type === 'svg' && n.props.className === 'dgs-board'))
+
+  // 有棋谱：棋盘 + 详细列表（含胜率/目差/AI 首选/变化），点一行同步手数
+  const board = {
+    size: 19,
+    moves: [{ c: 'B', x: 3, y: 3 }, { c: 'W', x: 15, y: 15 }, { c: 'B', x: 4, y: 4 }],
+    setup: { black: [], white: [] },
+  }
+  const candidates = [{
+    moveNumber: 3, color: 'B', coord: 'dd', coordLabel: 'D16', label: '大恶手', labelKey: 'blunder',
+    winrateLoss: 25.5, scoreLoss: 12.3, pv: [{ label: 'Q16', winratePct: 51.2 }, { label: 'D4', winratePct: 48 }],
+  }]
+  senseiPatch({ data: { path: 'x.sgf', mode: 'analysis', moveCount: 3, candidates, board }, upto: 3 })
+  react.reset()
+  tree = page({})
+  const nodes = walk(tree)
+  assert.ok(nodes.some((n) => n.type === 'svg' && n.props.className === 'dgs-board'), '整页里要有棋盘')
+  assert.ok(nodes.some((n) => n.props.className === 'dgs-page-body'), '棋盘与详细列表要左右排布')
+  text = texts(nodes).join('|')
+  assert.ok(text.includes('第 3 手') && text.includes('25.5') && text.includes('12.3'), text)
+  assert.ok(text.includes('AI 首选 Q16'), text)
+  assert.ok(text.includes('变化：Q16 → D4'), text)
+
+  const row = nodes.find((n) => n.type === 'button' && n.props.className === 'dgs-page-item')
+  row.props.onClick()
+  assert.equal(senseiStore.upto, 3, '点一行把共享手数设到那一手')
+
+  // 清空，免得影响后续用例
+  senseiPatch({ data: null, upto: 0 })
+})
+
+test('client: 左侧栏图标按外壳给的 size 渲染', () => {
+  const { registered, react } = loadClient()
+  const icon = registered.find((r) => r.options.name === 'sidebar.panellist').component
+  react.reset()
+  const tree = icon({ size: 20, active: true })
+  assert.equal(tree.type, 'svg')
+  assert.equal(tree.props.width, 20)
+  assert.equal(tree.props.height, 20)
+  assert.equal(tree.props.style, undefined)
 })
 
 test('client: React 缺席时静默跳过注册（不抛错）', () => {

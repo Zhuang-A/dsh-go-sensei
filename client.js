@@ -81,6 +81,18 @@ window.__ModuleLoader__.load({
       '[data-dgs] .dgs-ctl button { padding: 2px 6px; white-space: nowrap; flex: 0 0 auto; }',
       '[data-dgs] input[type=range] { flex: 1 1 90px; min-width: 80px; padding: 0; background: transparent; border: none; }',
       '[data-dgs] .dgs-note { font-size: 11px; color: var(--dsw-alias-label-secondary, #9aa4b2); margin-top: 4px; }',
+      // ── 整页棋盘（主区域面板）：棋盘在左、问题手详细说明在右 ──────────────
+      '[data-dgs].dgs-page { border: none; border-radius: 0; background: transparent;',
+      '  margin: 0; padding: 12px 16px; max-width: none; height: 100%; box-sizing: border-box; }',
+      '[data-dgs] .dgs-page-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }',
+      '[data-dgs] .dgs-page-body { display: flex; gap: 16px; align-items: flex-start; margin-top: 10px; }',
+      '[data-dgs] .dgs-page-board { flex: 0 1 auto; width: min(520px, 44vw); min-width: 240px; }',
+      '[data-dgs] .dgs-page-list { flex: 1 1 320px; min-width: 0; max-height: 72vh; overflow-y: auto;',
+      '  display: flex; flex-direction: column; gap: 6px; }',
+      '[data-dgs] .dgs-page-item { width: 100%; text-align: left; padding: 7px 10px; }',
+      '[data-dgs] .dgs-page-empty { margin-top: 16px; max-width: 620px; line-height: 1.8; }',
+      '[data-dgs] .dgs-page-empty ul { margin: 6px 0 6px 18px; padding: 0; }',
+      '[data-dgs] .dgs-icon { display: block; }',
       '[data-dgs] .dgs-prob { color: var(--dsw-alias-state-error-primary, #e5534b); }',
       '[data-dgs] .dgs-rec { color: var(--dsw-alias-state-success-primary, #3fb950); }',
     ].join('\n')
@@ -513,6 +525,85 @@ window.__ModuleLoader__.load({
      */
     var focusPointer = { seq: 0, seen: 0, failures: 0, tried: {} }
 
+    // -----------------------------------------------------------------------
+    // 两份 UI 的共享状态：输入框下方的面板（控制器）＋ 左侧栏点开的整页棋盘
+    //
+    // 为什么需要：同一个插件注册了两处 UI，它们得显示同一盘棋、同一手。
+    // 宿主仍是数据的唯一来源（两边都从 /go-sensei/review 拿），但"现在停在第几手、
+    // 棋盘展开没有、跟不跟随"这类**视图状态**必须共享，否则在一边翻手另一边不动，
+    // 看着像两个程序。
+    //
+    // 面板是控制器（有路径输入、负责读取并把结果发布出来），整页是大视图。
+    // 注意单测里的 React 桩把 useEffect 实现成空操作，所以"发布/订阅"在测试里
+    // 不参与，面板的本地 state 依旧是它渲染的直接来源 —— 既有测试行为不变。
+    // -----------------------------------------------------------------------
+    /** 左侧栏图标位与主区域面板共用的 id（外壳按这个 id 把两者对上）。 */
+    var PANEL_ID = 'go-sensei-board'
+    var senseiStore = {
+      data: null,
+      path: '',
+      upto: 0,
+      boardOpen: false,
+      follow: true,
+      subs: [],
+    }
+
+    /** 写入共享状态，值真的变了才通知订阅者。 */
+    function senseiPatch(patch) {
+      var changed = false
+      for (var key in patch) {
+        if (Object.prototype.hasOwnProperty.call(patch, key) && senseiStore[key] !== patch[key]) {
+          senseiStore[key] = patch[key]
+          changed = true
+        }
+      }
+      if (!changed) return
+      var subs = senseiStore.subs.slice()
+      for (var i = 0; i < subs.length; i++) {
+        try {
+          subs[i]()
+        } catch (error) {
+          /* 一个订阅者出错不影响其它订阅者 */
+        }
+      }
+    }
+
+    /** 订阅共享状态；返回退订函数。 */
+    function senseiSubscribe(fn) {
+      senseiStore.subs.push(fn)
+      return function () {
+        var index = senseiStore.subs.indexOf(fn)
+        if (index >= 0) senseiStore.subs.splice(index, 1)
+      }
+    }
+
+    /** 组件里读取共享状态并跟随更新。 */
+    function useSenseiStore() {
+      var state = React.useState(0)
+      var setTick = state[1]
+      React.useEffect(function () {
+        return senseiSubscribe(function () { setTick(function (n) { return n + 1 }) })
+      }, [])
+      return senseiStore
+    }
+
+    /** 左侧栏的「Sensei 棋盘」图标：外壳给 size/active，配色随主题走。 */
+    function SenseiPanelIcon(props) {
+      var size = props && typeof props.size === 'number' ? props.size : 16
+      var active = props !== null && props !== undefined && props.active === true
+      return React.createElement('svg', {
+        className: 'dgs-icon', width: size, height: size, viewBox: '0 0 16 16',
+        fill: 'none', stroke: 'currentColor', strokeWidth: 1.1,
+        'aria-hidden': 'true', opacity: active ? 1 : 0.82,
+      },
+        React.createElement('rect', { key: 'b', x: 1.6, y: 1.6, width: 12.8, height: 12.8, rx: 1.4 }),
+        React.createElement('line', { key: 'h', x1: 1.6, y1: 8, x2: 14.4, y2: 8 }),
+        React.createElement('line', { key: 'v', x1: 8, y1: 1.6, x2: 8, y2: 14.4 }),
+        React.createElement('circle', { key: 's1', cx: 5.2, cy: 5.2, r: 1.5, fill: 'currentColor', stroke: 'none' }),
+        React.createElement('circle', { key: 's2', cx: 10.8, cy: 10.8, r: 1.5, fill: 'currentColor', stroke: 'none' }),
+      )
+    }
+
     /** 由服务端读取到的候选，拼出可直接发送的追问语。 */
     function followUpText(candidate, path) {
       var where = candidate.coordLabel ? '（这手下在 ' + candidate.coordLabel + '）' : ''
@@ -536,18 +627,195 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 整页棋盘（主区域面板）：棋盘在左、问题手详细说明在右。
+     *
+     * 与 dock 面板的分工：dock 负责"读棋谱 + 插入追问"（只有它拿得到 inputActions），
+     * 这里负责"看得大、看得全"（没有输入框能力，所以点一行改为复制追问语）。
+     * 两边共用 senseiStore，所以在哪边翻手、开关跟随，另一边立刻同步。
+     */
+    function SenseiBoardPage() {
+      var store = useSenseiStore()
+      var copyState = React.useState('')
+      var copied = copyState[0]
+      var setCopied = copyState[1]
+
+      var data = store.data
+      var board = data && data.board && Array.isArray(data.board.moves) ? data.board : null
+      var list = data && Array.isArray(data.candidates) ? data.candidates : []
+      var total = board === null ? 0 : board.moves.length
+      var cur = Math.max(0, Math.min(store.upto, total))
+      var curMove = board !== null && cur > 0 ? board.moves[cur - 1] : null
+      var problem = null
+      for (var pi = 0; pi < list.length; pi++) {
+        if (list[pi].moveNumber === cur) { problem = list[pi]; break }
+      }
+      var hint = problem && problem.pv && problem.pv[0] ? problem.pv[0] : null
+      var pvPoints = board === null || problem === null || !Array.isArray(problem.pv)
+        ? []
+        : problem.pv.slice(0, 3).map(function (p) { return parsePointLabel(p && p.label, board.size) })
+      var problemMarks = []
+      if (board !== null) {
+        for (var mi = 0; mi < list.length; mi++) {
+          var cand = list[mi]
+          var mv = typeof cand.moveNumber === 'number' ? board.moves[cand.moveNumber - 1] : null
+          if (mv !== undefined && mv !== null && mv.x >= 0) {
+            problemMarks.push({ x: mv.x, y: mv.y, color: markColor(cand.labelKey, cand.label) })
+          }
+        }
+      }
+      var problemMoves = []
+      for (var qi = 0; qi < list.length; qi++) {
+        if (typeof list[qi].moveNumber === 'number' && list[qi].moveNumber > 0) problemMoves.push(list[qi].moveNumber)
+      }
+      problemMoves.sort(function (a, b) { return a - b })
+      var nextProblem = null
+      var prevProblem = null
+      if (problemMoves.length > 0) {
+        for (var ni = 0; ni < problemMoves.length; ni++) {
+          if (problemMoves[ni] > cur) { nextProblem = problemMoves[ni]; break }
+        }
+        if (nextProblem === null) nextProblem = problemMoves[0]
+        for (var pj = problemMoves.length - 1; pj >= 0; pj--) {
+          if (problemMoves[pj] < cur) { prevProblem = problemMoves[pj]; break }
+        }
+        if (prevProblem === null) prevProblem = problemMoves[problemMoves.length - 1]
+      }
+
+      function copyFollowUp(candidate) {
+        var text = followUpText(candidate, data ? data.path : '')
+        var done = function () { setCopied('已复制第 ' + candidate.moveNumber + ' 手的追问语——粘到下面的输入框回车即可') }
+        try {
+          if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, function () { setCopied('复制失败：请手动选中文字') })
+            return
+          }
+        } catch (error) {
+          /* 走下面的兜底提示 */
+        }
+        setCopied('这段是本页要问的话，请手动复制：' + text)
+      }
+
+      var head = React.createElement('div', { className: 'dgs-page-head' },
+        React.createElement('span', { className: 'dgs-title' }, 'DeepGo Sensei · 棋盘'),
+        React.createElement('span', { className: 'dgs-sub' },
+          board === null ? '还没有棋谱' : boardStatusText(board, cur, curMove)),
+        React.createElement('span', { className: 'dgs-spacer' }),
+        board === null ? null : React.createElement('button', {
+          className: 'dgs-follow',
+          title: '开启后：Sensei 在对话里讲到哪一盘、第几手，这里自动跟过去',
+          onClick: function () { senseiPatch({ follow: !store.follow }) },
+        }, store.follow ? '跟随讲解 ✓' : '跟随讲解 ✕'),
+      )
+
+      if (board === null) {
+        return React.createElement('div', { className: 'dgs-page', 'data-dgs': '' }, head,
+          React.createElement('div', { className: 'dgs-page-empty' },
+            React.createElement('div', null, '这里放整页棋盘。还没有棋谱可以显示——两种方式任选：'),
+            React.createElement('ul', null,
+              React.createElement('li', null, '① 回到对话，在输入框下方的「DeepGo Sensei」面板里读一张棋谱；'),
+              React.createElement('li', null, '② 或者直接让 Sensei 复盘一盘棋——右下角开着「跟随讲解」时，这里会自动载入它讲的那盘棋。')),
+            React.createElement('div', { className: 'dgs-sub' }, '两边显示的是同一盘棋、同一手：在任一边翻手或开关跟随，另一边立刻同步。')))
+      }
+
+      var ctl = React.createElement('div', { className: 'dgs-ctl' },
+        React.createElement('button', { onClick: function () { senseiPatch({ upto: 0 }) }, title: '回到开局' }, '⏮'),
+        React.createElement('button', { onClick: function () { senseiPatch({ upto: Math.max(0, cur - 1) }) }, title: '上一手' }, '◀'),
+        React.createElement('button', { onClick: function () { senseiPatch({ upto: Math.min(total, cur + 1) }) }, title: '下一手' }, '▶'),
+        React.createElement('button', { onClick: function () { senseiPatch({ upto: total }) }, title: '跳到末手' }, '⏭'),
+        React.createElement('button', {
+          className: 'dgs-jump', disabled: prevProblem === null,
+          title: prevProblem === null ? '这盘棋没有发现明显问题手' : '跳到上一个恶点（第 ' + prevProblem + ' 手）',
+          onClick: function () { if (prevProblem !== null) senseiPatch({ upto: prevProblem }) },
+        }, '◀恶点'),
+        React.createElement('button', {
+          className: 'dgs-jump', disabled: nextProblem === null,
+          title: nextProblem === null ? '这盘棋没有发现明显问题手' : '跳到下一个恶点（第 ' + nextProblem + ' 手）',
+          onClick: function () { if (nextProblem !== null) senseiPatch({ upto: nextProblem }) },
+        }, '恶点▶'),
+        React.createElement('input', {
+          type: 'range', min: 0, max: total, value: cur,
+          title: '拖动快速定位',
+          onChange: function (event) { senseiPatch({ upto: Number(event.target.value) }) },
+        }),
+      )
+
+      var rows = list.map(function (candidate, index) {
+        var top = candidate.pv && candidate.pv[0] ? candidate.pv[0] : null
+        var pvText = Array.isArray(candidate.pv) && candidate.pv.length > 0
+          ? candidate.pv.map(function (p) { return String(p && p.label ? p.label : '') })
+              .filter(function (t) { return t !== ''; }).join(' → ')
+          : ''
+        return React.createElement('button', {
+          className: 'dgs-page-item',
+          key: String(candidate.moveNumber) + '-' + index,
+          title: '点击：棋盘跳到这一手，并复制追问语',
+          onClick: function () {
+            senseiPatch({ upto: candidate.moveNumber })
+            copyFollowUp(candidate)
+          },
+        },
+          React.createElement('div', { className: 'dgs-l1' },
+            React.createElement('span', { className: 'dgs-mv' }, '第 ' + candidate.moveNumber + ' 手'),
+            React.createElement('span', null, candidate.color === 'B' ? '黑' : '白'),
+            React.createElement('span', { className: 'dgs-coord' }, candidate.coordLabel || candidate.coord || ''),
+            React.createElement('span', {
+              className: 'dgs-badge',
+              style: { color: severityColor(candidate.label) },
+            }, candidate.label || ''),
+          ),
+          React.createElement('div', { className: 'dgs-l2' },
+            '−' + (candidate.winrateLoss == null ? '?' : candidate.winrateLoss) + '% 胜率'
+            + (candidate.scoreLoss == null ? '' : ' · ' + candidate.scoreLoss + ' 目')
+            + (top && top.label ? '　AI 首选 ' + String(top.label)
+                + (top.winratePct == null ? '' : '（胜率 ' + String(top.winratePct) + '%）') : '')),
+          pvText === '' ? null : React.createElement('div', { className: 'dgs-l2' }, '变化：' + pvText),
+        )
+      })
+
+      return React.createElement('div', { className: 'dgs-page', 'data-dgs': '' }, head, ctl,
+        copied === '' ? null : React.createElement('div', { className: 'dgs-ok' }, copied),
+        React.createElement('div', { className: 'dgs-page-body' },
+          React.createElement('div', { className: 'dgs-page-board' },
+            renderBoard({
+              board: board, upto: cur, problem: problemPointOf(problem, curMove),
+              marks: problemMarks, pv: pvPoints,
+              hintLabel: hint && hint.label ? hint.label : '',
+            }),
+            React.createElement('div', { className: 'dgs-note' },
+              problem !== null
+                ? '○ 实战这一手是问题手　◌ AI 首选（青圆蓝圈）　蓝点＝变化图后续'
+                : problemMarks.length > 0
+                  ? '● 盘上色点＝问题手（紫＞红＞橙）：点右边任意一行跳过去'
+                  : '未发现明显问题手'),
+          ),
+          React.createElement('div', { className: 'dgs-page-list' },
+            list.length === 0
+              ? React.createElement('div', { className: 'dgs-sub' }, '这盘棋没有发现问题手')
+              : rows),
+        ))
+    }
+
+    /** 问题手 + 当前手 → 棋盘上那个大圈的坐标（两侧 UI 共用）。 */
+    function problemPointOf(problem, curMove) {
+      if (problem === null || curMove === null || curMove === undefined || curMove.x < 0) return null
+      return { x: curMove.x, y: curMove.y, key: problem.labelKey, label: problem.label }
+    }
+
+    /**
      * 复盘入口（composer dock）。展开后：路径输入 + 读取 + 问题手列表。
      * props.inputActions.setDraft 是「真正把文字写进输入框」的动词。
      */
     function SenseiPanel(props) {
       var actions = props && props.inputActions ? props.inputActions : noActions()
-      var state = React.useState('')
+      // 初值取自共享状态：面板可能因为切到整页棋盘而被卸载再挂回来
+      // （主区域一次只渲染一个面板），那时它必须接着显示原来那盘棋、原来那一手。
+      var state = React.useState(senseiStore.path)
       var path = state[0]
       var setPath = state[1]
       var busyState = React.useState(false)
       var busy = busyState[0]
       var setBusy = busyState[1]
-      var dataState = React.useState(null)
+      var dataState = React.useState(senseiStore.data)
       var data = dataState[0]
       var setData = dataState[1]
       var errState = React.useState('')
@@ -563,15 +831,15 @@ window.__ModuleLoader__.load({
       var open = openState[0]
       var setOpen = openState[1]
       // 内置棋盘：收起态只留一行表头；展开后才有棋盘本体与控制条
-      var boardOpenState = React.useState(false)
+      var boardOpenState = React.useState(senseiStore.boardOpen)
       var boardOpen = boardOpenState[0]
       var setBoardOpen = boardOpenState[1]
-      // 棋盘显示到第几手（0 = 开局）；载入棋谱后默认停在末手
-      var uptoState = React.useState(0)
+      // 棋盘显示到第几手（0 = 开局）；载入棋谱后默认停在最严重的问题手
+      var uptoState = React.useState(senseiStore.upto)
       var upto = uptoState[0]
       var setUpto = uptoState[1]
       // 跟随讲解：Sensei 讲到哪一手，棋盘就跳到哪一手
-      var followState = React.useState(true)
+      var followState = React.useState(senseiStore.follow)
       var follow = followState[0]
       var setFollow = followState[1]
       // 跟随讲解连续失败时的如实说明（页面连接失效时不再静默）
@@ -713,8 +981,7 @@ window.__ModuleLoader__.load({
         if (data !== null && !boardOpen) return undefined
         var timer = setInterval(pollFocus, 3000)
         pollFocus()
-        return function () { clearInterval(timer) }
-      }, [open, boardOpen, follow, data])
+        return function () { clearInterval(timer) }      }, [open, boardOpen, follow, data])
 
       /** 点棋盘交叉点 → 就这个点插入追问。 */
       function askPoint(x, y) {
@@ -726,6 +993,24 @@ window.__ModuleLoader__.load({
           + ' 会怎样？请讲讲这一手的价值与后续变化。'
           + (data.path ? '（棋谱：' + data.path + '）' : ''))
       }
+
+      /**
+       * 面板 → 共享状态：把当前这盘棋、这一手、这些开关发布给整页棋盘。
+       * 放在 effect 里（而不是渲染期）是必须的：渲染期改别人的状态，React 会报
+       * "Cannot update a component while rendering a different component"。
+       */
+      React.useEffect(function () {
+        senseiPatch({ data: data, path: path, upto: upto, boardOpen: boardOpen, follow: follow })
+      }, [data, path, upto, boardOpen, follow])
+
+      /** 共享状态 → 面板：整页棋盘那边翻手/开关时跟着走（比较后再 set，避免打转）。 */
+      React.useEffect(function () {
+        return senseiSubscribe(function () {
+          if (senseiStore.upto !== upto) setUpto(senseiStore.upto)
+          if (senseiStore.boardOpen !== boardOpen) setBoardOpen(senseiStore.boardOpen)
+          if (senseiStore.follow !== follow) setFollow(senseiStore.follow)
+        })
+      }, [upto, boardOpen, follow])
 
       /**
        * 点问题手一行：棋盘跳到那一手（并自动展开棋盘），同时把追问语插进输入框。
@@ -964,17 +1249,30 @@ window.__ModuleLoader__.load({
         React.createElement('div', null, kids))
     }
 
-    /** 注册到 composer dock；React/slots 缺席时静默跳过。 */
+    /** 注册到 composer dock 与左侧栏面板位；React/slots 缺席时静默跳过。 */
     function registerPanel(ctx) {
       if (React === null || typeof React.createElement !== 'function') return
       var slots = ctx.get('slots')
       if (slots === undefined || typeof slots.inject !== 'function') return
       ensureStyles()
+      // ① 输入框下方的面板：负责读取棋谱、插入追问（只有 composer 系列插槽给 inputActions）
       slots.inject('conversation.composer.dock', function () {
         return slots.register(
           { name: 'conversation.composer.dock', id: 'go-sensei-panel' },
           SenseiPanel,
         )
+      })
+      // ② 左侧栏的「Sensei 棋盘」图标位：外壳自己渲染按钮与标签、自己负责切主区域，
+      //    我们只画图标 —— 这样不会和原生侧边栏抢位置（叠加式注册，replaceRisk 为 none）
+      slots.inject('sidebar.panellist', function () {
+        return slots.register(
+          { name: 'sidebar.panellist', id: PANEL_ID, order: 50, label: 'Sensei 棋盘' },
+          SenseiPanelIcon,
+        )
+      })
+      // ③ 对应的主区域面板：棋盘在左、问题手详细说明在右（keyed 插槽，新 key 不覆盖 conversation）
+      slots.inject('main', function () {
+        return slots.register({ name: 'main', key: PANEL_ID }, SenseiBoardPage)
       })
     }
 
@@ -1002,6 +1300,11 @@ window.__ModuleLoader__.load({
       sameFile: sameFile,
       renderBoard: renderBoard,
       focusPointer: focusPointer,
+      // 两份 UI 的共享状态：单测直接摆好它再渲染整页棋盘
+      //（React 桩把 useEffect 实现成空操作，所以发布/订阅在测试里不参与）
+      senseiStore: senseiStore,
+      senseiPatch: senseiPatch,
+      PANEL_ID: PANEL_ID,
     }
     return module.exports
   },
