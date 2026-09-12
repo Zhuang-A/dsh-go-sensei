@@ -78,7 +78,7 @@ function texts(nodes) {
 }
 
 /** 装载 client.js，返回 entry 与测试用的桩对象。 */
-function loadClient({ withReact = true, withDocuments = false, withEffects = false, withInject = false } = {}) {
+function loadClient({ withReact = true, withDocuments = false, withEffects = false, withInject = false, withClipboard = false } = {}) {
   const react = makeReactStub({ withEffects })
   const registered = []
   const injected = []
@@ -86,6 +86,7 @@ function loadClient({ withReact = true, withDocuments = false, withEffects = fal
   const documents = []
   const docInjected = []
   const injectDeps = []
+  const clipboardWrites = []
   let pendingInject = null
   globalThis.window = {
     __ModuleLoader__: { load(entry) { loaded.push(entry) } },
@@ -114,7 +115,10 @@ function loadClient({ withReact = true, withDocuments = false, withEffects = fal
   const source = readFileSync(join(here, '..', 'client.js'), 'utf8')
   // 以函数体执行，模拟宿主 ModuleLoader 调用工厂
   const fn = new Function('window', 'document', 'navigator', source)
-  fn(globalThis.window, undefined, undefined)
+  const navigatorStub = withClipboard
+    ? { clipboard: { writeText: (text) => { clipboardWrites.push(text); return Promise.resolve() } } }
+    : undefined
+  fn(globalThis.window, undefined, navigatorStub)
   const entry = loaded[0]
   const plugin = entry.factory(requireStub)
   plugin.apply(ctx)
@@ -124,7 +128,7 @@ function loadClient({ withReact = true, withDocuments = false, withEffects = fal
     const scopedGet = (name) => (name === 'documentPreviews' ? documentPreviews : get(name))
     return pendingInject({ get: scopedGet, effect: (fn) => fn() })
   }
-  return { entry, plugin, registered, injected, react, documents, docInjected, injectDeps, runInject }
+  return { entry, plugin, registered, injected, react, documents, docInjected, injectDeps, runInject, clipboardWrites }
 }
 
 // ---------------------------------------------------------------------------
@@ -1076,7 +1080,7 @@ test('路由: 没有 sessions 服务时 session 参数被忽略（不抛错）',
 })
 
 test('client: 右侧栏正文渲染棋盘与问题手（拿 resourceAddress 当棋谱路径）', async () => {
-  const { registered, react, docInjected } = loadClient({ withDocuments: true, withEffects: true })
+  const { registered, react, docInjected } = loadClient({ withDocuments: true, withEffects: true, withClipboard: true })
   assert.deepEqual(docInjected, ['sidebar.right.tab.document'])
   const bodyReg = registered.filter((r) => r.options.name === 'sidebar.right.tab.document')
   assert.equal(bodyReg.length, 1)
@@ -1208,4 +1212,60 @@ test('client: 面板显示当前手的讲解注释，并在列表里标出「有
   const all = texts(nodes).join('|')
   assert.ok(all.includes('有讲解'), '问题手列表里应标出哪几手有讲解')
   assert.ok(all.includes('第 3/6 手'), all)
+})
+
+test('client: 右侧栏：控件与棋盘同容器（不偏移）、点交叉点复制追问语', async () => {
+  const { registered, react, clipboardWrites } = loadClient({ withDocuments: true, withEffects: true, withClipboard: true })
+  const gamePath = fixture('real-analysis.sgf')
+  const board = {
+    size: 19,
+    moves: [
+      { c: 'B', x: 3, y: 3 }, { c: 'W', x: 15, y: 15 }, { c: 'B', x: 4, y: 4 },
+      { c: 'W', x: 15, y: 3 }, { c: 'B', x: 3, y: 15 }, { c: 'W', x: 9, y: 9 },
+    ],
+    setup: { black: [], white: [] },
+  }
+  globalThis.fetch = async (url) => ({
+    ok: true,
+    json: async () => (String(url).includes('/go-sensei/focus')
+      ? { ok: true, focus: null }
+      : {
+          ok: true,
+          data: {
+            path: gamePath, mode: 'analysis', level: '18K', moveCount: 6, variations: 0,
+            candidates: [], board, comments: {},
+          },
+        }),
+  })
+
+  const bodyReg = registered.filter((r) => r.options.name === 'sidebar.right.tab.document')
+  const Body = bodyReg[0].component
+  const address = 'dsh-resource://file/session/s1/' + gamePath.replace(/\\/g, '/')
+  react.reset()
+  Body({ resourceAddress: address })
+  react.runEffect(0)
+  await new Promise((r) => setTimeout(r, 30))
+  react.reset()
+  const tree = Body({ resourceAddress: address })
+
+  // ① 棋盘与控件必须同宽同中：右侧栏比面板宽，"各自居中"会让控件看起来偏了
+  const inner = walk(tree).find((n) => String(n.props.className || '').includes('dgs-doc-inner'))
+  assert.ok(inner, '棋盘与控件应包在同一个居中容器里')
+  const innerTypes = walk(inner).map((n) => n.type)
+  assert.ok(innerTypes.includes('svg'), '容器里应有棋盘')
+  assert.ok(innerTypes.includes('div') && texts(walk(inner)).join('|').includes('⏮'), '容器里应有控件条')
+  const svg = walk(tree).find((n) => n.type === 'svg')
+
+  // ② 点棋盘交叉点 → 复制该点的追问语（右侧栏没有输入框）
+  const hit = walk(svg).find((child) => child.props && child.props.fill === 'transparent')
+  assert.ok(hit, '棋盘应有透明点击层')
+  assert.equal(typeof hit.props.onClick, 'function', '右侧栏棋盘必须接上点击回调')
+  hit.props.onClick({
+    currentTarget: { getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) },
+    clientX: 8, clientY: 8,
+  })
+  await new Promise((r) => setTimeout(r, 10))
+  assert.equal(clipboardWrites.length, 1, '点击后应写入剪贴板')
+  assert.ok(clipboardWrites[0].includes('如果下在 A19'), clipboardWrites[0])
+  assert.ok(clipboardWrites[0].includes(gamePath), clipboardWrites[0])
 })

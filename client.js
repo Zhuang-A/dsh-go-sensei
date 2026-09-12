@@ -109,7 +109,9 @@ window.__ModuleLoader__.load({
       '[data-dgs] .dgs-doc-head { display: flex; align-items: center; gap: 8px; }',
       '[data-dgs] .dgs-doc-head .dgs-spacer { flex: 1; }',
       '[data-dgs] .dgs-doc-status { font-size: 12px; margin: 6px 0 2px; }',
-      '[data-dgs] .dgs-doc-board { width: 100%; max-width: 480px; margin: 0 auto; }',
+      // 棋盘与控件同宽同中：两侧各自居中会让控件看起来"偏了"
+      '[data-dgs] .dgs-doc-inner { width: 100%; max-width: 480px; margin: 0 auto; }',
+      '[data-dgs] .dgs-doc-board { width: 100%; margin: 0 auto; }',
       '[data-dgs] .dgs-doc-list { max-height: none; }',
     ].join('\n')
 
@@ -508,6 +510,31 @@ window.__ModuleLoader__.load({
         className: 'dgs-board', viewBox: '0 0 ' + BOARD_VIEW + ' ' + BOARD_VIEW,
         xmlns: 'http://www.w3.org/2000/svg', 'data-dgs-board': String(size),
       }, kids)
+    }
+
+    /**
+     * 点棋盘交叉点的追问语（三处视图共用同一句）。
+     * 输入框下方面板把它插进输入框；整页与右侧栏没有输入框，改为复制到剪贴板。
+     */
+    function askPointText(data, upto, x, y) {
+      if (!data || !data.board) return ''
+      var label = boardLabel(x, y, data.board.size)
+      return '追问：第 ' + upto + ' 手之后的局面，如果下在 ' + label
+        + ' 会怎样？请讲讲这一手的价值与后续变化。'
+        + (data.path ? '（棋谱：' + data.path + '）' : '')
+    }
+
+    /** 复制到剪贴板（三处视图共用）：没有剪贴板权限时如实说明，不假装成功。 */
+    function copyText(text, onDone, onFail) {
+      try {
+        if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(onDone, onFail)
+          return
+        }
+      } catch (error) {
+        /* 无剪贴板权限 → 走 onFail */
+      }
+      onFail()
     }
 
     /** 取路径的末段（跨 Windows/Unix 两种分隔符）。 */
@@ -937,6 +964,15 @@ window.__ModuleLoader__.load({
               marks: problemMarks, pv: pvPoints,
               noteMoves: noteMoves,
               hintLabel: hint && hint.label ? hint.label : '',
+              // 整页也没有输入框：点击交叉点改为复制追问语（与右侧栏一致）
+              onPick: function (x, y) {
+                var text = askPointText(data, cur, x, y)
+                if (text === '') return
+                var where = boardLabel(x, y, board.size)
+                copyText(text,
+                  function () { setCopied('已复制该点的追问语（' + where + '）——粘到输入框回车即可') },
+                  function () { setCopied('复制失败：请手动选中') })
+              },
             }),
             React.createElement('div', { className: 'dgs-note' },
               problem !== null
@@ -1624,16 +1660,22 @@ window.__ModuleLoader__.load({
 
       function copyFollowUpDoc(candidate) {
         var text = followUpText(candidate, path)
-        var done = function () { setCopied('已复制第 ' + candidate.moveNumber + ' 手的追问语') }
-        try {
-          if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(text).then(done, function () { setCopied('复制失败：请手动选中') })
-            return
-          }
-        } catch (error) {
-          /* 无剪贴板权限：退回提示 */
-        }
-        setCopied('复制失败：请手动选中')
+        copyText(text,
+          function () { setCopied('已复制第 ' + candidate.moveNumber + ' 手的追问语') },
+          function () { setCopied('复制失败：请手动选中') })
+      }
+
+      /**
+       * 点棋盘交叉点 → 就该点复制一句追问（右侧栏没有输入框，所以是复制而不是插入）。
+       * 与输入框下方面板同一个动作，只是那边直接插进输入框。
+       */
+      function askPointDoc(x, y) {
+        var text = askPointText(data, cur, x, y)
+        if (text === '') return
+        var label = board !== null ? boardLabel(x, y, board.size) : ''
+        copyText(text,
+          function () { setCopied('已复制该点的追问语（' + label + '）——粘到输入框回车即可') },
+          function () { setCopied('复制失败：请手动选中') })
       }
 
       if (path === '') {
@@ -1701,16 +1743,21 @@ window.__ModuleLoader__.load({
         kids.push(React.createElement('div', { className: 'dgs-doc-status', key: 's' },
           boardStatusText(board, cur, curMove),
           data.mode === 'analysis' ? ' · AI 分析' : ' · 纯棋理'))
-        kids.push(React.createElement('div', { className: 'dgs-doc-board', key: 'bd' },
-          renderBoard({
-            board: board,
-            upto: cur,
-            problem: problemPoint,
-            pv: pvPoints,
-            noteMoves: noteMoves,
-            hintLabel: hint && hint.label ? hint.label : '',
-          })))
-        kids.push(React.createElement('div', { className: 'dgs-ctl', key: 'ctl' },
+        // 棋盘与控件放进同一个居中容器：右侧栏比面板宽，两边各自居中会让
+        // 控件与棋盘对不齐（用户报的「控件有偏移」）
+        var inner = [
+          React.createElement('div', { className: 'dgs-doc-board', key: 'bd' },
+            renderBoard({
+              board: board,
+              upto: cur,
+              problem: problemPoint,
+              pv: pvPoints,
+              noteMoves: noteMoves,
+              hintLabel: hint && hint.label ? hint.label : '',
+              onPick: askPointDoc,
+            })),
+        ]
+        var ctl = React.createElement('div', { className: 'dgs-ctl', key: 'ctl' },
           React.createElement('button', { onClick: function () { setUpto(0) }, title: '回到开局' }, '⏮'),
           React.createElement('button', { onClick: function () { setUpto(Math.max(0, cur - 1)) }, title: '上一手' }, '◀'),
           React.createElement('button', { onClick: function () { setUpto(Math.min(total, cur + 1)) }, title: '下一手' }, '▶'),
@@ -1742,7 +1789,9 @@ window.__ModuleLoader__.load({
           React.createElement('input', {
             type: 'range', min: 0, max: total, value: cur,
             onChange: function (event) { setUpto(Number(event.target.value)) },
-          })))
+          }))
+        inner.push(ctl)
+        kids.push(React.createElement('div', { className: 'dgs-doc-inner', key: 'inner' }, inner))
         if (problem !== null) {
           kids.push(React.createElement('div', { className: 'dgs-note', key: 'n' },
             React.createElement('span', { className: 'dgs-prob' },
