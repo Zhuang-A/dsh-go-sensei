@@ -409,19 +409,34 @@ export function winrateForColor(move, color) {
 }
 
 /**
- * 棋谱是否带**可用的逐手胜率数据**（复盘能据此算落差的那种）。
+ * 棋谱是否带**可用于复盘的**逐手胜率数据。
  *
- * 为什么不能用 `move.analysis !== null` 判断：只要节点上有任何 C[] 注释，
- * extractAnalysis 就会产出一个 analysis 对象（哪怕注释只是一段人工复盘文字，
- * 里面提到"胜率 37%"这种数字）。那种棋谱"看起来有分析"，实际每个数字都取不到，
- * 复盘退化成 theory 模式；而补算又因为"已有分析"被跳过 —— 两头落空，面板上就是
- * 「纯棋理 · 0 个问题手」。所以判定必须落在**能不能取到胜率**上。
+ * 判据不是"有一手能取到胜率"，而是"**至少有一处相邻两手都能取到**"：
+ *   · 复盘算的是相邻手之间的落差（reviewGame 的 wBefore/wAfter 取自相邻两个节点），
+ *     孤立一手带分析时一个候选都产生不了；
+ *   · "有一手能取到"太松：实测有棋谱 96 手里只有 1 手能从人工注释解析出胜率，
+ *     那种棋谱会被判成"已有分析"从而跳过补算，复盘又算不出问题手 —— 又是两头落空。
  *
  * @param {object} game parseGame 的返回值
- * @returns {boolean} 至少有一手能取到落子者视角胜率
+ * @returns {boolean} 至少有一对相邻着手都能取到落子者视角胜率
  */
 export function hasWinrateData(game) {
-  return (game?.moves ?? []).some((move) => winrateForMover(move) !== undefined)
+  return countWinratePairs(game) > 0
+}
+
+/**
+ * 能算出落差的着手数（相邻两手都能取到胜率）。
+ * 诊断用：为 0 就说明这盘棋只有靠补算才讲得动。
+ * @param {object} game parseGame 的返回值
+ * @returns {number}
+ */
+export function countWinratePairs(game) {
+  const moves = game?.moves ?? []
+  let pairs = 0
+  for (let i = 1; i < moves.length; i++) {
+    if (winrateForMover(moves[i]) !== undefined && winrateForMover(moves[i - 1]) !== undefined) pairs += 1
+  }
+  return pairs
 }
 
 /**

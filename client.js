@@ -75,9 +75,11 @@ window.__ModuleLoader__.load({
       '[data-dgs] .dgs-col-board { flex: 0 0 auto; width: 300px; max-width: 46%; }',
       '[data-dgs] .dgs-col-list { flex: 1; min-width: 0; }',
       '[data-dgs] .dgs-board { display: block; width: 100%; height: auto; border-radius: 6px; }',
-      '[data-dgs] .dgs-ctl { display: flex; align-items: center; gap: 4px; margin-top: 6px; }',
-      '[data-dgs] .dgs-ctl button { padding: 2px 7px; }',
-      '[data-dgs] input[type=range] { flex: 1; min-width: 0; padding: 0; background: transparent; border: none; }',
+      '[data-dgs] .dgs-ctl { display: flex; align-items: center; gap: 4px; margin-top: 6px; flex-wrap: wrap; }',
+      // 按钮文字不许折行（窄面板里「恶点」会被挤成竖排两行）；挤不下时让滑块换到下一行。
+      // 面板宽度随会话栏变化，真机上就撞到过这个问题。
+      '[data-dgs] .dgs-ctl button { padding: 2px 6px; white-space: nowrap; flex: 0 0 auto; }',
+      '[data-dgs] input[type=range] { flex: 1 1 90px; min-width: 80px; padding: 0; background: transparent; border: none; }',
       '[data-dgs] .dgs-note { font-size: 11px; color: var(--dsw-alias-label-secondary, #9aa4b2); margin-top: 4px; }',
       '[data-dgs] .dgs-prob { color: var(--dsw-alias-state-error-primary, #e5534b); }',
       '[data-dgs] .dgs-rec { color: var(--dsw-alias-state-success-primary, #3fb950); }',
@@ -506,9 +508,10 @@ window.__ModuleLoader__.load({
      * 「跟随讲解」游标（面板级）。
      * - seq：已经**应用**到棋盘的指针序号（同一件旧事不再重复应用）；
      * - seen：已经**见过**的最大序号（用户手动载入时用它把旧指针认掉）；
+     * - failures：连续轮询失败次数（连接失效时用来给出可诊断的提示）；
      * - tried：失败过的自动载入，防止路径解析不了时每 3 秒重试一次。
      */
-    var focusPointer = { seq: 0, seen: 0, tried: {} }
+    var focusPointer = { seq: 0, seen: 0, failures: 0, tried: {} }
 
     /** 由服务端读取到的候选，拼出可直接发送的追问语。 */
     function followUpText(candidate, path) {
@@ -571,6 +574,10 @@ window.__ModuleLoader__.load({
       var followState = React.useState(true)
       var follow = followState[0]
       var setFollow = followState[1]
+      // 跟随讲解连续失败时的如实说明（页面连接失效时不再静默）
+      var followNoteState = React.useState('')
+      var followNote = followNoteState[0]
+      var setFollowNote = followNoteState[1]
 
       // 会话工作区根：客户端快照里没有 cwd 字段，这里只作「锦上添花」尝试；
       // 真正可靠的基准由 Host 用 tools/result 记下的工作区根提供。
@@ -658,6 +665,10 @@ window.__ModuleLoader__.load({
         fetch('/go-sensei/focus')
           .then(function (response) { return response.json().catch(function () { return {} }) })
           .then(function (body) {
+            if (focusPointer.failures > 0) {
+              focusPointer.failures = 0
+              setFollowNote('')
+            }
             var f = body && body.ok === true ? body.focus : null
             if (!f || typeof f.seq !== 'number') return
             if (f.seq > focusPointer.seen) focusPointer.seen = f.seq
@@ -666,7 +677,15 @@ window.__ModuleLoader__.load({
             focusPointer.seq = f.seq
             applyFocus(f)
           })
-          .catch(function () { /* 轮询失败静默重试 */ })
+          .catch(function () {
+            // 页面连接失效时（实测：dsh web 重启后浏览器对同源的连接池会废掉）
+            // 轮询会一直失败。以前是静默重试，用户看到的就是"跟随讲解没反应"——
+            // 连失败三次就把话说清楚，并给出唯一的恢复手段。
+            focusPointer.failures = (focusPointer.failures || 0) + 1
+            if (focusPointer.failures >= 3) {
+              setFollowNote('跟随讲解：连续 ' + focusPointer.failures + ' 次没连上宿主——页面连接可能已失效，刷新页面（F5）即可恢复。')
+            }
+          })
       }
 
       /** 把指针落到棋盘上：同一盘棋就跳手数，另一盘棋就自动载入。 */
@@ -816,6 +835,10 @@ window.__ModuleLoader__.load({
         ),
       ))
 
+      if (followNote) {
+        kids.push(React.createElement('div', { className: 'dgs-err', key: 'follownote' }, followNote))
+      }
+
       if (boardOpen && board === null) {
         kids.push(React.createElement('div', { className: 'dgs-sub', key: 'noboard' },
           follow
@@ -824,13 +847,28 @@ window.__ModuleLoader__.load({
       }
 
       if (data) {
+        // 补算状态照实显示：这类"读不到"的抱怨里，最需要一眼看清的就是
+        // "宿主到底补算没有、补算成功没有"，否则用户只能看到「纯棋理 · 0 个问题手」。
+        var auto = data.autoEngine && typeof data.autoEngine === 'object' ? data.autoEngine : null
+        var autoText = ''
+        if (auto !== null && auto.failed !== undefined) {
+          autoText = ' · 补算未成功：' + String(auto.failed).slice(0, 40)
+        } else if (auto !== null && typeof auto.moves === 'number') {
+          autoText = ' · 引擎补算 ' + String(auto.moves) + ' 手'
+            + (auto.seconds == null ? '' : '（' + String(auto.seconds) + ' 秒）')
+        }
         kids.push(React.createElement('div', { className: 'dgs-sub', key: 'meta' },
           (data.mode === 'analysis' ? 'AI 分析' : '纯棋理') + ' · 难度 ' + String(data.level || '-')
           + ' · ' + String(data.moveCount || 0) + ' 手 / ' + String(data.variations || 0) + ' 变化图'
-          + ' · ' + list.length + ' 个问题手'))
+          + ' · ' + list.length + ' 个问题手' + autoText))
 
         var listEl = list.length === 0
-          ? React.createElement('div', { className: 'dgs-sub', key: 'none' }, '未发现明显问题手（或棋谱无分析数据）')
+          ? React.createElement('div', { className: 'dgs-sub', key: 'none' },
+              data.mode === 'analysis'
+                ? '未发现明显问题手'
+                : auto !== null && auto.failed !== undefined
+                  ? '棋谱没有可用的分析数据，补算也没成功（原因见上一行）'
+                  : '棋谱没有可用的分析数据：这一档只能讲棋理，不报胜率与候选点')
           : React.createElement('div', { className: 'dgs-list', key: 'list' },
               list.map(function (candidate, index) {
                 var top = candidate.pv && candidate.pv[0] ? candidate.pv[0] : null

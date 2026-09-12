@@ -18,6 +18,7 @@ import {
   winrateForColor,
   scoreForMover,
   hasWinrateData,
+  countWinratePairs,
   injectComments,
 } from '../src/sgf.js'
 
@@ -91,13 +92,26 @@ test('parseGame: 无摆子时 setup 形状稳定（两个空数组）', () => {
 
 test('hasWinrateData: 只认「能取到逐手胜率」的棋谱', () => {
   // 带 LZ 属性 → 有可用胜率
-  assert.equal(hasWinrateData(parseGame(readFixture('synthetic-analysis.sgf').toString('utf8'))), true)
+  const lz = parseGame(readFixture('synthetic-analysis.sgf').toString('utf8'))
+  assert.equal(hasWinrateData(lz), true)
+  assert.ok(countWinratePairs(lz) > 0)
   // 只有人工注释（注释里提到"胜率 45%"），解析不出可用胜率 → 不算有分析数据。
-  // 这是用户报的「无备注的棋谱不能补算」的根因：旧判据用 analysis !== null，
-  // 这类棋谱被当成"已有分析"跳过补算，复盘又只能退化成纯棋理，两头落空。
+  // 旧判据用 analysis !== null，这类棋谱被当成"已有分析"跳过补算，复盘又只能
+  // 退化成纯棋理，两头落空。
   const commentOnly = parseGame('(;GM[1]SZ[19];B[pd]C[这手胜率 45%，有点贪];W[dp]C[正常])')
   assert.ok(commentOnly.moves[0].analysis !== null, '注释会产生 analysis 对象（旧判据因此误判）')
   assert.equal(hasWinrateData(commentOnly), false)
+  // 关键回归：**孤立一手**有胜率也不算 —— 复盘算的是相邻两手的落差。
+  // 实测用户的棋谱 96 手里只有 1 手能从注释解析出胜率，"任一手有胜率"的判据会
+  // 判成"已有分析"跳过补算，复盘却 0 问题手。
+  const isolated = parseGame('(;GM[1]SZ[19];B[pd]C[黑棋 胜率: 45%];W[dp];B[qp];W[dd])')
+  assert.equal(winrateForMover(isolated.moves[0]) !== undefined, true, '第 1 手确实能取到胜率')
+  assert.equal(countWinratePairs(isolated), 0, '但没有相邻的一对')
+  assert.equal(hasWinrateData(isolated), false)
+  // 相邻两手都有 → 才算
+  const adjacent = parseGame('(;GM[1]SZ[19];B[pd]C[黑棋 胜率: 45%];W[dp]C[白棋 胜率: 52%];B[qp])')
+  assert.equal(countWinratePairs(adjacent), 1)
+  assert.equal(hasWinrateData(adjacent), true)
   // 光秃秃的棋谱
   assert.equal(hasWinrateData(parseGame('(;GM[1]SZ[19];B[pd];W[dp])')), false)
 })

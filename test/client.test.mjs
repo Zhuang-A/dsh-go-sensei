@@ -580,6 +580,51 @@ test('client: 变化图落在实战已占的点上时不画蓝点（免得像把
   assert.equal(dots[0].props.cx, 8 + 5 * (84 / 8), '留下的是 pv[2]（序号 3）')
 })
 
+test('client: 面板如实显示补算状态（补了多少手 / 失败原因）', async () => {
+  const { registered, react } = loadClient()
+  const gamePath = fixture('real-analysis.sgf')
+  const board = { size: 19, moves: [{ c: 'B', x: 3, y: 3 }, { c: 'W', x: 15, y: 15 }], setup: { black: [], white: [] } }
+
+  const render = async (data) => {
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ ok: true, data }) })
+    const props = { inputActions: { setDraft() {} } }
+    react.reset()
+    let tree = registered[0].component(props)
+    const btn = (label) => walk(tree).find((n) => n.type === 'button' && texts([n]).includes(label))
+    if (btn('展开') !== undefined) { btn('展开').props.onClick(); react.reset(); tree = registered[0].component(props) }
+    walk(tree).find((n) => n.type === 'input').props.onChange({ target: { value: gamePath } })
+    react.reset()
+    tree = registered[0].component(props)
+    walk(tree).find((n) => n.type === 'button' && texts([n]).includes('读取问题手')).props.onClick()
+    await new Promise((r) => setTimeout(r, 30))
+    react.reset()
+    return texts(walk(registered[0].component(props))).join('|')
+  }
+
+  // 补算成功：手数与耗时都要露出来
+  const ok = await render({
+    path: gamePath, mode: 'analysis', level: '18K', moveCount: 2, variations: 0, candidates: [],
+    board, autoEngine: { from: 1, to: 2, moves: 113, seconds: 34.5, engine: 'KataGo' },
+  })
+  assert.ok(ok.includes('引擎补算 113 手'), ok)
+  assert.ok(ok.includes('34.5 秒'), ok)
+
+  // 补算失败：失败原因要露出来，且"没东西可讲"要说清是补算没成功
+  const failed = await render({
+    path: gamePath, mode: 'theory', level: '18K', moveCount: 2, variations: 0, candidates: [],
+    board, autoEngine: { failed: 'subprocess 服务不可用，无法自起 KataGo 补算' },
+  })
+  assert.ok(failed.includes('补算未成功'), failed)
+  assert.ok(failed.includes('subprocess 服务不可用'), failed)
+  assert.ok(failed.includes('棋谱没有可用的分析数据，补算也没成功'), failed)
+
+  // 没有补算记录（引擎不可用）：说明这一档只讲棋理
+  const theory = await render({
+    path: gamePath, mode: 'theory', level: '18K', moveCount: 2, variations: 0, candidates: [], board,
+  })
+  assert.ok(theory.includes('这一档只能讲棋理'), theory)
+})
+
 test('路由: /go-sensei/review 一并返回棋盘数据（尺寸/手顺/摆子）', async () => {
   const ctx = makeRouteCtx()
   apply(ctx, Config(NO_ENGINE_CFG))
