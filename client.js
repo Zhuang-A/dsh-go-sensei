@@ -387,9 +387,12 @@ window.__ModuleLoader__.load({
       }
 
       // 已写回的讲解：有讲解的手在棋子左上角点一个小方点（与 Lizzieyzy 的
-      // 注释节点标记同一语义），学生一眼看出"哪几手有老师的话"
+      // 注释节点标记同一语义），学生一眼看出"哪几手有老师的话"。
+      // 只标**已经走到**的那些手：否则开局（0 手）就把全盘的讲解点亮着，
+      // 看着像一堆来历不明的点，也说明不了"讲到哪儿了"。
       var noteMoves = Array.isArray(opts.noteMoves) ? opts.noteMoves : []
       for (var nm = 0; nm < noteMoves.length; nm++) {
+        if (noteMoves[nm] > opts.upto) continue
         var noted = moves[noteMoves[nm] - 1]
         if (noted === undefined || noted.x < 0) continue
         kids.push(React.createElement('rect', {
@@ -410,7 +413,8 @@ window.__ModuleLoader__.load({
       }
 
       // 所有问题手：每处点一个小色点（Lizzieyzy 的着法质量色块同款做法），
-      // 这样**不跳到那一手也看得见**问题都出在哪；当前停在问题手上时再套一个大圈。
+      // 这样**不跳到那一手也看得见**问题都出在哪，全盘问题一眼可数；
+      // （与讲解点不同：讲解点随手数开亮，问题点始终全露。）
       var marks = Array.isArray(opts.marks) ? opts.marks : []
       marks.forEach(function (m, index) {
         kids.push(React.createElement('circle', {
@@ -1402,6 +1406,7 @@ window.__ModuleLoader__.load({
               problem: problemPoint,
               marks: problemMarks,
               pv: pvPoints,
+              noteMoves: noteMoves,
               hintLabel: hint && hint.label ? hint.label : '',
               onPick: askPoint,
             }),
@@ -1702,6 +1707,17 @@ window.__ModuleLoader__.load({
       var problemMoves = list.map(function (c) { return c.moveNumber }).filter(function (n) {
         return typeof n === 'number'
       }).sort(function (a, b) { return a - b })
+      // 盘上的问题手色点（与 dock / 整页同一套语义：全盘问题一眼可数）
+      var problemMarks = []
+      if (board !== null) {
+        for (var mi = 0; mi < list.length; mi++) {
+          var cand = list[mi]
+          var mv = typeof cand.moveNumber === 'number' ? board.moves[cand.moveNumber - 1] : null
+          if (mv !== undefined && mv !== null && mv.x >= 0) {
+            problemMarks.push({ x: mv.x, y: mv.y, color: markColor(cand.labelKey, cand.label) })
+          }
+        }
+      }
       // 有讲解的手（已写回棋谱的 C[] 注释）：跳转按钮与盘上小方点都用它
       var noteMoves = commentedMoves(data)
 
@@ -1751,6 +1767,7 @@ window.__ModuleLoader__.load({
               board: board,
               upto: cur,
               problem: problemPoint,
+              marks: problemMarks,
               pv: pvPoints,
               noteMoves: noteMoves,
               hintLabel: hint && hint.label ? hint.label : '',

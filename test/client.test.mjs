@@ -598,6 +598,16 @@ function stoneCounts(tree) {
   return { black: pick('dgs-stone-b'), white: pick('dgs-stone-w') }
 }
 
+/** 盘上的两类小标记：问题手色点（圆，始终全露）与讲解小方点（方，随手数开亮）。 */
+const MARK_FILLS = ['#9b1996', '#d01013', '#c88c32']
+function markerCounts(tree) {
+  const nodes = walk(tree)
+  return {
+    problems: nodes.filter((n) => n.type === 'circle' && MARK_FILLS.includes(n.props.fill)).length,
+    notes: nodes.filter((n) => n.type === 'rect' && n.props.fill === '#7c8cff').length,
+  }
+}
+
 /** 5 手的小局面：最后一手提掉中间的白子，用来验证"棋盘要按规则画"。 */
 const CAPTURE_BOARD = {
   size: 19,
@@ -907,6 +917,8 @@ test('client: 棋盘可收起；点问题手自动展开并跳到那一手（含
             path: gamePath, mode: 'analysis', level: '18K', moveCount: 5, variations: 0,
             candidates, board: CAPTURE_BOARD,
             players: { black: '甲', white: '乙' },
+            // 第 2、4 手有写回的讲解：盘上讲解点必须"下到那一手才亮"
+            comments: { 2: '第 2 手的讲解', 4: '第 4 手的讲解' },
           },
         }),
   })
@@ -973,12 +985,24 @@ test('client: 棋盘可收起；点问题手自动展开并跳到那一手（含
   click('⏮')
   assert.equal(stoneCounts(tree).black + stoneCounts(tree).white, 0, '开局空盘')
   assert.ok(texts(walk(tree)).join('|').includes('开局'), '表头应显示开局')
+  // 回归：讲解点必须"下到那一手才亮"（开局不能预亮）；问题手色点则始终全露
+  assert.deepEqual(markerCounts(tree), { problems: 1, notes: 0 },
+    '开局标记＝' + JSON.stringify(markerCounts(tree)))
   click('▶')
   assert.equal(stoneCounts(tree).black, 1)
+  assert.deepEqual(markerCounts(tree), { problems: 1, notes: 0 },
+    '第 1 手标记＝' + JSON.stringify(markerCounts(tree)))
+  click('▶')
+  click('▶')
+  assert.deepEqual(markerCounts(tree), { problems: 1, notes: 1 },
+    '第 3 手标记＝' + JSON.stringify(markerCounts(tree))
+    + ' 表头＝' + JSON.stringify(texts(walk(tree)).join('|').slice(0, 160)))
   click('⏭')
   const end = stoneCounts(tree)
   assert.equal(end.black, 4, '末手前黑 4 子')
   assert.equal(end.white, 0, '末手提掉白子')
+  assert.deepEqual(markerCounts(tree), { problems: 1, notes: 2 },
+    '末手标记＝' + JSON.stringify(markerCounts(tree)))
 
   // 再点一次「棋盘 ▾」应收起（可收起）
   click('棋盘 ▾')
