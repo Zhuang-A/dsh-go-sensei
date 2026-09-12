@@ -96,6 +96,9 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** 请求超过这么久还没回来，就说一句「在补算」——实测这类棋谱要等 1~2 分钟。 */
+    var SLOW_HINT_DELAY = 5000
+
     /** 按标签上色：大恶手→error、失误→warn、其余→次要色。 */
     function severityColor(label) {
       var text = String(label == null ? '' : label)
@@ -583,9 +586,16 @@ window.__ModuleLoader__.load({
         setBusy(true); setErr(''); setNotice(''); setHint('')
         var url = '/go-sensei/review?path=' + encodeURIComponent(wanted)
           + (base ? '&cwd=' + encodeURIComponent(base) : '')
+        // 没有分析数据的棋谱要等宿主现场补算（真机实测 87 秒）。不给说明的话，
+        // 按钮上一直写着「读取中…」，用户会以为卡死了。
+        var slowTimer = setTimeout(function () {
+          setHint('仍在读取：棋谱没有分析数据时，宿主会用 KataGo 现场补算（实测 1~2 分钟），算完自动出结果。')
+        }, SLOW_HINT_DELAY)
+        var done = function () { clearTimeout(slowTimer); setHint('') }
         fetch(url)
           .then(function (response) { return response.json().catch(function () { return {} }) })
           .then(function (body) {
+            done()
             setBusy(false)
             if (body && body.ok === true) {
               setData(body.data)
@@ -599,6 +609,7 @@ window.__ModuleLoader__.load({
             }
           })
           .catch(function (error) {
+            done()
             setBusy(false); setData(null); setErr(String(error && error.message ? error.message : error))
           })
       }
