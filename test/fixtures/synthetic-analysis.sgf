@@ -1,0 +1,38 @@
+(;GM[1]FF[4]SZ[19]KM[7.5]RU[Chinese]AP[Lizzie: 2.5.3]CA[UTF-8]PB[庄生梦1n4k]PW[V296646120]BR[18级]WR[18级]HA[0]RE[B+R]DT[2026-09-03]
+;B[pd]C[黑棋 胜率: 50.0% (±0.1%)
+领先: 0.0 (+0.0) 不确定度: 2.0
+(KataGo-18b / 100 计算量)
+贴目: 7.5]LZ[KataGo-18b 50.0 100 0.0 2.0
+move Q16 visits 80 winrate 4990 prior 1200 scoreMean -0.1 pv Q16 D4 R4 C3 info move D4 visits 20 winrate 5010 prior 800 scoreMean 0.1 pv D4 Q16 R4 info]
+;W[dp]C[白棋 胜率: 49.0% (±0.1%)
+领先: -1.0 (-1.0) 不确定度: 2.0
+(KataGo-18b / 100 计算量)
+贴目: 7.5]LZ[KataGo-18b 49.0 100 1.0 2.0
+move R4 visits 60 winrate 5100 prior 1000 scoreMean -1.0 pv R4 C3 D4 info move C3 visits 40 winrate 5080 prior 900 scoreMean -0.8 pv C3 R4 D4 info]
+;B[qp]C[黑棋 胜率: 50.5% (±0.1%)
+领先: 0.5 (+1.5) 不确定度: 2.0
+(KataGo-18b / 100 计算量)
+贴目: 7.5]LZ[KataGo-18b 50.5 100 -0.5 2.0
+move D16 visits 55 winrate 5050 prior 1100 scoreMean -0.5 pv D16 D4 C3 info move D4 visits 45 winrate 5040 prior 950 scoreMean -0.4 pv D4 D16 info]
+;W[dd]C[白棋 胜率: 22.0% (±0.1%)
+领先: -28.0 (-27.5) 不确定度: 2.0
+(KataGo-18b / 100 计算量)
+贴目: 7.5]LZ[KataGo-18b 22.0 100 28.0 2.0
+move C17 visits 70 winrate 2200 prior 800 scoreMean -28.0 pv C17 N17 D16 F6 info move N17 visits 30 winrate 2180 prior 700 scoreMean -28.1 pv N17 C17 D16 info]
+;B[cq]C[黑棋 胜率: 79.0% (±0.1%)
+领先: 29.0 (+57.0) 不确定度: 2.0
+(KataGo-18b / 100 计算量)
+贴目: 7.5]LZ[KataGo-18b 79.0 100 -29.0 2.0
+move N17 visits 75 winrate 2110 prior 900 scoreMean -29.0 pv N17 D16 F6 info move D16 visits 25 winrate 2100 prior 800 scoreMean -29.1 pv D16 N17 info]
+;W[nc]LZ[KataGo-18b 13.0 100 37.0 2.0
+move F6 visits 80 winrate 1310 prior 1000 scoreMean -37.0 pv F6 D16 N17 info move D16 visits 20 winrate 1300 prior 700 scoreMean -37.1 pv D16 F6 info]
+;B[fq]C[黑棋 胜率: 86.5% (±0.1%)
+领先: 36.5 (+7.5) 不确定度: 2.0
+(KataGo-18b / 100 计算量)
+贴目: 7.5]LZ[KataGo-18b 86.5 100 -36.5 2.0
+move D16 visits 90 winrate 1360 prior 900 scoreMean -36.5 pv D16 N17 F6 info move F6 visits 10 winrate 1350 prior 500 scoreMean -36.6 pv F6 D16 info]
+;W[dq]C[白棋 胜率: 10.0% (±0.1%)
+领先: -40.0 (-3.5) 不确定度: 2.0
+(KataGo-18b / 100 计算量)
+贴目: 7.5]LZ[KataGo-18b 10.0 100 40.0 2.0
+move F3 visits 85 winrate 1010 prior 900 scoreMean -40.0 pv F3 D16 N17 info move C6 visits 15 winrate 1000 prior 600 scoreMean -40.1 pv C6 F3 info])

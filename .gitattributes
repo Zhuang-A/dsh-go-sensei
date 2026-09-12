@@ -1,0 +1,20 @@
+# ---- 换行策略 ----
+# 仓库内统一存 LF，检出时也保持 LF（不依赖各机器上的 core.autocrlf 设置）
+* text=auto eol=lf
+
+# SGF 棋谱按“字节原样”处理：本项目解析器对换行与编码敏感，
+# 真实野狐导出的夹具本身就是 CRLF，禁止任何 EOL 规范化。
+# -text 关闭文本转换，-eol 同时清掉上面继承下来的 eol 规则。
+*.sgf -text -eol
+
+# ---- 二进制 ----
+*.tgz   binary
+*.gz    binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.ico   binary
+
+# ---- GitHub 语言统计 ----
+package-lock.json       linguist-generated=true
+test/fixtures/*.sgf     linguist-vendored=true

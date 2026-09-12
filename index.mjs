@@ -1,0 +1,354 @@
+// index.mjs — DeepGo Sensei 宿主（Node）half
+//
+// 官方函数插件协议：具名导出 name/inject/Config/apply，无 default export
+// （混用两种导出形态会被 Loader 丢弃命名空间，见官方 postmortem 0001）。
+// 注册是 effect：工具与提示词段随插件 fiber 自动装卸。
+
+import Schema from '@deepseek-ai/schemastery'
+import { registerGoTools, autoComputeIfNeeded } from './src/tools.js'
+import { ReviewCache } from './src/cache.js'
+import { RANKS, reviewGame, inferLevel } from './src/review.js'
+import { parseGame, decodeBuffer } from './src/sgf.js'
+
+export const name = 'go-sensei'
+// 硬依赖：tools 注册工具、systemPrompt 挂人设段、fs 读写棋谱。
+// 可选依赖（不得写进 inject，否则未挂载时整插件等待）：
+//   sandboxPolicy —— 沙箱后端下写入必须携带它解析出的策略，见 src/tools.js。
+//   webServer     —— 客户端面板的数据路由，见 registerPanelRoute。
+export const inject = ['tools', 'systemPrompt', 'fs']
+
+/** 插件配置（加载期由 Cordis 按 Schema 校验并填充默认值）。 */
+export const Config = Schema.object({
+  /** 讲解难度：18K..9D，或 auto（按棋谱双方段位自适应）。 */
+  level: Schema.union([...RANKS, 'auto']).default('auto'),
+  /** 问题手胜率落差阈值（0~1 小数）。 */
+  winrateThreshold: Schema.number().default(0.03),
+  /** 问题手目差阈值（目）。 */
+  scoreThreshold: Schema.number().default(3),
+  /** 每次复盘返回的候选上限。 */
+  maxCandidates: Schema.number().default(10),
+  /** 每条候选变化图的 PV 截断手数。 */
+  pvDepth: Schema.number().default(6),
+  /** 单局讲解 token 预算（提示词与裁剪策略的软约束）。 */
+  tokenBudget: Schema.number().default(50000),
+  /** KataGo 引擎可执行文件路径（为空则不注册补算工具）。 */
+  kataGoPath: Schema.string().default(''),
+  /** KataGo 配置文件路径（可选）。 */
+  kataGoConfig: Schema.string().default(''),
+  /** KataGo 模型权重路径（可选，覆盖配置文件中的 modelFile）。 */
+  kataGoModel: Schema.string().default(''),
+  /** KataGo 补算每手搜索量。 */
+  maxVisits: Schema.number().default(100),
+})
+
+const DEFAULT_CONFIG = {
+  level: 'auto',
+  winrateThreshold: 0.03,
+  scoreThreshold: 3,
+  maxCandidates: 10,
+  pvDepth: 6,
+  tokenBudget: 50000,
+  kataGoPath: '',
+  kataGoConfig: '',
+  kataGoModel: '',
+  maxVisits: 100,
+}
+
+/**
+ * 围棋老师人设段。放在 persona-prefix 之后（约第 1 位），
+ * 以条件式开头："当用户请求围棋复盘时"才生效，不影响其他会话主题。
+ */
+function buildPersona(cfg) {
+  return `当用户请求围棋复盘、分析 SGF 棋谱、或询问某一手棋的好坏时，你以温和耐心的围棋老师（DeepGo Sensei）身份讲解：
+
+1. 教学姿态：先复述这手棋的意图，或先问学生想听哪方面（"这手为什么不好"还是"该怎么下"），再指出问题，最后给出具体改进建议；多鼓励、少批评、不嘲讽。
+2. 讲解语言：用口语化的棋理讲解（如"这里就像把家门让给了对方"）；胜率与目差只是佐证——先讲棋理，再引用数值；绝不虚构分析数据或变化图。
+3. 水平自适应：按学生棋力调整术语密度（配置 level=auto 时依据棋谱双方段位自行判断）：18K~10K 用生活化比喻并解释基础概念（气、眼、断点、出头）；9K~1D 用常规术语；2D 以上可用职业级术语与全局构思。
+4. 变化图：以"第 N 手改下 X 会怎样"为单元，一次只展开一条主变，每手一句话讲清意图，不逐手复述整条 PV。
+5. 工具纪律：先 go_parse_sgf 了解棋谱，再 go_review_moves 找问题手，逐手讲解后调用 go_write_review 写回 SGF 注释，需要落盘报告时用 go_export_report；同一局重复复盘优先复用工具返回的缓存结果（cached=true 时不再重复获取全量数据）；单局讲解预算约 ${cfg.tokenBudget} tokens，用"先问后讲"与数据裁剪控制消耗。`
+}
+
+const TOOL_GUIDANCE = `围棋复盘工具（DeepGo Sensei）：go_parse_sgf 读棋谱，go_review_moves 找问题手，go_position_context 取某手前后局面与 AI 候选，go_write_review 把讲解写回 SGF 的 C[] 注释（Lizzieyzy 原生显示），go_export_report 落盘 Markdown 报告。路径参数支持绝对路径或相对当前会话工作区的相对路径。`
+
+/** 面板一次最多返回的问题手数（数据裁剪 + 渲染上限一起生效）。 */
+const MAX_PANEL_CANDIDATES = 20
+
+/** 裁剪为面板需要的最小字段，避免把整个 review 对象推给浏览器。 */
+function compactForPanel(candidate) {
+  return {
+    moveNumber: candidate.moveNumber,
+    color: candidate.color,
+    coord: candidate.coord ?? '',
+    coordLabel: candidate.coordLabel ?? '',
+    label: candidate.label?.label ?? '',
+    winrateLoss: candidate.winrateLoss ?? null,
+    scoreLoss: candidate.scoreLoss ?? null,
+    pv: (candidate.pv ?? []).slice(0, 3).map((p) => ({
+      label: p.label ?? '',
+      winratePct: p.winratePct ?? null,
+    })),
+  }
+}
+
+/** 面板默认基准目录：无 cwd 参数时的回退（浏览器会带上当前会话工作区）。 */
+function panelDefaultRoot() {
+  return process.cwd()
+}
+
+/**
+ * 面板数据路由：给浏览器 half 的「问题手列表」提供结构化数据。
+ *
+ * 为什么必须有它：客户端插件拿不到工具的 execute（Host 工具面只暴露
+ * register/schemas/get），也无法直接读盘；而本 half 拥有 ctx.fs 与
+ * reviewGame，所以由 Host 读盘、算好、回 JSON，客户端只负责渲染。
+ *
+ * 只读、无副作用，且路径被约束在工作区根之下（resolve 归一化 +
+ * contains 包含判断，挡住 ../ 逃逸），因此不设令牌。
+ *
+ * 软依赖 webServer：纯 CLI 组合（无 Web 服务器）下静默不装。
+ *
+ * @param {object} ctx Cordis 上下文
+ * @param {object} cfg 已校验的插件配置
+ */
+function registerPanelRoute(ctx, cfg) {
+  /**
+   * 已知工作区根（最近成功的在前）。
+   *
+   * 为什么需要：浏览器端拿不到会话 cwd（客户端 SessionSnapshot 里没有这个字段，
+   * 实测），所以相对路径常常没有可用的解析基准。但模型每次调用 go_* 工具时，
+   * 工具都用 exec.agent.session.header.cwd 解析过路径 —— 那是权威的工作区根。
+   * 这里把它记下来，作为面板相对路径的解析基准。
+   */
+  const roots = []
+  ctx.on('tools/result', (exec) => {
+    try {
+      const name = exec?.name
+      if (typeof name !== 'string' || name.indexOf('go_') !== 0) return
+      const cwd = exec?.agent?.session?.header?.cwd
+      if (typeof cwd !== 'string' || cwd === '') return
+      rememberRoot(cwd)
+    } catch {
+      /* 观察者绝不干扰工具链路 */
+    }
+  })
+  function rememberRoot(dir) {
+    const index = roots.indexOf(dir)
+    if (index === 0) return
+    if (index > 0) roots.splice(index, 1)
+    roots.unshift(dir)
+    if (roots.length > 12) roots.length = 12
+  }
+
+  const mount = (webCtx) => {
+    // 面板启动时读取已知工作区根（相对路径的解析候选）
+    webCtx.webServer.register({
+      kind: 'exact',
+      path: '/go-sensei/roots',
+      handler: (req, res) => {
+        res.statusCode = 200
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('cache-control', 'no-store')
+        res.end(JSON.stringify({ ok: true, roots: roots.slice() }))
+      },
+    })
+    webCtx.webServer.register({
+      kind: 'exact',
+      path: '/go-sensei/review',
+      handler: async (req, res) => {
+        const send = (status, payload) => {
+          res.statusCode = status
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify(payload))
+        }
+        try {
+          const url = new URL(req.url ?? '/', 'http://localhost')
+          const requested = url.searchParams.get('path') ?? ''
+          if (requested.trim() === '') {
+            send(400, { ok: false, error: '缺少 path 参数' })
+            return
+          }
+          // 解析基准顺序：浏览器带来的 cwd → 已知工作区根 → 进程 cwd
+          const candidates = []
+          const explicit = url.searchParams.get('cwd')
+          if (explicit) candidates.push(explicit)
+          for (const root of roots) candidates.push(root)
+          candidates.push(panelDefaultRoot())
+
+          let target
+          let sawResolveSuccess = false
+          let directoryHit = false
+          let lastError = null
+          for (const base of candidates) {
+            let resolved
+            try {
+              resolved = await ctx.fs.resolve(requested, { cwd: base })
+              sawResolveSuccess = true
+            } catch (error) {
+              if (lastError === null) lastError = String(error?.message ?? error)
+              continue
+            }
+            let info
+            try {
+              info = await ctx.fs.stat(resolved, undefined)
+            } catch (error) {
+              if (lastError === null) lastError = String(error?.message ?? error)
+              continue
+            }
+            if (info?.type === 'file') { target = resolved; break }
+            if (info?.type === 'directory') directoryHit = true
+          }
+          if (target === undefined) {
+            // 已知根之下按 basename 做有界发现：用户常见输入是「game.sgf」这种纯文件名，
+            // 或「review-check/_accept/game.sgf」这种相对某个根的路径。
+            target = await discoverUnderRoots(ctx, roots, requested)
+          }
+          if (target === undefined) {
+            if (directoryHit) {
+              send(400, { ok: false, error: `不是普通文件：${requested}` })
+              return
+            }
+            if (sawResolveSuccess) {
+              send(404, {
+                ok: false,
+                error: `找不到文件：${requested}`,
+                hint: roots.length === 0
+                  ? '还没有已知工作区根：先在对话里让 Sensei 复盘任意棋谱，或改用绝对路径。'
+                  : '已知工作区根：' + roots.join(' | '),
+              })
+              return
+            }
+            send(500, { ok: false, error: lastError ?? `无法解析路径：${requested}` })
+            return
+          }
+          // 成功即记住这个基准，让后续相对路径一次命中
+          const baseDir = url.searchParams.get('cwd')
+          if (baseDir) rememberRoot(baseDir)
+          for (const root of roots) {
+            if (target.displayPath.startsWith(root)) { rememberRoot(root); break }
+          }
+          const bytes = await ctx.fs.readBytes(target, undefined, 64 * 1024 * 1024)
+          const { text } = decodeBuffer(bytes)
+          const game = parseGame(text)
+          // 与 go_review_moves 共用同一条管线：无分析数据且已配置引擎时自动补算。
+          // 早期这里直接调 reviewGame，绕过了工具的自动补算 —— 同一份棋谱在对话里
+          // 复盘能出问题手、面板却显示「未发现问题手」。同一业务逻辑只保留一份。
+          const { autoEngine } = await autoComputeIfNeeded(ctx, cfg, game, {})
+          const level = cfg.level === 'auto' ? inferLevel(game.info) : cfg.level
+          const review = reviewGame(game, {
+            winrateThreshold: cfg.winrateThreshold,
+            scoreThreshold: cfg.scoreThreshold,
+            pvDepth: cfg.pvDepth,
+            maxPvCandidates: 3,
+            maxCandidates: MAX_PANEL_CANDIDATES,
+          })
+          send(200, {
+            ok: true,
+            data: {
+              path: target.displayPath,
+              mode: review.mode,
+              level,
+              moveCount: game.moves.length,
+              variations: game.stats.variations,
+              candidates: review.candidates.map(compactForPanel),
+              ...(autoEngine !== undefined ? { autoEngine } : {}),
+            },
+          })
+        } catch (error) {
+          send(500, { ok: false, error: String(error?.message ?? error) })
+        }
+      },
+    })
+  }
+  // 优先用 ctx.inject 等 webServer 出现（可选依赖，纯 CLI 组合下它永不到来）；
+  // 拿不到 inject（极简上下文/单测桩）就退回即时 get，缺席时静默不挂路由。
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['webServer'], mount)
+    return
+  }
+  const webServer = ctx.get('webServer')
+  if (webServer !== undefined) mount({ webServer })
+}
+
+/**
+ * 在已知工作区根之下按 basename 做**有界**文件发现。
+ *
+ * 动机：浏览器拿不到会话 cwd，用户又常只写「game.sgf」或
+ * 「review-check/_accept/game.sgf」这类相对写法。这里在每个已知根下做
+ * 深度受限的目录遍历，命中同名文件即返回。
+ *
+ * 为什么有界：这些根可能是很大的目录，无界递归会拖慢请求。用
+ * MAX_DISCOVER_DEPTH 限制层级、MAX_DISCOVER_VISITS 限制访问节点数，
+ * 超限即放弃（回落到「找不到」并给出根列表提示）。
+ *
+ * @param {object} ctx Cordis 上下文（需 fs）
+ * @param {string[]} roots 已知工作区根
+ * @param {string} requested 用户输入的路径（取其 basename 匹配）
+ * @returns {Promise<object|undefined>} 命中的 FsTarget，未命中返回 undefined
+ */
+async function discoverUnderRoots(ctx, roots, requested) {
+  if (roots.length === 0) return undefined
+  const wanted = String(requested).replace(/\\/g, '/').split('/').filter(Boolean).pop()
+  if (wanted === undefined || wanted === '') return undefined
+  let visits = 0
+  for (const root of roots) {
+    let rootTarget
+    try {
+      rootTarget = await ctx.fs.resolve(root, {})
+    } catch {
+      continue
+    }
+    const queue = [{ target: rootTarget, depth: 0 }]
+    while (queue.length > 0) {
+      const { target, depth } = queue.shift()
+      if (visits >= MAX_DISCOVER_VISITS) return undefined
+      visits += 1
+      let entries
+      try {
+        entries = await ctx.fs.listDir(target, undefined)
+      } catch {
+        continue
+      }
+      if (!Array.isArray(entries)) continue
+      for (const entry of entries) {
+        if (entry.type === 'file' && entry.name === wanted) return entry.target
+        if (entry.type === 'directory' && depth < MAX_DISCOVER_DEPTH) {
+          queue.push({ target: entry.target, depth: depth + 1 })
+        }
+      }
+    }
+  }
+  return undefined
+}
+
+/** 文件发现的深度上限（层级）。 */
+const MAX_DISCOVER_DEPTH = 3
+/** 文件发现的访问节点上限，防止在大目录里遍历过久。 */
+const MAX_DISCOVER_VISITS = 400
+
+function personaOrder(ctx) {
+  try {
+    const base = Number(ctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_PREFIX'))
+    return Number.isFinite(base) ? base + 1 : 1
+  } catch {
+    return 1
+  }
+}
+
+export function apply(ctx, config = {}) {
+  const cfg = { ...DEFAULT_CONFIG, ...(config ?? {}) }
+
+  ctx.systemPrompt.section({
+    name: 'go-sensei:persona',
+    order: personaOrder(ctx),
+    text: buildPersona(cfg),
+  })
+  ctx.systemPrompt.section({
+    name: 'tool:go-sensei',
+    order: 3000,
+    text: TOOL_GUIDANCE,
+  })
+
+  registerGoTools(ctx, cfg, new ReviewCache())
+  registerPanelRoute(ctx, cfg)
+}

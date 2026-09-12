@@ -1,0 +1,57 @@
+{
+  "name": "dsh-go-sensei",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "DeepGo Sensei —— DSH 围棋复盘教练插件：把围棋 AI 的数学判断（胜率/目差/候选点/变化图）翻译成老师级口头讲解，供自学棋手复盘；讲解回写 SGF C[] 注释，Lizzieyzy 原生可显示。",
+  "keywords": [
+    "ds",
+    "deepseek-harness",
+    "dsh-plugin",
+    "go",
+    "weiqi",
+    "baduk",
+    "sgf",
+    "katago",
+    "lizzieyzy"
+  ],
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "client.js",
+    "src/",
+    "scripts/",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check index.mjs && node --check client.js && node --check src/sgf.js && node --check src/review.js && node --check src/tools.js && node --check src/cache.js && node --check src/engine.js"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.2",
+    "@sabaki/sgf": "^3.5.0",
+    "iconv-lite": "^0.7.3"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ],
+      "platform": "web"
+    }
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19"
+  }
+}
