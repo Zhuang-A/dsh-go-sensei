@@ -779,6 +779,24 @@ window.__ModuleLoader__.load({
           }
         }
       }
+      // 「上一个 / 下一个恶点」的目标手数（升序；到头绕回另一端，方便把每个恶点过一遍）
+      var problemMoves = []
+      for (var qi = 0; qi < list.length; qi++) {
+        if (typeof list[qi].moveNumber === 'number' && list[qi].moveNumber > 0) problemMoves.push(list[qi].moveNumber)
+      }
+      problemMoves.sort(function (a, b) { return a - b })
+      var nextProblem = null
+      var prevProblem = null
+      if (problemMoves.length > 0) {
+        for (var ni = 0; ni < problemMoves.length; ni++) {
+          if (problemMoves[ni] > cur) { nextProblem = problemMoves[ni]; break }
+        }
+        if (nextProblem === null) nextProblem = problemMoves[0]
+        for (var pj = problemMoves.length - 1; pj >= 0; pj--) {
+          if (problemMoves[pj] < cur) { prevProblem = problemMoves[pj]; break }
+        }
+        if (prevProblem === null) prevProblem = problemMoves[problemMoves.length - 1]
+      }
 
       // ── 棋盘表头（收起态只留这一行；未载入棋谱时说明状态并给出开启跟随的入口）──
       kids.push(React.createElement('div', { className: 'dgs-boardwrap', key: 'boardhead' },
@@ -855,6 +873,19 @@ window.__ModuleLoader__.load({
               React.createElement('button', { onClick: function () { setUpto(Math.max(0, cur - 1)) }, title: '上一手' }, '◀'),
               React.createElement('button', { onClick: function () { setUpto(Math.min(total, cur + 1)) }, title: '下一手' }, '▶'),
               React.createElement('button', { onClick: function () { setUpto(total) }, title: '跳到末手' }, '⏭'),
+              // 恶点跳转：复盘时最常用的两个动作（在盘上从头到尾把问题手过一遍）
+              React.createElement('button', {
+                className: 'dgs-jump',
+                disabled: prevProblem === null,
+                title: prevProblem === null ? '这盘棋没有发现明显问题手' : '跳到上一个恶点（第 ' + prevProblem + ' 手；到头绕回最后一个）',
+                onClick: function () { if (prevProblem !== null) setUpto(prevProblem) },
+              }, '◀恶点'),
+              React.createElement('button', {
+                className: 'dgs-jump',
+                disabled: nextProblem === null,
+                title: nextProblem === null ? '这盘棋没有发现明显问题手' : '跳到下一个恶点（第 ' + nextProblem + ' 手；到头绕回第一个）',
+                onClick: function () { if (nextProblem !== null) setUpto(nextProblem) },
+              }, '恶点▶'),
               React.createElement('input', {
                 type: 'range', min: 0, max: total, value: cur,
                 title: '拖动快速定位',

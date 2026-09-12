@@ -699,6 +699,23 @@ test('client: 载入后停在最严重的问题手，并把所有问题手点在
   assert.equal(dotOf('#d01013').length, 1, '失误应有一个红点')
   assert.ok(nodes.some((n) => n.type === 'circle' && n.props.stroke === '#9b1996'), '当前这一手还要有大圈')
 
+  // 恶点跳转：下一个 → 下一个（到头绕回第一个）→ 上一个（到头绕回最后一个）。
+  // 这一步要放在拨回开局之前（起点是自动落位的第 3 手）。
+  const clickBtn = (label) => {
+    const button = walk(tree).find((n) => n.type === 'button' && texts([n]).includes(label))
+    assert.ok(button, `找不到按钮 ${label}`)
+    assert.ok(!button.props.disabled, `${label} 不应被禁用（本局有问题手）`)
+    button.props.onClick()
+    react.reset()
+    tree = registered[0].component(props)
+    return texts(walk(tree)).join('|')
+  }
+  assert.ok(clickBtn('恶点▶').includes('第 6/8 手'), '「恶点▶」应跳到下一处（第 6 手）')
+  assert.ok(clickBtn('恶点▶').includes('第 3/8 手'), '最后一处再点应绕回第一处（第 3 手）')
+  assert.ok(clickBtn('◀恶点').includes('第 6/8 手'), '第一处再往回点应绕到最后一处（第 6 手）')
+  // 回到自动落位的那一手，继续验证色点
+  assert.ok(clickBtn('恶点▶').includes('第 3/8 手'), '再点一次回到第 3 手')
+
   // 把棋盘拨回开局：小色点仍在（停在哪一手都看得见），说明行讲清它们是什么
   walk(tree).find((n) => n.type === 'button' && texts([n]).includes('⏮')).props.onClick()
   react.reset()
