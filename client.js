@@ -95,6 +95,14 @@ window.__ModuleLoader__.load({
       '[data-dgs] .dgs-icon { display: block; }',
       '[data-dgs] .dgs-prob { color: var(--dsw-alias-state-error-primary, #e5534b); }',
       '[data-dgs] .dgs-rec { color: var(--dsw-alias-state-success-primary, #3fb950); }',
+      // ── 已写回棋谱的讲解（当前手有注释时显示在棋盘下方）──────────────
+      '[data-dgs] .dgs-comment { margin-top: 6px; padding: 6px 8px; border-radius: 4px;',
+      '  border-left: 3px solid var(--dsw-alias-brand-primary, #6b8afd);',
+      '  background: var(--dsw-alias-bg-layer-2, #2a2b31); font-size: 12px; line-height: 1.55;',
+      '  max-height: 170px; overflow-y: auto; white-space: pre-wrap; }',
+      '[data-dgs] .dgs-comment-tag { font-size: 10px; margin-bottom: 2px;',
+      '  color: var(--dsw-alias-label-secondary, #9aa4b2); }',
+      '[data-dgs] .dgs-hasnote { color: var(--dsw-alias-brand-primary, #6b8afd); }',
       // ── 右侧栏文档预览（.sgf 在原生右侧栏里打开时的棋盘）────────────────
       '[data-dgs].dgs-doc { border: none; background: transparent; margin: 0; padding: 8px 10px;',
       '  max-width: none; border-radius: 0; }',
@@ -494,6 +502,25 @@ window.__ModuleLoader__.load({
       return String(path == null ? '' : path).replace(/\\/g, '/').split('/').pop()
     }
 
+    /** 某一手的讲解注释（宿主在 payload 的 comments 里按手数给出）。 */
+    function commentOf(data, moveNumber) {
+      if (!data || !data.comments) return ''
+      var text = data.comments[String(moveNumber)]
+      return typeof text === 'string' ? text : ''
+    }
+
+    /**
+     * 注释框：当前这一步有讲解时显示在棋盘下方。
+     * 内容就是 go_write_review 写回棋谱的那段文字 —— 学生一边翻手一边读得到，
+     * 不必再去打谱软件里翻 C[]。
+     */
+    function commentBox(text) {
+      if (text === '') return null
+      return React.createElement('div', { className: 'dgs-comment' },
+        React.createElement('div', { className: 'dgs-comment-tag' }, '讲解（已写回棋谱注释）'),
+        React.createElement('div', { className: 'dgs-comment-body' }, text))
+    }
+
     /** 路径归一化：反斜杠转正斜杠、去掉尾部斜杠、转小写（Windows 大小写不敏感）。 */
     function normPath(path) {
       return String(path == null ? '' : path).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
@@ -855,6 +882,8 @@ window.__ModuleLoader__.load({
                 : problemMarks.length > 0
                   ? '● 盘上色点＝问题手（紫＞红＞橙）：点右边任意一行跳过去'
                   : '未发现明显问题手'),
+            // 已写回棋谱的讲解：翻到哪一手读到哪一手
+            commentBox(commentOf(data, cur)),
           ),
           React.createElement('div', { className: 'dgs-page-list' },
             list.length === 0
@@ -1256,11 +1285,13 @@ window.__ModuleLoader__.load({
                   React.createElement('div', { className: 'dgs-l2' },
                     '−' + (candidate.winrateLoss == null ? '?' : candidate.winrateLoss) + '% 胜率'
                     + (candidate.scoreLoss == null ? '' : ' / ' + candidate.scoreLoss + ' 目')
-                    + (top && top.label ? ' · AI 首选：' + top.label : '')),
+                    + (top && top.label ? ' · AI 首选：' + top.label : ''),
+                    commentOf(data, candidate.moveNumber) !== ''
+                      ? React.createElement('span', { className: 'dgs-hasnote' }, ' · 有讲解')
+                      : null),
                 )
               }),
             )
-
         if (boardOpen && board !== null) {
           var boardCol = React.createElement('div', { className: 'dgs-col-board' },
             renderBoard({
@@ -1318,6 +1349,8 @@ window.__ModuleLoader__.load({
                       '（共 ' + problemMarks.length + ' 处，紫＞红＞橙）　点列表任意一行跳到那一手')
                   : '点棋盘交叉点可就该点提问；「▸」把棋盘收起来',
             ),
+            // 已写回棋谱的讲解：翻到哪一手就读到哪一手
+            commentBox(commentOf(data, cur)),
           )
           kids.push(React.createElement('div', { className: 'dgs-split', key: 'split' }, boardCol,
             React.createElement('div', { className: 'dgs-col-list' }, listEl)))
@@ -1617,7 +1650,11 @@ window.__ModuleLoader__.load({
         }
         kids.push(React.createElement('div', { className: 'dgs-sub', key: 'm' },
           String(data.moveCount || 0) + ' 手 · ' + list.length + ' 个问题手'
-          + (data.autoEngine ? ' · 引擎补算 ' + String(data.autoEngine.moves ?? '') + ' 手' : '')))
+          + (data.autoEngine ? ' · 引擎补算 ' + String(data.autoEngine.moves ?? '') + ' 手'
+            + (data.autoEngine.cached === true ? '（本次复用，未重算）' : '') : '')))
+        // 已写回棋谱的讲解
+        var noteBox = commentBox(commentOf(data, cur))
+        if (noteBox !== null) kids.push(noteBox)
         kids.push(React.createElement('div', { className: 'dgs-list dgs-doc-list', key: 'list' },
           list.map(function (candidate, index) {
             var top = candidate.pv && candidate.pv[0] ? candidate.pv[0] : null
@@ -1641,7 +1678,10 @@ window.__ModuleLoader__.load({
               React.createElement('div', { className: 'dgs-l2' },
                 '−' + (candidate.winrateLoss == null ? '?' : candidate.winrateLoss) + '% 胜率'
                 + (candidate.scoreLoss == null ? '' : ' / ' + candidate.scoreLoss + ' 目')
-                + (top && top.label ? ' · AI 首选：' + top.label : '')))
+                + (top && top.label ? ' · AI 首选：' + top.label : ''),
+                commentOf(data, candidate.moveNumber) !== ''
+                  ? React.createElement('span', { className: 'dgs-hasnote' }, ' · 有讲解')
+                  : null))
           })))
       } else if (!busy && err === '') {
         kids.push(React.createElement('div', { className: 'dgs-sub', key: 'w' }, '正在准备棋盘…'))

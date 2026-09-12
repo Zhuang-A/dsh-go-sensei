@@ -5,9 +5,17 @@
 // 相对路径按调用会话工作区解析（exec.agent.session.header.cwd，与官方
 // read/write 工具同一机制）。工具注册是 effect：随插件 fiber 自动反注册。
 
-import { decodeBuffer, parseGame, injectComments, coordLabel, hasWinrateData } from './sgf.js'
+import {
+  decodeBuffer,
+  parseGame,
+  injectComments,
+  injectAnalysis,
+  analysisEntriesOf,
+  coordLabel,
+  hasWinrateData,
+} from './sgf.js'
 import { reviewGame, inferLevel, RANKS } from './review.js'
-import { ReviewCache } from './cache.js'
+import { ReviewCache, gameFingerprint } from './cache.js'
 import { resolveEngine, describeEngine } from './engine-resolve.js'
 
 /** 工具返回值的裁剪上限，防止异常棋谱撑爆上下文。 */
@@ -67,7 +75,8 @@ async function readGameFile(ctx, exec, p, policy) {
   const bytes = await ctx.fs.readBytes(target, exec.signal, 64 * 1024 * 1024)
   const { text, encoding } = decodeBuffer(bytes)
   const game = parseGame(text)
-  game._meta = { path: target.displayPath, encoding }
+  // 原文留着：补算成功后要把它连同新增的分析属性一起写回（见 writeAnalysisBack）
+  game._meta = { path: target.displayPath, encoding, text }
   return game
 }
 
@@ -238,7 +247,7 @@ function goReviewMoves(ctx, cfg, cache, policy) {
   return {
     name: 'go_review_moves',
     description:
-      '识别 SGF 棋谱中的问题手（胜率/目差落差超阈值的候选），返回按严重度排序的裁剪后列表（每手 ≤3 个 AI 候选点、PV 截断、数值 1 位小数、标签枚举：大恶手/失误/不精确）。无分析数据的棋谱返回 theory 模式（纯棋理复盘）。同一局面重复复盘命中缓存。',
+      '识别 SGF 棋谱中的问题手（胜率/目差落差超阈值的候选），返回按严重度排序的裁剪后列表（每手 ≤3 个 AI 候选点、PV 截断、数值 1 位小数、标签枚举：大恶手/失误/不精确）。无分析数据且引擎可用时自动用自带 KataGo 补算，并把逐手胜率/目差写回棋谱（WV[]/DM[]，analysisWritten 字段报告写回了多少手）——此后这份棋谱自带分析，面板与再次复盘都不必重算。完全无分析数据且引擎不可用时返回 theory 模式（纯棋理复盘）。同一局面重复复盘命中缓存。',
     parameters: {
       type: 'object',
       properties: {
@@ -267,6 +276,8 @@ function goReviewMoves(ctx, cfg, cache, policy) {
           // 无分析数据时自动补算的结果（或失败原因）；有分析数据/未启用引擎时该键省略。
           // 注意：dsh-tools 只接受单一类型字符串，禁止写成 type: ['object', 'null']。
           autoEngine: { type: 'object' },
+          // 本次补算写回棋谱的逐手分析（WV/DM）：{ moves, missing }
+          analysisWritten: { type: 'object' },
         },
         required: ['path', 'mode', 'level', 'cached', 'cacheKey', 'candidates', 'summary'],
       },
@@ -314,12 +325,18 @@ function goReviewMoves(ctx, cfg, cache, policy) {
       // 不设 autoEngine 时保持 undefined，由 compact 剔除该键（null 不会被剔除，
       // 且与 output schema 声明的单一 object 类型不符）。
       const { autoEngine } = await autoComputeIfNeeded(ctx, cfg, game, { from, to, signal: exec.signal })
+      // 这次真的跑了引擎 → 把逐手分析写回棋谱，文件从此自带胜率/目差，
+      // 下次打开（面板或工具）都不必再算。缓存命中/本就有分析时不写。
+      const analysisWritten = autoEngine !== undefined && autoEngine.failed === undefined && autoEngine.cached !== true
+        ? await writeAnalysisBack(ctx, exec, policy(exec), game).catch(() => undefined)
+        : undefined
 
       const { review, level } = reviewToolValue(game, cfg, args)
       const value = {
         path: displayPathOf(game),
         // 仅在有补算结果/失败原因时写入该键；否则交由 compact 剔除。
         ...(autoEngine !== undefined ? { autoEngine } : {}),
+        ...(analysisWritten !== undefined ? { analysisWritten } : {}),
         mode: review.mode,
         level,
         cacheKey: key,
@@ -724,7 +741,7 @@ function goEngineAnalyze(ctx, cfg, cache, policy) {
   return {
     name: 'go_engine_analyze',
     description:
-      '用本地 KataGo 引擎对指定手数区间补算分析（供无分析数据的棋谱）。默认使用插件自带的 engine 目录（开箱即用，无需配置）；也可用配置 engineDir / kataGoPath 指向自己的引擎，kataGoModel 指定权重。输出与 go_review_moves 同构的候选列表。',
+      '用本地 KataGo 引擎对指定手数区间补算分析（供无分析数据的棋谱）。默认使用插件自带的 engine 目录（开箱即用，无需配置）；也可用配置 engineDir / kataGoPath 指向自己的引擎，kataGoModel 指定权重。输出与 go_review_moves 同构的候选列表。补算出的逐手胜率/目差会写回棋谱的 WV[]/DM[] 属性（analysisWritten 字段报告写回了多少手），此后这份棋谱自带分析，面板与工具再打开都不必重算。',
     parameters: {
       type: 'object',
       properties: {
@@ -749,6 +766,8 @@ function goEngineAnalyze(ctx, cfg, cache, policy) {
           range: { type: 'object' },
           candidates: { type: 'array', items: { type: 'object' } },
           note: { type: 'string' },
+          // 写回棋谱的逐手分析：{ moves, missing } 或失败原因 { moves: 0, failed }
+          analysisWritten: { type: 'object' },
         },
         required: ['path', 'range', 'candidates', 'note'],
       },
@@ -801,7 +820,18 @@ function goEngineAnalyze(ctx, cfg, cache, policy) {
           `${describeEngine(engine)} 补算 ${result.moves} 手（${result.seconds}s），建议对关键手用 go_review_moves 复核。`
           + (engine.warning !== '' ? ` ⚠ ${engine.warning}` : ''),
       }
-      return value
+      // 补算即写回：把逐手胜率/目差写进棋谱（WV/DM），文件从此自带分析，
+      // 面板与工具下次打开都不必重算。失败只记原因，不影响本次返回。
+      const written = await writeAnalysisBack(ctx, exec, policy(exec), game)
+        .then((r) => r ?? { moves: 0, missing: 0 })
+        .catch((error) => ({ moves: 0, failed: String(error?.message ?? error) }))
+      return {
+        ...value,
+        analysisWritten: written,
+        note: value.note + (written.moves > 0
+          ? ` 已把逐手胜率/目差写回棋谱（${written.moves} 手），下次打开无需重算。`
+          : ''),
+      }
     },
   }
 }
@@ -936,6 +966,26 @@ export async function autoComputeIfNeeded(ctx, cfg, game, opts = {}) {
   if (!engine.available || !noAnalysisData || game.info.size !== 19) {
     return { autoEngine: undefined }
   }
+  // 同一份棋谱只补算一次：模型刚算完、面板再打开同一盘棋（或反复开关棋盘）时
+  // 直接复用内存结果，不再让用户等第二次几十秒的引擎时间。指纹覆盖手顺与规则参数，
+  // 注释变化（写回讲解）不影响命中 —— 那正是最常发生的"同一盘棋再看一遍"。
+  const memoKey = `${gameFingerprint(game)}|${cfg.maxVisits}`
+  const memo = ANALYSIS_CACHE.get(memoKey)
+  if (memo !== undefined) {
+    game.moves = memo.moves
+    return {
+      autoEngine: {
+        from: memo.from,
+        to: memo.to,
+        moves: memo.moveCount,
+        seconds: memo.seconds,
+        engine: memo.engine,
+        model: memo.model,
+        source: memo.source,
+        cached: true,
+      },
+    }
+  }
   const totalMoves = game.moves.length
   const from = Math.max(1, Math.trunc(opts.from ?? 1))
   const to = Math.min(totalMoves, Math.trunc(opts.to ?? totalMoves))
@@ -957,19 +1007,67 @@ export async function autoComputeIfNeeded(ctx, cfg, game, opts = {}) {
     })
     if (result.merge === undefined) return { autoEngine: undefined }
     game.moves = result.merge.moves
-    return {
-      autoEngine: {
-        from,
-        to,
-        moves: result.moves,
-        seconds: result.seconds,
-        engine: result.engine ?? 'KataGo',
-        model: engine.modelName,
-        source: engine.source,
-      },
+    const autoEngine = {
+      from,
+      to,
+      moves: result.moves,
+      seconds: result.seconds,
+      engine: result.engine ?? 'KataGo',
+      model: engine.modelName,
+      source: engine.source,
     }
+    // 记进缓存：同一盘棋的后续读取（面板/工具）直接复用，不再重跑引擎
+    ANALYSIS_CACHE.set(memoKey, {
+      moves: game.moves,
+      from,
+      to,
+      moveCount: result.moves,
+      seconds: result.seconds,
+      engine: autoEngine.engine,
+      model: engine.modelName,
+      source: engine.source,
+    })
+    while (ANALYSIS_CACHE.size > ANALYSIS_CACHE_MAX) {
+      const oldest = ANALYSIS_CACHE.keys().next().value
+      ANALYSIS_CACHE.delete(oldest)
+    }
+    return { autoEngine }
   } catch (error) {
     // 补算失败不能阻断复盘：降级为 theory 模式，并把原因如实带出
     return { autoEngine: { failed: String(error?.message ?? error) } }
   }
 }
+
+/**
+ * 把补算出来的逐手分析写回棋谱文件（KataGo 属性 `WV`/`DM`）。
+ *
+ * 解决的真机问题：讲解已写回 `C[]` 注释、但文件里没有任何胜率数据，于是每次
+ * 重新打开同一份棋谱都要再补算一次（实测 30~100 秒），别的打谱软件看到的也
+ * 只是一盘没有分析的棋。写回后文件自带分析，谁再读都不必重算。
+ *
+ * 只在**本次真的跑了引擎**之后调用（缓存命中或本来就有分析的棋谱都不写）：
+ * 读盘 → 改属性 → 写盘必须发生在明确的分析动作里，不能由只读路径顺手做掉。
+ *
+ * @param {object} ctx Cordis 上下文（需 fs）
+ * @param {object} exec 工具执行上下文（写盘要带 exec.signal）
+ * @param {object} sandboxPolicy 本会话的沙箱策略（写盘必须携带，见文件顶部说明）
+ * @param {object} game readGameFile 的返回值（含 _meta.text 原文）
+ * @returns {Promise<{moves: number, missing: number} | undefined>} 没有可写内容时 undefined
+ */
+async function writeAnalysisBack(ctx, exec, sandboxPolicy, game) {
+  const text = game?._meta?.text
+  if (typeof text !== 'string' || text === '') return undefined
+  const entries = analysisEntriesOf(game)
+  if (entries.length === 0) return undefined
+  const injected = injectAnalysis(text, entries)
+  if (injected.written.length === 0) return undefined
+  const target = await resolveRegularFile(ctx, exec, game._meta.path, sandboxPolicy)
+  await ctx.fs.writeText(target, injected.text, undefined, exec.signal, sandboxPolicy)
+  game._meta.text = injected.text
+  return { moves: injected.written.length, missing: injected.missing.length }
+}
+
+/** 补算结果缓存的上限（条目数；每条是一份棋谱的 moves 数组）。 */
+const ANALYSIS_CACHE_MAX = 8
+/** 补算结果缓存：key = 棋谱指纹 + 搜索量，value = 该次补算的逐手分析。 */
+const ANALYSIS_CACHE = new Map()

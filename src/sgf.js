@@ -560,6 +560,119 @@ export function injectComments(sgfText, entries, opts = {}) {
 }
 
 /**
+ * 把逐手分析（胜率/目差）写回 SGF 的 KataGo 属性。
+ *
+ * 为什么要写回：补算结果原先只活在内存里 —— 每次重新打开同一份棋谱都要再跑一次
+ * 引擎（真机实测 30~100 秒），而"讲解已写回注释、却没有胜率数据"的棋谱在别的
+ * 打谱软件里也一样是空白的。写回后文件自带 `WV`/`DM`，任何一方再读都不必重算。
+ *
+ * 口径与读取端严格对齐（`src/sgf.js` 的 parseGame / winrateForColor）：
+ *   · `WV` = **白方**视角胜率（0~1 小数）；
+ *   · `DM` = **黑方**视角领先目数。
+ * 传入的是落子者视角的原始量，这里负责换算 —— 两个方向各写错一次就会得到
+ * "胜率恒等于对手"的静默错误，故换算只在此处发生一次。
+ *
+ * 与 injectComments 同法：交给 @sabaki/sgf 解析出变化树，沿真正的第一个子节点
+ * 走主线，替换/新增该节点的 WV、DM，再整树重新序列化（幂等：重复调用不会堆积）。
+ *
+ * @param {string} sgfText 原始 SGF 文本
+ * @param {Array<{ moveNumber: number, moverWinrate?: number, moverScoreLead?: number }>} entries
+ *   `moverWinrate` = 落子者视角胜率（0~1）；`moverScoreLead` = 落子者视角领先目数
+ * @returns {{ text: string, written: Array<number>, missing: Array<number> }}
+ */
+export function injectAnalysis(sgfText, entries) {
+  const out = { written: [], missing: [] }
+  if (!Array.isArray(entries) || entries.length === 0) return { text: sgfText, ...out }
+
+  const trees = sgf.parse(sgfText)
+  if (trees.length === 0) return { text: sgfText, ...out }
+
+  // 与 parseGame / injectComments 同一条主线遍历规则：只取第一局、只走第一个子节点
+  const moveNodes = new Map() // moveNumber -> { node, color }
+  for (const tree of trees) {
+    let node = tree
+    let number = 0
+    while (node !== undefined && node !== null) {
+      const black = node.data?.B
+      const white = node.data?.W
+      if (black !== undefined || white !== undefined) {
+        number += 1
+        if (!moveNodes.has(number)) moveNodes.set(number, { node, color: black !== undefined ? 'B' : 'W' })
+      }
+      const next = node.children?.[0]
+      if (next === undefined) break
+      node = next
+    }
+    break
+  }
+
+  for (const entry of entries) {
+    const moveNumber = Math.trunc(Number(entry?.moveNumber))
+    if (!Number.isFinite(moveNumber) || moveNumber < 1) continue
+    const found = moveNodes.get(moveNumber)
+    if (found === undefined) {
+      out.missing.push(moveNumber)
+      continue
+    }
+    const isBlack = found.color === 'B'
+    const winrate = Number(entry.moverWinrate)
+    if (Number.isFinite(winrate) && winrate >= 0 && winrate <= 1) {
+      // 落子者视角 → 白方视角：黑棋落子时取反
+      const white = isBlack ? 1 - winrate : winrate
+      found.node.data.WV = [String(Math.min(1, Math.max(0, Math.round(white * 10000) / 10000)))]
+    }
+    const lead = Number(entry.moverScoreLead)
+    if (Number.isFinite(lead)) {
+      // 落子者视角 → 黑方视角：白棋落子时取反；-0 归一（不是合法 JSON）
+      const black = isBlack ? lead : -lead
+      found.node.data.DM = [String(Object.is(black, -0) ? 0 : Math.round(black * 10) / 10)]
+    }
+    out.written.push(moveNumber)
+  }
+
+  if (out.written.length === 0) return { text: sgfText, ...out }
+  out.written.sort((a, b) => a - b)
+  return { text: sgf.stringify(trees, { linebreak: '\n' }), ...out }
+}
+
+/**
+ * 从已合成分析的棋局里取出可写回的逐手分析。
+ *
+ * 两种来源都要认：
+ *   · 引擎补算通道 —— `analysis.lz.winratePct`（落子者视角百分点）与 `scoreLeadOpponent`；
+ *   · 棋谱自带的 KataGo 属性 —— `analysis.winrateWhite` / `analysis.scoreLeadBlack`。
+ * 统一换算成**落子者视角**交给 injectAnalysis，换算规则只在那里实现一次。
+ *
+ * @param {object} game parseGame 的返回值（可能已被补算就地替换 moves）
+ * @returns {Array<{ moveNumber: number, moverWinrate?: number, moverScoreLead?: number }>}
+ */
+export function analysisEntriesOf(game) {
+  const out = []
+  for (const move of game?.moves ?? []) {
+    const a = move.analysis
+    if (!a) continue
+    const isBlack = move.color === 'B'
+    let moverWinrate
+    let moverScoreLead
+    if (a.lz?.winratePct !== undefined) moverWinrate = a.lz.winratePct / 100
+    else if (a.winrateWhite !== undefined) moverWinrate = isBlack ? 1 - a.winrateWhite : a.winrateWhite
+    if (a.lz?.scoreLeadOpponent !== undefined) {
+      // scoreLeadOpponent 记的是**对手**视角领先 → 落子者视角取反
+      moverScoreLead = -a.lz.scoreLeadOpponent
+    } else if (a.scoreLeadBlack !== undefined) {
+      moverScoreLead = isBlack ? a.scoreLeadBlack : -a.scoreLeadBlack
+    }
+    if (moverWinrate === undefined && moverScoreLead === undefined) continue
+    out.push({
+      moveNumber: move.number,
+      ...(moverWinrate !== undefined ? { moverWinrate } : {}),
+      ...(moverScoreLead !== undefined ? { moverScoreLead } : {}),
+    })
+  }
+  return out
+}
+
+/**
  * 字符级扫描版（保留作对照/回退，不再用于写入路径）。
  *
  * ⚠️ 已知缺陷：形如 `](;B[de]…)(;B[fd]…)` 的文件中，实战主线就是第一个子节点，

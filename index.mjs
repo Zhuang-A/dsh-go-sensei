@@ -166,6 +166,35 @@ function compactBoard(game) {
 }
 
 /**
+ * 讲解注释（C[]）：按手数交给浏览器，让棋盘能显示"这一手当时是怎么讲的"。
+ *
+ * 截断与条数上限一起生效：一份整盘讲解有几十条、每条上千字，全量推给浏览器
+ * 既没必要（一次只看一手）也拖慢面板。
+ *
+ * @param {object} game parseGame 的返回值
+ * @returns {Record<string, string>} 手数 -> 注释文本
+ */
+function compactComments(game) {
+  const out = {}
+  let count = 0
+  for (const move of game.moves ?? []) {
+    const text = move.analysis?.comment
+    if (typeof text !== 'string' || text.trim() === '') continue
+    if (count >= MAX_PANEL_COMMENTS) break
+    const trimmed = text.trim()
+    out[String(move.number)] = trimmed.length > MAX_PANEL_COMMENT_CHARS
+      ? `${trimmed.slice(0, MAX_PANEL_COMMENT_CHARS)}…`
+      : trimmed
+    count += 1
+  }
+  return out
+}
+
+/** 面板一次带上多少条讲解注释、单条最多多少字。 */
+const MAX_PANEL_COMMENTS = 200
+const MAX_PANEL_COMMENT_CHARS = 600
+
+/**
  * 工具调用 -> 「正在讲解的局面」的语义类别。
  * 面板棋盘靠它跟随讲解：模型讲到哪一手，棋盘就跳到哪一手。
  */
@@ -394,6 +423,8 @@ function registerPanelRoute(ctx, cfg) {
               variations: game.stats.variations,
               candidates: review.candidates.map(compactForPanel),
               board: compactBoard(game),
+              // 已写回棋谱的讲解：面板/整页/右侧栏都靠它显示"这一手怎么讲的"
+              comments: compactComments(game),
               // 棋盘表头要显示"谁跟谁下、结果如何"，这些是讲解时最常用的一句话背景
               ...(game.info.players ? { players: game.info.players } : {}),
               ...(game.info.result !== undefined ? { result: game.info.result } : {}),

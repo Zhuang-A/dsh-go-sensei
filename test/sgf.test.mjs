@@ -20,6 +20,8 @@ import {
   hasWinrateData,
   countWinratePairs,
   injectComments,
+  injectAnalysis,
+  analysisEntriesOf,
 } from '../src/sgf.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -370,4 +372,81 @@ test('injectComments: 回写结果可被 @sabaki/sgf 重新解析', async () => 
   const m4 = m1.children[0].children[0].children[0]
   const m4c = m4.data instanceof Map ? m4.data.get('C') : m4.data.C
   assert.equal(m4c[0], '白第四手')
+})
+
+// ---------------------------------------------------------------------------
+// 分析写回（WV/DM）：补算结果落盘，之后谁读都不必重算
+// ---------------------------------------------------------------------------
+
+test('injectAnalysis: 落子者视角 → WV(白方) / DM(黑方) 严格换算', () => {
+  // 黑棋落子、落子者胜率 60%、落子者领先 3.2 目
+  // → 白方胜率 = 40%（WV[0.4]）、黑方领先 = 3.2（DM[3.2]）
+  const black = injectAnalysis(PLAIN, [{ moveNumber: 1, moverWinrate: 0.6, moverScoreLead: 3.2 }])
+  assert.deepEqual(black.written, [1])
+  assert.ok(black.text.includes('WV[0.4]'), black.text)
+  assert.ok(black.text.includes('DM[3.2]'), black.text)
+  // 白棋落子、落子者胜率 40%、落后 2.5 目
+  // → 白方胜率 = 40%（WV[0.4]）、黑方领先 = 2.5（DM[2.5]）
+  const white = injectAnalysis(PLAIN, [{ moveNumber: 2, moverWinrate: 0.4, moverScoreLead: -2.5 }])
+  assert.ok(white.text.includes('WV[0.4]'), white.text)
+  assert.ok(white.text.includes('DM[2.5]'), white.text)
+})
+
+test('injectAnalysis: 往返一致（写回后再读，落子者视角不变）', () => {
+  const entries = [
+    { moveNumber: 1, moverWinrate: 0.6, moverScoreLead: 3.2 },
+    { moveNumber: 2, moverWinrate: 0.4, moverScoreLead: -2.5 },
+  ]
+  const { text } = injectAnalysis(PLAIN, entries)
+  const back = analysisEntriesOf(parseGame(text))
+  assert.equal(back.length, 2)
+  assert.ok(Math.abs(back[0].moverWinrate - 0.6) < 1e-4, String(back[0].moverWinrate))
+  assert.ok(Math.abs(back[0].moverScoreLead - 3.2) < 1e-6)
+  assert.ok(Math.abs(back[1].moverWinrate - 0.4) < 1e-4)
+  assert.ok(Math.abs(back[1].moverScoreLead + 2.5) < 1e-6)
+})
+
+test('injectAnalysis: 幂等（重复写回不堆积属性）', () => {
+  const once = injectAnalysis(PLAIN, [{ moveNumber: 1, moverWinrate: 0.6, moverScoreLead: 3.2 }]).text
+  const twice = injectAnalysis(once, [{ moveNumber: 1, moverWinrate: 0.55, moverScoreLead: 2.0 }]).text
+  assert.equal((twice.match(/WV\[/g) ?? []).length, 1, twice)
+  assert.equal((twice.match(/DM\[/g) ?? []).length, 1, twice)
+  assert.ok(twice.includes('WV[0.45]'), '第二次的值应覆盖第一次')
+  // 和 injectComments 同法：变化树与手数不能丢
+  const back = parseGame(twice)
+  assert.equal(back.moves.length, parseGame(PLAIN).moves.length)
+})
+
+test('injectAnalysis: 超出手数的手记入 missing，原文不变', () => {
+  const r = injectAnalysis(PLAIN, [{ moveNumber: 99, moverWinrate: 0.5 }])
+  assert.deepEqual(r.written, [])
+  assert.deepEqual(r.missing, [99])
+  assert.equal(r.text, PLAIN)
+})
+
+test('analysisEntriesOf: 两种来源（引擎 LZ 通道 / 棋谱 WV-DM 通道）都认', () => {
+  // LZ 通道：winratePct 是落子者视角；scoreLeadOpponent 是对手视角
+  const lzGame = {
+    moves: [
+      { number: 1, color: 'B', analysis: { lz: { winratePct: 60, scoreLeadOpponent: -3.2 } } },
+      { number: 2, color: 'W', analysis: { lz: { winratePct: 40, scoreLeadOpponent: 2.5 } } },
+      { number: 3, color: 'B', analysis: null },
+    ],
+  }
+  const lz = analysisEntriesOf(lzGame)
+  assert.equal(lz.length, 2)
+  assert.ok(Math.abs(lz[0].moverWinrate - 0.6) < 1e-9)
+  assert.ok(Math.abs(lz[0].moverScoreLead - 3.2) < 1e-9, '对手视角领先取反回落子者视角')
+  assert.ok(Math.abs(lz[1].moverScoreLead + 2.5) < 1e-9)
+  // WV/DM 通道：WV 白方视角、DM 黑方视角
+  const kataGame = {
+    moves: [
+      { number: 1, color: 'B', analysis: { winrateWhite: 0.4, scoreLeadBlack: 3.2 } },
+      { number: 2, color: 'W', analysis: { winrateWhite: 0.4, scoreLeadBlack: 2.5 } },
+    ],
+  }
+  const kata = analysisEntriesOf(kataGame)
+  assert.ok(Math.abs(kata[0].moverWinrate - 0.6) < 1e-9, 'WV 是白方视角，黑棋落子要取反')
+  assert.ok(Math.abs(kata[1].moverWinrate - 0.4) < 1e-9)
+  assert.ok(Math.abs(kata[1].moverScoreLead + 2.5) < 1e-9, 'DM 是黑方视角，白棋落子要取反')
 })

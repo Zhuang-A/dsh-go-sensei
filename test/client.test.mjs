@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { apply, Config } from '../index.mjs'
+import { injectComments } from '../src/sgf.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const fixture = (name) => join(here, 'fixtures', name)
@@ -1131,4 +1132,80 @@ test('client: 右侧栏正文渲染棋盘与问题手（拿 resourceAddress 当�
   assert.ok(nodes.some((n) => n.type === 'circle' && n.props.stroke === '#0000ff'), 'AI 首选蓝圈')
   const items = nodes.filter((n) => n.type === 'button' && n.props.className === 'dgs-item')
   assert.equal(items.length, 1)
+})
+
+// ---------------------------------------------------------------------------
+// 已写回的讲解：宿主带上注释、面板显示当前手的讲解
+// ---------------------------------------------------------------------------
+
+test('路由: 面板数据带上已写回的讲解注释（按手数）', async () => {
+  const ctx = makeRouteCtx()
+  apply(ctx, Config(NO_ENGINE_CFG))
+  const route = ctx.routes.find((r) => r.path === '/go-sensei/review')
+
+  const { readFileSync: read, writeFileSync: write, mkdirSync } = await import('node:fs')
+  const dir = join(here, 'tmp-comments')
+  mkdirSync(dir, { recursive: true })
+  const file = join(dir, 'with-comment.sgf')
+  const injected = injectComments(read(fixture('real-analysis.sgf'), 'utf8'), [
+    { moveNumber: 21, comment: '这手太急：该先补断点。' },
+  ])
+  write(file, injected.text)
+
+  const r = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent(file))
+  assert.equal(r.status, 200, JSON.stringify(r.body))
+  assert.equal(typeof r.body.data.comments, 'object')
+  assert.ok(String(r.body.data.comments['21'] ?? '').includes('这手太急'),
+    `应按手数带上注释：${JSON.stringify(r.body.data.comments ?? {}).slice(0, 200)}`)
+})
+
+test('client: 面板显示当前手的讲解注释，并在列表里标出「有讲解」', async () => {
+  const { registered, react } = loadClient()
+  const gamePath = fixture('real-analysis.sgf')
+  const candidates = [{
+    moveNumber: 3, color: 'B', coord: 'dd', coordLabel: 'D16', label: '大恶手', labelKey: 'blunder',
+    winrateLoss: 25, scoreLoss: 12, pv: [{ label: 'Q16', winratePct: 50 }],
+  }]
+  const board = {
+    size: 19,
+    moves: [
+      { c: 'B', x: 3, y: 3 }, { c: 'W', x: 15, y: 15 }, { c: 'B', x: 4, y: 4 },
+      { c: 'W', x: 15, y: 3 }, { c: 'B', x: 3, y: 15 }, { c: 'W', x: 9, y: 9 },
+    ],
+    setup: { black: [], white: [] },
+  }
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      ok: true,
+      data: {
+        path: gamePath, mode: 'analysis', level: '18K', moveCount: 6, variations: 0,
+        candidates, board, comments: { 3: '这手太急：该先补断点，别急着抢大场。' },
+      },
+    }),
+  })
+
+  const props = { inputActions: { setDraft() {} } }
+  react.reset()
+  let tree = registered[0].component(props)
+  walk(tree).find((n) => n.type === 'button' && texts([n]).includes('展开')).props.onClick()
+  react.reset()
+  tree = registered[0].component(props)
+  walk(tree).find((n) => n.type === 'input').props.onChange({ target: { value: gamePath } })
+  react.reset()
+  tree = registered[0].component(props)
+  walk(tree).find((n) => n.type === 'button' && texts([n]).includes('读取问题手')).props.onClick()
+  await new Promise((r) => setTimeout(r, 30))
+  react.reset()
+  tree = registered[0].component(props)
+
+  const nodes = walk(tree)
+  const box = nodes.find((n) => String(n.props.className || '').includes('dgs-comment'))
+  assert.ok(box, '当前手有讲解时应显示注释框')
+  const text = texts(walk(box)).join('|')
+  assert.ok(text.includes('这手太急'), text)
+  assert.ok(text.includes('讲解（已写回棋谱注释）'), text)
+  const all = texts(nodes).join('|')
+  assert.ok(all.includes('有讲解'), '问题手列表里应标出哪几手有讲解')
+  assert.ok(all.includes('第 3/6 手'), all)
 })
