@@ -45,7 +45,9 @@ function makeReactStub({ withEffects = false } = {}) {
       },
       useState(initial) {
         const index = cursor++
-        if (hooks.length <= index) hooks.push(initial)
+        // 按**下标**分配：useEffect 会占掉一个游标而不占槽（下面 useEffect 里 cursor++），
+        // 于是 hooks 里会留下空洞；用 push 会把这些值塞到错误的下标上（真实 React 不会）。
+        if (!(index in hooks)) hooks[index] = initial
         const set = (next) => { hooks[index] = typeof next === 'function' ? next(hooks[index]) : next }
         return [hooks[index], set]
       },
@@ -266,7 +268,8 @@ test('client: 未载入棋谱时也给出棋盘入口与跟随开关（否则跟
   let all = texts(walk(tree)).join('|')
   assert.ok(all.includes('棋盘 ▸'), `应有棋盘入口：${all}`)
   assert.ok(all.includes('未载入棋谱'), '应说明还没载入棋谱')
-  assert.ok(all.includes('跟随讲解 ✓'), '跟随开关在没有棋谱时也要能按')
+  assert.ok(all.includes('跟随讲解 ✓'),
+    `跟随开关在没有棋谱时也要能按：${all.slice(0, 220)} hooks=${JSON.stringify(react.hooks)}`)
 
   // 展开棋盘：给出「跟随会自动带出棋谱」的说明，而不是一片空白
   walk(tree).find((n) => n.type === 'button' && texts([n]).includes('棋盘 ▸')).props.onClick()
@@ -598,10 +601,14 @@ function stoneCounts(tree) {
   return { black: pick('dgs-stone-b'), white: pick('dgs-stone-w') }
 }
 
-/** 盘上的两类小标记：问题手色点（圆，始终全露）与讲解小方点（方，随手数开亮）。 */
+/** 盘上的两类小标记：问题手色点（圆）与讲解小方点（方）。
+ *  只在棋盘 svg 内部计数——图例（dgs-key）里也有同色的小色样，不能算进来。 */
 const MARK_FILLS = ['#9b1996', '#d01013', '#c88c32']
 function markerCounts(tree) {
-  const nodes = walk(tree)
+  const board = walk(tree).find((n) => n.type === 'svg'
+    && String(n.props.className || '').includes('dgs-board'))
+  if (board === undefined) return { problems: 0, notes: 0 }
+  const nodes = walk(board)
   return {
     problems: nodes.filter((n) => n.type === 'circle' && MARK_FILLS.includes(n.props.fill)).length,
     notes: nodes.filter((n) => n.type === 'rect' && n.props.fill === '#7c8cff').length,
@@ -806,7 +813,7 @@ test('路由: /go-sensei/focus 跟随讲解（工具调用 -> 局面指针）', 
   assert.equal(r.body.focus.name, 'other.sgf')
 })
 
-test('client: 载入后停在最严重的问题手，并把所有问题手点在盘上', async () => {
+test('client: 载入后停在最严重的问题手，问题点随手数开亮', async () => {
   const { registered, react } = loadClient()
   const gamePath = fixture('real-analysis.sgf')
   const BOARD8 = {
@@ -854,7 +861,8 @@ test('client: 载入后停在最严重的问题手，并把所有问题手点在
   const dotOf = (color) => nodes.filter((n) => n.type === 'circle' && n.props.fill === color
     && Math.abs(Number(n.props.r) - 0.16 * (84 / 18)) < 0.001)
   assert.equal(dotOf('#9b1996').length, 1, '大恶手应有一个紫点')
-  assert.equal(dotOf('#d01013').length, 1, '失误应有一个红点')
+  // 问题点与讲解点同一条规则：只标"已经下到"的（第 6 手那处还没走到，先不点）
+  assert.equal(dotOf('#d01013').length, 0, '还没走到的问题手不该先点出来')
   assert.ok(nodes.some((n) => n.type === 'circle' && n.props.stroke === '#9b1996'), '当前这一手还要有大圈')
 
   // 恶点跳转：下一个 → 下一个（到头绕回第一个）→ 上一个（到头绕回最后一个）。
@@ -869,18 +877,21 @@ test('client: 载入后停在最严重的问题手，并把所有问题手点在
     return texts(walk(tree)).join('|')
   }
   assert.ok(clickBtn('恶点▶').includes('第 6/8 手'), '「恶点▶」应跳到下一处（第 6 手）')
+  // 走到第 6 手以后，那一处的红点才该出现（问题点随手数开亮）
+  assert.equal(walk(tree).filter((n) => n.type === 'circle' && n.props.fill === '#d01013').length, 1,
+    '走到第 6 手后应出现那一处的红点')
   assert.ok(clickBtn('恶点▶').includes('第 3/8 手'), '最后一处再点应绕回第一处（第 3 手）')
   assert.ok(clickBtn('◀恶点').includes('第 6/8 手'), '第一处再往回点应绕到最后一处（第 6 手）')
   // 回到自动落位的那一手，继续验证色点
   assert.ok(clickBtn('恶点▶').includes('第 3/8 手'), '再点一次回到第 3 手')
 
-  // 把棋盘拨回开局：小色点仍在（停在哪一手都看得见），说明行讲清它们是什么
+  // 拨回开局：盘面回到干净状态（两处问题手都还没走到，不该有残留色点）
   walk(tree).find((n) => n.type === 'button' && texts([n]).includes('⏮')).props.onClick()
   react.reset()
   tree = registered[0].component(props)
   const nodes2 = walk(tree)
-  assert.equal(nodes2.filter((n) => n.type === 'circle'
-    && ['#9b1996', '#d01013'].includes(n.props.fill)).length, 2, '离开问题手后小色点仍应留在盘上')
+  assert.deepEqual(markerCounts(tree), { problems: 0, notes: 0 },
+    '开局盘面应干净（问题点还没走到）')
   assert.ok(!nodes2.some((n) => n.type === 'circle' && n.props.stroke === '#9b1996'), '大圈只套在当前这一手上')
   assert.ok(texts(nodes2).join('|').includes('盘上色点＝问题手'), '应说明盘上色点的含义')
 })
@@ -985,12 +996,12 @@ test('client: 棋盘可收起；点问题手自动展开并跳到那一手（含
   click('⏮')
   assert.equal(stoneCounts(tree).black + stoneCounts(tree).white, 0, '开局空盘')
   assert.ok(texts(walk(tree)).join('|').includes('开局'), '表头应显示开局')
-  // 回归：讲解点必须"下到那一手才亮"（开局不能预亮）；问题手色点则始终全露
-  assert.deepEqual(markerCounts(tree), { problems: 1, notes: 0 },
+  // 回归：讲解点与问题点同一条规则——只标"已经下到"的那几手，开局盘面必须是干净的
+  assert.deepEqual(markerCounts(tree), { problems: 0, notes: 0 },
     '开局标记＝' + JSON.stringify(markerCounts(tree)))
   click('▶')
   assert.equal(stoneCounts(tree).black, 1)
-  assert.deepEqual(markerCounts(tree), { problems: 1, notes: 0 },
+  assert.deepEqual(markerCounts(tree), { problems: 0, notes: 0 },
     '第 1 手标记＝' + JSON.stringify(markerCounts(tree)))
   click('▶')
   click('▶')
@@ -1007,6 +1018,67 @@ test('client: 棋盘可收起；点问题手自动展开并跳到那一手（含
   // 再点一次「棋盘 ▾」应收起（可收起）
   click('棋盘 ▾')
   assert.equal(walk(tree).find((n) => n.type === 'svg'), undefined, '收起后棋盘应消失')
+})
+
+test('client: 图例开关能分别关掉问题手点与讲解点', async () => {
+  const { registered, react } = loadClient()
+  const gamePath = fixture('real-analysis.sgf')
+  const candidates = [{
+    moveNumber: 3, color: 'B', coord: 'ed', coordLabel: 'E16',
+    label: '失误', labelKey: 'mistake', winrateLoss: 12, scoreLoss: 4, pv: [],
+  }]
+  globalThis.fetch = async (url) => ({
+    ok: true,
+    json: async () => (String(url).includes('/go-sensei/focus')
+      ? { ok: true, focus: null }
+      : {
+          ok: true,
+          data: {
+            path: gamePath, mode: 'analysis', level: '18K', moveCount: 5, variations: 0,
+            candidates, board: CAPTURE_BOARD, comments: { 2: '第 2 手的讲解' },
+          },
+        }),
+  })
+
+  const props = { inputActions: { setDraft() {} } }
+  const render = () => { react.reset(); return registered[0].component(props) }
+  let tree = render()
+  walk(tree).find((n) => n.type === 'button' && texts([n]).includes('展开')).props.onClick()
+  tree = render()
+  walk(tree).find((n) => n.type === 'input').props.onChange({ target: { value: gamePath } })
+  tree = render()
+  walk(tree).find((n) => n.type === 'button' && texts([n]).includes('读取问题手')).props.onClick()
+  await new Promise((r) => setTimeout(r, 30))
+  tree = render()
+
+  // 载入后自动停在第 3 手（最严重的问题手）：问题点 1 + 讲解点 1（第 2 手）
+  assert.deepEqual(markerCounts(tree), { problems: 1, notes: 1 }, '默认两个标注都开着')
+
+  /** 图例里的开关（dgs-keyitem 按钮，按标签找；文字在 span 里，要递归取）。 */
+  const chip = (label) => {
+    const node = walk(tree).find((n) => n.type === 'button'
+      && String(n.props.className || '').includes('dgs-keyitem')
+      && texts(walk(n)).join('|').includes(label))
+    assert.ok(node, `图例里应有「${label}」这一项`)
+    return node
+  }
+  assert.ok(chip('问题手（紫＞红＞橙）'), '问题手开关')
+  assert.ok(chip('有讲解'), '讲解点开关')
+  assert.ok(chip('AI 首选 / 变化图'), 'AI 推荐开关')
+
+  chip('问题手（紫＞红＞橙）').props.onClick()
+  tree = render()
+  assert.deepEqual(markerCounts(tree), { problems: 0, notes: 1 }, '关掉问题手点后只剩讲解点')
+
+  chip('有讲解').props.onClick()
+  tree = render()
+  assert.deepEqual(markerCounts(tree), { problems: 0, notes: 0 }, '两个都关掉后盘面干净')
+
+  // 再点回来：关掉的项要能重新打开
+  chip('问题手（紫＞红＞橙）').props.onClick()
+  chip('有讲解').props.onClick()
+  tree = render()
+  assert.deepEqual(markerCounts(tree), { problems: 1, notes: 1 }, '再点一次应重新显示')
 })
 
 // ---------------------------------------------------------------------------
@@ -1137,8 +1209,9 @@ test('client: 右侧栏正文渲染棋盘与问题手（拿 resourceAddress 当�
   const address = 'dsh-resource://file/session/s1/' + gamePath.replace(/\\/g, '/')
   react.reset()
   Body({ resourceAddress: address })
-  // 正文在 effect 里加载；桩不自动跑 effect，这里手动跑第 0 个（第 1 个是跟随轮询）
-  react.runEffect(0)
+  // 正文在 effect 里加载；桩不自动跑 effect。第 0 个是 store 订阅（useSenseiStore），
+  // 第 1 个才是加载，第 2 个是跟随轮询。
+  react.runEffect(1)
   await new Promise((r) => setTimeout(r, 30))
   react.reset()
   const tree = Body({ resourceAddress: address })
@@ -1267,7 +1340,8 @@ test('client: 右侧栏：控件与棋盘同容器（不偏移）、点交叉点
   const address = 'dsh-resource://file/session/s1/' + gamePath.replace(/\\/g, '/')
   react.reset()
   Body({ resourceAddress: address })
-  react.runEffect(0)
+  // 第 0 个 effect 是 store 订阅，加载在第 1 个
+  react.runEffect(1)
   await new Promise((r) => setTimeout(r, 30))
   react.reset()
   const tree = Body({ resourceAddress: address })

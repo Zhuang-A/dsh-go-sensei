@@ -81,6 +81,12 @@ window.__ModuleLoader__.load({
       '[data-dgs] .dgs-ctl button { padding: 2px 6px; white-space: nowrap; flex: 0 0 auto; }',
       '[data-dgs] input[type=range] { flex: 1 1 90px; min-width: 80px; padding: 0; background: transparent; border: none; }',
       '[data-dgs] .dgs-note { font-size: 11px; color: var(--dsw-alias-label-secondary, #9aa4b2); margin-top: 4px; }',
+      // 盘上标注的图例 + 开关：色样 + 名称的小胶囊，点一下开/关
+      '[data-dgs] .dgs-key { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }',
+      '[data-dgs] .dgs-keyitem { display: inline-flex; align-items: center; gap: 4px; font-size: 10px;',
+      '  padding: 1px 7px; border-radius: 999px; white-space: nowrap; }',
+      '[data-dgs] .dgs-keyitem svg { flex: 0 0 auto; }',
+      '[data-dgs] .dgs-keyoff { opacity: .42; text-decoration: line-through; }',
       // ── 整页棋盘（主区域面板）：棋盘在左、问题手详细说明在右 ──────────────
       '[data-dgs].dgs-page { border: none; border-radius: 0; background: transparent;',
       '  margin: 0; padding: 12px 16px; max-width: none; height: 100%; box-sizing: border-box; }',
@@ -388,9 +394,10 @@ window.__ModuleLoader__.load({
 
       // 已写回的讲解：有讲解的手在棋子左上角点一个小方点（与 Lizzieyzy 的
       // 注释节点标记同一语义），学生一眼看出"哪几手有老师的话"。
-      // 只标**已经走到**的那些手：否则开局（0 手）就把全盘的讲解点亮着，
-      // 看着像一堆来历不明的点，也说明不了"讲到哪儿了"。
-      var noteMoves = Array.isArray(opts.noteMoves) ? opts.noteMoves : []
+      // 两条规则：① 可在图例里关掉（showNote=false 时整类不画）；
+      // ② 只标**已经走到**的那些手——否则开局（0 手）就把全盘的讲解点亮着，
+      //    看着像一堆来历不明的点，也说明不了"讲到哪儿了"。
+      var noteMoves = opts.showNote === false || !Array.isArray(opts.noteMoves) ? [] : opts.noteMoves
       for (var nm = 0; nm < noteMoves.length; nm++) {
         if (noteMoves[nm] > opts.upto) continue
         var noted = moves[noteMoves[nm] - 1]
@@ -412,11 +419,12 @@ window.__ModuleLoader__.load({
         }))
       }
 
-      // 所有问题手：每处点一个小色点（Lizzieyzy 的着法质量色块同款做法），
-      // 这样**不跳到那一手也看得见**问题都出在哪，全盘问题一眼可数；
-      // （与讲解点不同：讲解点随手数开亮，问题点始终全露。）
-      var marks = Array.isArray(opts.marks) ? opts.marks : []
+      // 问题手：每处点一个小色点（Lizzieyzy 的着法质量色块同款做法）。
+      // 与讲解点同一条规则：可在图例里关掉，且只标**已经下到**的那些手——
+      // 停在开局时盘面就该是干净的，问题点随棋局展开一处处长出来。
+      var marks = opts.showProblem === false || !Array.isArray(opts.marks) ? [] : opts.marks
       marks.forEach(function (m, index) {
+        if (typeof m.n === 'number' && m.n > opts.upto) return
         kids.push(React.createElement('circle', {
           key: 'mark' + index, cx: pos(m.x), cy: pos(m.y), r: step * 0.16,
           fill: m.color, fillOpacity: 0.92, pointerEvents: 'none',
@@ -424,7 +432,7 @@ window.__ModuleLoader__.load({
       })
 
       // 当前这一手的问题手：大圈强调（颜色＝严重度）
-      if (opts.problem !== null && opts.problem !== undefined) {
+      if (opts.showProblem !== false && opts.problem !== null && opts.problem !== undefined) {
         kids.push(React.createElement('circle', {
           key: 'problem', cx: pos(opts.problem.x), cy: pos(opts.problem.y), r: radius * 1.12,
           fill: 'none', stroke: markColor(opts.problem.key, opts.problem.label),
@@ -433,7 +441,7 @@ window.__ModuleLoader__.load({
       }
 
       // 变化图（PV）：首选点 = 青色实心圆 + 蓝圈；后续几手 = 蓝点 + 序号
-      var pv = Array.isArray(opts.pv) ? opts.pv : []
+      var pv = opts.showHint === false || !Array.isArray(opts.pv) ? [] : opts.pv
       pv.forEach(function (p, index) {
         if (p === null || p === undefined) return
         if (index === 0) {
@@ -661,6 +669,11 @@ window.__ModuleLoader__.load({
       open: false,
       boardOpen: false,
       follow: true,
+      // 盘上标注的开关（三处视图共享）：问题手色点 / 讲解小方点 / AI 首选与变化图。
+      // 三个都默认开——它们是讲解的主体；关掉是为了让盘面干净地看棋形。
+      showProblem: true,
+      showNote: true,
+      showHint: true,
       subs: [],
     }
 
@@ -701,6 +714,59 @@ window.__ModuleLoader__.load({
         return senseiSubscribe(function () { setTick(function (n) { return n + 1 }) })
       }, [])
       return senseiStore
+    }
+
+    /** 图例里的小色样：点 / 方 / 圈，与盘上画法一一对应。 */
+    function markerSwatch(kind, color) {
+      var common = { width: 9, height: 9, viewBox: '0 0 10 10', 'aria-hidden': 'true' }
+      if (kind === 'square') {
+        return React.createElement('svg', common,
+          React.createElement('rect', { x: 2, y: 2, width: 6, height: 6, fill: color }))
+      }
+      if (kind === 'ring') {
+        return React.createElement('svg', common,
+          React.createElement('circle', { cx: 5, cy: 5, r: 3.4, fill: 'none', stroke: color, strokeWidth: 1.6 }))
+      }
+      return React.createElement('svg', common,
+        React.createElement('circle', { cx: 5, cy: 5, r: 3.4, fill: color }))
+    }
+
+    /**
+     * 盘上标注的**图例 + 开关**（三处视图共用同一条）。
+     *
+     * 为什么要有它：盘上的记号多了以后，"这个点是什么意思"必须能就地查到，
+     * 而且不同的人在不同的时候想看的记号不一样（想安静看棋形时就全关掉）。
+     * 每项＝色样 + 名称，点一下切换；关掉的项变淡，点击后所有视图同步生效
+     * （状态放在共享 store 里，不各存一份）。
+     */
+    var MARKS_KEY_ITEMS = [
+      { key: 'showProblem', kind: 'dot', color: MARK_COLORS.blunder, label: '问题手（紫＞红＞橙）',
+        hint: '已下过的着法里被评为问题的手：颜色越靠紫，错得越重' },
+      { key: 'showNote', kind: 'square', color: '#7c8cff', label: '有讲解',
+        hint: '棋谱写回注释的手（左上角小方点），只标已经下到的' },
+      { key: 'showHint', kind: 'ring', color: BEST_RING, label: 'AI 首选 / 变化图',
+        hint: '当前这一手改下哪里：青圆蓝圈＝首选，旁边橙底数字＝它的胜率，蓝点带序号＝后续几手' },
+    ]
+
+    function markerKeyRow() {
+      return React.createElement('div', { className: 'dgs-key' },
+        MARKS_KEY_ITEMS.map(function (item) {
+          var on = senseiStore[item.key] !== false
+          return React.createElement('button', {
+            key: item.key,
+            className: on ? 'dgs-keyitem' : 'dgs-keyitem dgs-keyoff',
+            title: (on ? '点击在棋盘上隐藏：' : '点击在棋盘上显示：') + item.hint,
+            onClick: function () {
+              var patch = {}
+              patch[item.key] = !on
+              senseiPatch(patch)
+            },
+          },
+            markerSwatch(item.kind, item.color),
+            React.createElement('span', null, item.label),
+          )
+        }),
+      )
     }
 
     /** 左侧栏的「Sensei 棋盘」图标：外壳给 size/active，配色随主题走。 */
@@ -779,7 +845,7 @@ window.__ModuleLoader__.load({
           var cand = list[mi]
           var mv = typeof cand.moveNumber === 'number' ? board.moves[cand.moveNumber - 1] : null
           if (mv !== undefined && mv !== null && mv.x >= 0) {
-            problemMarks.push({ x: mv.x, y: mv.y, color: markColor(cand.labelKey, cand.label) })
+            problemMarks.push({ n: cand.moveNumber, x: mv.x, y: mv.y, color: markColor(cand.labelKey, cand.label) })
           }
         }
       }
@@ -966,7 +1032,7 @@ window.__ModuleLoader__.load({
             renderBoard({
               board: board, upto: cur, problem: problemPointOf(problem, curMove),
               marks: problemMarks, pv: pvPoints,
-              noteMoves: noteMoves,
+              noteMoves: noteMoves, showProblem: senseiStore.showProblem, showNote: senseiStore.showNote, showHint: senseiStore.showHint,
               hintLabel: hint && hint.label ? hint.label : '',
               // 整页也没有输入框：点击交叉点改为复制追问语（与右侧栏一致）
               onPick: function (x, y) {
@@ -984,6 +1050,7 @@ window.__ModuleLoader__.load({
                 : problemMarks.length > 0
                   ? '● 盘上色点＝问题手（紫＞红＞橙）：点右边任意一行跳过去'
                   : '未发现明显问题手'),
+            markerKeyRow(),
             // 已写回棋谱的讲解：翻到哪一手读到哪一手
             commentBox(commentOf(data, cur)),
           ),
@@ -1006,6 +1073,8 @@ window.__ModuleLoader__.load({
      */
     function SenseiPanel(props) {
       var actions = props && props.inputActions ? props.inputActions : noActions()
+      // 订阅共享状态：盘上标注的三个开关一改，这里要跟着重画
+      useSenseiStore()
       // 初值取自共享状态：面板可能因为切到整页棋盘而被卸载再挂回来
       // （主区域一次只渲染一个面板），那时它必须接着显示原来那盘棋、原来那一手。
       var state = React.useState(senseiStore.path)
@@ -1291,7 +1360,7 @@ window.__ModuleLoader__.load({
           var cand = list[mi]
           var mv = typeof cand.moveNumber === 'number' ? board.moves[cand.moveNumber - 1] : null
           if (mv !== undefined && mv !== null && mv.x >= 0) {
-            problemMarks.push({ x: mv.x, y: mv.y, color: markColor(cand.labelKey, cand.label) })
+            problemMarks.push({ n: cand.moveNumber, x: mv.x, y: mv.y, color: markColor(cand.labelKey, cand.label) })
           }
         }
       }
@@ -1406,7 +1475,7 @@ window.__ModuleLoader__.load({
               problem: problemPoint,
               marks: problemMarks,
               pv: pvPoints,
-              noteMoves: noteMoves,
+              noteMoves: noteMoves, showProblem: senseiStore.showProblem, showNote: senseiStore.showNote, showHint: senseiStore.showHint,
               hintLabel: hint && hint.label ? hint.label : '',
               onPick: askPoint,
             }),
@@ -1468,6 +1537,7 @@ window.__ModuleLoader__.load({
                       '（共 ' + problemMarks.length + ' 处，紫＞红＞橙）　点列表任意一行跳到那一手')
                   : '点棋盘交叉点可就该点提问；「▸」把棋盘收起来',
             ),
+            markerKeyRow(),
             // 已写回棋谱的讲解：翻到哪一手就读到哪一手；这一手没有就指明去哪找
             (function () {
               var box = commentBox(commentOf(data, cur))
@@ -1591,6 +1661,8 @@ window.__ModuleLoader__.load({
     function SenseiDocumentBody(props) {
       var path = filePathOfAddress(props && props.resourceAddress)
       var sessionId = sessionIdOfAddress(props && props.resourceAddress)
+      // 订阅共享状态：盘上标注的三个开关一改，右侧栏这块也要跟着重画
+      useSenseiStore()
       var dataState = React.useState(null)
       var data = dataState[0]
       var setData = dataState[1]
@@ -1714,7 +1786,7 @@ window.__ModuleLoader__.load({
           var cand = list[mi]
           var mv = typeof cand.moveNumber === 'number' ? board.moves[cand.moveNumber - 1] : null
           if (mv !== undefined && mv !== null && mv.x >= 0) {
-            problemMarks.push({ x: mv.x, y: mv.y, color: markColor(cand.labelKey, cand.label) })
+            problemMarks.push({ n: cand.moveNumber, x: mv.x, y: mv.y, color: markColor(cand.labelKey, cand.label) })
           }
         }
       }
@@ -1769,7 +1841,7 @@ window.__ModuleLoader__.load({
               problem: problemPoint,
               marks: problemMarks,
               pv: pvPoints,
-              noteMoves: noteMoves,
+              noteMoves: noteMoves, showProblem: senseiStore.showProblem, showNote: senseiStore.showNote, showHint: senseiStore.showHint,
               hintLabel: hint && hint.label ? hint.label : '',
               onPick: askPointDoc,
             })),
@@ -1818,6 +1890,8 @@ window.__ModuleLoader__.load({
                   + (hint.winratePct == null ? '' : '（胜率 ' + String(hint.winratePct) + '%）'))
               : null))
         }
+        // 盘上标注的图例 + 开关（与 dock / 整页共用同一条）
+        kids.push(React.createElement('div', { key: 'markkey' }, markerKeyRow()))
         kids.push(React.createElement('div', { className: 'dgs-sub', key: 'm' },
           String(data.moveCount || 0) + ' 手 · ' + list.length + ' 个问题手'
           + (data.autoEngine ? ' · 引擎补算 ' + String(data.autoEngine.moves ?? '') + ' 手'
