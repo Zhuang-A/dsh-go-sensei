@@ -17,6 +17,9 @@ const here = dirname(fileURLToPath(import.meta.url))
 const fixture = (name) => join(here, 'fixtures', name)
 const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8'))
 
+// 仓库自带 engine/ 目录（开箱即用的 KataGo）；要测「无引擎」路径必须显式避开它。
+const NO_ENGINE_CFG = { kataGoPath: '', engineDir: join(here, 'no-such-engine') }
+
 // ---------------------------------------------------------------------------
 // React / ModuleLoader / slots 桩
 // ---------------------------------------------------------------------------
@@ -279,7 +282,7 @@ async function callRoute(route, url) {
 
 test('路由: 正常读取真实棋谱并返回问题手（含裁剪字段）', async () => {
   const ctx = makeRouteCtx()
-  apply(ctx, Config({ kataGoPath: '' }))
+  apply(ctx, Config(NO_ENGINE_CFG))
   const route = ctx.routes.find((r) => r.path === '/go-sensei/review')
   assert.ok(route, '路由应被注册')
   assert.equal(route.kind, 'exact')
@@ -300,7 +303,7 @@ test('路由: 正常读取真实棋谱并返回问题手（含裁剪字段）', 
 
 test('路由: cwd 参数控制相对路径解析基准', async () => {
   const ctx = makeRouteCtx()
-  apply(ctx, Config({ kataGoPath: '' }))
+  apply(ctx, Config(NO_ENGINE_CFG))
   const route = ctx.routes.find((r) => r.path === '/go-sensei/review')
   const r = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent('lizzieyzy-real.sgf')
     + '&cwd=' + encodeURIComponent(join(here, 'fixtures')))
@@ -310,7 +313,7 @@ test('路由: cwd 参数控制相对路径解析基准', async () => {
 
 test('路由: 缺 path 参数 → 400', async () => {
   const ctx = makeRouteCtx()
-  apply(ctx, Config({ kataGoPath: '' }))
+  apply(ctx, Config(NO_ENGINE_CFG))
   const route = ctx.routes.find((r) => r.path === '/go-sensei/review')
   const r = await callRoute(route, '/go-sensei/review')
   assert.equal(r.status, 400)
@@ -319,7 +322,7 @@ test('路由: 缺 path 参数 → 400', async () => {
 
 test('路由: 文件不存在 → 404', async () => {
   const ctx = makeRouteCtx()
-  apply(ctx, Config({ kataGoPath: '' }))
+  apply(ctx, Config(NO_ENGINE_CFG))
   const route = ctx.routes.find((r) => r.path === '/go-sensei/review')
   const r = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent('definitely-missing.sgf'))
   assert.equal(r.status, 404)
@@ -328,7 +331,7 @@ test('路由: 文件不存在 → 404', async () => {
 
 test('路由: 目录而非文件 → 400', async () => {
   const ctx = makeRouteCtx()
-  apply(ctx, Config({ kataGoPath: '' }))
+  apply(ctx, Config(NO_ENGINE_CFG))
   const route = ctx.routes.find((r) => r.path === '/go-sensei/review')
   const r = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent(here))
   assert.equal(r.status, 400)
@@ -336,9 +339,10 @@ test('路由: 目录而非文件 → 400', async () => {
 
 test('路由: webServer 缺席时不注册也不抛错', () => {
   const ctx = makeRouteCtx({ withWebServer: false })
-  assert.doesNotThrow(() => apply(ctx, Config({ kataGoPath: '' })))
+  assert.doesNotThrow(() => apply(ctx, Config(NO_ENGINE_CFG)))
   assert.equal(ctx.routes.length, 0, '无 webServer 时不应注册路由')
-  assert.equal(ctx.registered.size, 5, '工具仍应照常注册')
+  // 无引擎（engineDir 指到不存在的目录）：5 个复盘工具 + 始终注册的 go_engine_info
+  assert.equal(ctx.registered.size, 6, '工具仍应照常注册')
 })
 
 // ---------------------------------------------------------------------------
@@ -349,7 +353,7 @@ test('路由: webServer 缺席时不注册也不抛错', () => {
 
 test('路由: 用 tools/result 记下的工作区根解析相对路径', async () => {
   const ctx = makeRouteCtx()
-  apply(ctx, Config({ kataGoPath: '' }))
+  apply(ctx, Config(NO_ENGINE_CFG))
   const route = ctx.routes.find((r) => r.path === '/go-sensei/review')
 
   // 记根之前：相对路径解析不到
@@ -377,7 +381,7 @@ test('路由: 用 tools/result 记下的工作区根解析相对路径', async (
 
 test('路由: 非 go_ 工具的 tools/result 不会被记根', async () => {
   const ctx = makeRouteCtx()
-  apply(ctx, Config({ kataGoPath: '' }))
+  apply(ctx, Config(NO_ENGINE_CFG))
   const listener = ctx.listeners.get('tools/result')
   listener({ name: 'bash', agent: { session: { header: { cwd: join(here, 'fixtures') } } } })
   const route = ctx.routes.find((r) => r.path === '/go-sensei/roots')
@@ -388,7 +392,7 @@ test('路由: 非 go_ 工具的 tools/result 不会被记根', async () => {
 
 test('路由: 观察者抛错不影响工具链路', async () => {
   const ctx = makeRouteCtx()
-  apply(ctx, Config({ kataGoPath: '' }))
+  apply(ctx, Config(NO_ENGINE_CFG))
   const listener = ctx.listeners.get('tools/result')
   // 形状异常（没有 agent）不应抛错
   assert.doesNotThrow(() => listener({ name: 'go_parse_sgf' }))
@@ -397,7 +401,7 @@ test('路由: 观察者抛错不影响工具链路', async () => {
 
 test('路由: 已知根之下按 basename 有界发现（用户只写 game.sgf 也能命中）', async () => {
   const ctx = makeRouteCtx()
-  apply(ctx, Config({ kataGoPath: '' }))
+  apply(ctx, Config(NO_ENGINE_CFG))
 
   // 记下一个根
   const fixturesDir = join(here, 'fixtures')

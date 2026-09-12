@@ -14,7 +14,12 @@
 *.jpg   binary
 *.jpeg  binary
 *.ico   binary
+# 自带引擎（engine/）：可执行文件与动态库必须逐字节原样进出，
+# 任何 EOL/编码转换都会让 katago.exe 起不来。
+*.exe   binary
+*.dll   binary
 
 # ---- GitHub 语言统计 ----
 package-lock.json       linguist-generated=true
 test/fixtures/*.sgf     linguist-vendored=true
+engine/**               linguist-vendored=true

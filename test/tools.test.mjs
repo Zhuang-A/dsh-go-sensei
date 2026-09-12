@@ -17,6 +17,10 @@ const here = dirname(fileURLToPath(import.meta.url))
 const fixture = (name) => join(here, 'fixtures', name)
 const WORKSPACE = join(here, 'tmp-workspace')
 
+// 仓库现在自带 engine/ 目录（开箱即用的 KataGo）。要测「没有引擎」的路径，
+// 必须显式把 engineDir 指到一个不存在的目录，否则本机分辨率会命中自带引擎。
+const NO_ENGINE_DIR = join(here, 'no-such-engine')
+
 // ---------------------------------------------------------------------------
 // 最小 ctx 仿真：仅实现 index.mjs 用到的服务方法
 // ---------------------------------------------------------------------------
@@ -100,6 +104,7 @@ const CFG = {
   maxCandidates: 10,
   pvDepth: 6,
   tokenBudget: 50000,
+  engineDir: NO_ENGINE_DIR,
   kataGoPath: '',
   kataGoConfig: '',
   kataGoModel: '',
@@ -177,8 +182,9 @@ after(() => {
   rmSync(WORKSPACE, { recursive: true, force: true })
 })
 
-test('apply: 注册 5 个工具 + 2 个提示词段', () => {
+test('apply: 无引擎时注册 6 个工具（含 go_engine_info）+ 2 个提示词段', () => {
   assert.deepEqual([...ctx.registered.keys()].sort(), [
+    'go_engine_info',
     'go_export_report',
     'go_parse_sgf',
     'go_position_context',
@@ -189,6 +195,55 @@ test('apply: 注册 5 个工具 + 2 个提示词段', () => {
   const persona = ctx.sections.find((s) => s.name === 'go-sensei:persona')
   assert.ok(persona.text.includes('围棋老师'))
   assert.ok(persona.text.includes('50000')) // token 预算注入
+})
+
+test('apply: engineDir 指向自带引擎目录的等价形态 → 注册补算工具并认出最大权重', async () => {
+  const engineDir = join(here, 'tmp-engine')
+  rmSync(engineDir, { recursive: true, force: true })
+  mkdirSync(join(engineDir, 'KataGoData'), { recursive: true }) // 目录项不该被当成权重
+  writeFileSync(join(engineDir, 'katago.exe'), 'stub')
+  writeFileSync(join(engineDir, 'analysis_example.cfg'), 'reportAnalysisWinratesAs = BLACK\n')
+  writeFileSync(join(engineDir, 'kata1-b18c384nbt-a.bin.gz'), Buffer.alloc(1024))
+  writeFileSync(join(engineDir, 'kata1-b28c512nbt-b.bin.gz'), Buffer.alloc(4096))
+  const engineCtx = makeCtx(WORKSPACE)
+  apply(engineCtx, Config({ engineDir, kataGoPath: '' }))
+
+  assert.ok(engineCtx.registered.has('go_engine_analyze'), '引擎可用时应注册 go_engine_analyze')
+  const info = await callJson(engineCtx.registered.get('go_engine_info'), WORKSPACE, {})
+  assert.equal(info.available, true)
+  assert.equal(info.source, 'engineDir')
+  assert.equal(info.engineDir, engineDir)
+  assert.equal(info.kataGoPath, join(engineDir, 'katago.exe'))
+  assert.equal(info.configPath, join(engineDir, 'analysis_example.cfg'))
+  // 权重自动取最大的那个（b28 > b18）
+  assert.equal(info.modelName, 'kata1-b28c512nbt-b.bin.gz')
+  assert.equal(info.modelSource, 'engineDir')
+  assert.equal(info.warning, '')
+  assert.ok(info.howTo.some((line) => line.includes('kataGoModel')), 'howTo 应给出换权重的口子')
+
+  // 显式 kataGoModel 覆盖自动发现
+  const overridden = await callJson(
+    (() => {
+      const c = makeCtx(WORKSPACE)
+      apply(c, Config({ engineDir, kataGoPath: '', kataGoModel: join(engineDir, 'kata1-b18c384nbt-a.bin.gz') }))
+      return c.registered.get('go_engine_info')
+    })(),
+    WORKSPACE,
+    {},
+  )
+  assert.equal(overridden.modelName, 'kata1-b18c384nbt-a.bin.gz')
+  assert.equal(overridden.modelSource, 'config')
+
+  rmSync(engineDir, { recursive: true, force: true })
+})
+
+test('go_engine_info: 无引擎时如实说明并给出改法', async () => {
+  const info = await callJson(ctx.registered.get('go_engine_info'), WORKSPACE, {})
+  assert.equal(info.available, false)
+  assert.equal(info.source, 'none')
+  assert.equal(info.modelName, '')
+  assert.ok(info.note.length > 0, '应说明为什么没有引擎')
+  assert.ok(info.howTo.length >= 3)
 })
 
 test('go_parse_sgf: 工作区相对路径解析 + 元信息', async () => {

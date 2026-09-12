@@ -16,7 +16,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 const fixture = (n) => join(here, 'fixtures', n)
 const WORK = join(here, 'tmp-report')
 
-const CFG = Config({ kataGoPath: '' })
+const CFG = Config({ kataGoPath: '', engineDir: join(here, 'no-such-engine') })
 
 function makeCtx(workspace) {
   const registered = new Map()

@@ -5,6 +5,11 @@ test/tmp-workspace/
 # 运行/调试产物
 *.log
 *.demo.sgf
+# 自带引擎运行时写在引擎目录里的日志与缓存（analysis_example.cfg 的 logDir）
+# 只保留目录占位文件：目录本身要在包里存在，引擎才写得进日志。
+**/analysis_logs/*
+!**/analysis_logs/.gitkeep
+KataGoData/
 
 # 编辑器与系统
 .DS_Store

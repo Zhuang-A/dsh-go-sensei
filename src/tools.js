@@ -8,6 +8,7 @@
 import { decodeBuffer, parseGame, injectComments, coordLabel } from './sgf.js'
 import { reviewGame, inferLevel, RANKS } from './review.js'
 import { ReviewCache } from './cache.js'
+import { resolveEngine, describeEngine } from './engine-resolve.js'
 
 /** 工具返回值的裁剪上限，防止异常棋谱撑爆上下文。 */
 const MAX_MOVE_LIST = 400
@@ -151,7 +152,7 @@ function goParseSgf(ctx, cfg, cache, policy) {
   return {
     name: 'go_parse_sgf',
     description:
-      '解析 SGF 围棋棋谱：返回棋局元信息（黑白棋手/段位/贴目/让子/结果/规则）与主变化线每手序列（坐标、颜色、虚着）。支持野狐/弈城导出的 GBK 编码与 Lizzieyzy/KataGo 分析棋谱。',
+      '解析 SGF 围棋棋谱：返回棋局元信息（黑白棋手/段位/贴目/让子/结果/规则）与主变化线每手序列（坐标、颜色、虚着）。支持野狐/弈城导出的 GBK 编码，以及 KataGo 分析属性（WV/DM/PV）与注释内胜率行等带分析的棋谱。',
     parameters: {
       type: 'object',
       properties: {
@@ -262,9 +263,12 @@ function goReviewMoves(ctx, cfg, cache, policy) {
           if (value.autoEngine.failed !== undefined) {
             lines.push(`⚠ 自动补算失败，已降级为纯棋理讲解：${value.autoEngine.failed}`)
           } else {
+            const model = typeof value.autoEngine.model === 'string' && value.autoEngine.model !== ''
+              ? `，权重 ${value.autoEngine.model}`
+              : ''
             lines.push(
               `🤖 棋谱原无分析数据，已自起 KataGo 补算第 ${value.autoEngine.from}~${value.autoEngine.to} 手`
-              + `（${value.autoEngine.moves} 手 / ${value.autoEngine.seconds}s）`,
+              + `（${value.autoEngine.moves} 手 / ${value.autoEngine.seconds}s${model}）`,
             )
           }
         }
@@ -443,7 +447,7 @@ function goWriteReview(ctx, cfg, cache, policy) {
   return {
     name: 'go_write_review',
     description:
-      '把讲解写回 SGF 棋谱的 C[] 注释（Lizzieyzy 原生显示）。entries 为 [{ moveNumber, comment }]，每局最多 200 条、单条 ≤2000 字；已有注释默认换行追加（replace=true 覆盖）。写入后请用 go_parse_sgf 复核。',
+      '把讲解写回 SGF 棋谱的 C[] 注释（任何能显示注释的打谱软件/App 都能看到）。entries 为 [{ moveNumber, comment }]，每局最多 200 条、单条 ≤2000 字；已有注释默认换行追加（replace=true 覆盖）。写入后请用 go_parse_sgf 复核。',
     parameters: {
       type: 'object',
       properties: {
@@ -480,7 +484,7 @@ function goWriteReview(ctx, cfg, cache, policy) {
         textBlock([
           `已写回 ${value.path}：成功 ${value.written.length} 条（第 ${value.written.join('、') || '无'} 手），`,
           `不存在的手 ${value.missing.length} 条${value.skipped.length > 0 ? `，跳过 ${value.skipped.length} 条` : ''}。`,
-          '提示：Lizzieyzy 打开该棋谱即可看到注释；重复写回同一手会自动追加而非覆盖。',
+          '提示：用任意能显示 SGF 注释的打谱软件打开该棋谱即可看到注释；重复写回同一手会自动追加而非覆盖。',
         ]),
     },
     async execute(args, exec) {
@@ -668,7 +672,7 @@ function goEngineAnalyze(ctx, cfg, cache, policy) {
   return {
     name: 'go_engine_analyze',
     description:
-      '用本地 KataGo 引擎对指定手数区间补算分析（供无分析数据的棋谱）。需要插件配置 kataGoPath（引擎可执行文件）与 kataGoConfig（配置文件，可选 kataGoModel）。输出与 go_review_moves 同构的候选列表。',
+      '用本地 KataGo 引擎对指定手数区间补算分析（供无分析数据的棋谱）。默认使用插件自带的 engine 目录（开箱即用，无需配置）；也可用配置 engineDir / kataGoPath 指向自己的引擎，kataGoModel 指定权重。输出与 go_review_moves 同构的候选列表。',
     parameters: {
       type: 'object',
       properties: {
@@ -676,9 +680,10 @@ function goEngineAnalyze(ctx, cfg, cache, policy) {
         from: { type: 'number', description: '补算起始手（默认 1）' },
         to: { type: 'number', description: '补算结束手（默认最后一手）' },
         maxVisits: { type: 'number', description: '每手搜索量（默认取配置 maxVisits，越大越准越慢）' },
-        kataGoPath: { type: 'string', description: '覆盖配置中的 KataGo 可执行文件路径' },
-        kataGoConfig: { type: 'string', description: '覆盖配置中的 KataGo 配置文件路径' },
-        kataGoModel: { type: 'string', description: '覆盖模型权重文件路径（-model 参数）' },
+        engineDir: { type: 'string', description: '临时覆盖引擎目录（内含 katago 可执行文件、analysis 配置、可选权重）' },
+        kataGoPath: { type: 'string', description: '临时覆盖 KataGo 可执行文件路径' },
+        kataGoConfig: { type: 'string', description: '临时覆盖 analysis 配置文件路径' },
+        kataGoModel: { type: 'string', description: '临时覆盖模型权重文件路径（-model 参数）' },
         level: { type: 'string', description: `讲解难度覆盖：${RANKS.join('/')}/auto` },
       },
       required: ['path'],
@@ -705,9 +710,18 @@ function goEngineAnalyze(ctx, cfg, cache, policy) {
     isConcurrencySafe: () => false,
     timeoutMs: 300000,
     async execute(args, exec) {
-      const kataGoPath = args.kataGoPath ?? cfg.kataGoPath
-      if (!kataGoPath) {
-        throw new Error('未配置 KataGo 引擎：请设置插件配置 kataGoPath（katago.exe 路径），或先让 Lizzieyzy 保存带分析的棋谱')
+      // 单次调用覆盖 = 「临时换引擎/换权重」的口子：覆盖项合并进 cfg 后走同一套解析，
+      // 因此只需维护 resolveEngine 一处优先级规则。
+      const effective = {
+        ...cfg,
+        ...(typeof args.engineDir === 'string' ? { engineDir: args.engineDir } : {}),
+        ...(typeof args.kataGoPath === 'string' ? { kataGoPath: args.kataGoPath } : {}),
+        ...(typeof args.kataGoConfig === 'string' ? { kataGoConfig: args.kataGoConfig } : {}),
+        ...(typeof args.kataGoModel === 'string' ? { kataGoModel: args.kataGoModel } : {}),
+      }
+      const engine = resolveEngine(effective)
+      if (!engine.available) {
+        throw new Error(engine.hint !== '' ? engine.hint : '没有可用的 KataGo 引擎')
       }
       const { runKataAnalyze } = await import('./engine.js')
       const game = await readGameFile(ctx, exec, args.path, policy(exec))
@@ -724,9 +738,9 @@ function goEngineAnalyze(ctx, cfg, cache, policy) {
       }
       const spawn = (spec) => subprocess.spawn(spec)
       const result = await runKataAnalyze(spawn, {
-        kataGoPath,
-        configPath: args.kataGoConfig ?? cfg.kataGoConfig ?? '',
-        modelPath: args.kataGoModel ?? cfg.kataGoModel ?? '',
+        kataGoPath: engine.kataGoPath,
+        configPath: engine.configPath,
+        modelPath: engine.modelPath,
         game,
         from,
         to,
@@ -737,9 +751,84 @@ function goEngineAnalyze(ctx, cfg, cache, policy) {
         path: displayPathOf(game),
         range: { from, to },
         candidates: result.candidates,
-        note: `引擎 ${result.engine ?? ''} 补算 ${result.moves} 手（${result.seconds}s），建议对关键手用 go_review_moves 复核。`,
+        note:
+          `${describeEngine(engine)} 补算 ${result.moves} 手（${result.seconds}s），建议对关键手用 go_review_moves 复核。`
+          + (engine.warning !== '' ? ` ⚠ ${engine.warning}` : ''),
       }
       return value
+    },
+  }
+}
+
+/**
+ * 引擎自述工具：让用户（与模型）随时看清"现在用的是哪个引擎、哪个权重"，
+ * 以及换引擎/换权重的几种改法。始终注册——引擎不可用时它正是解释原因的地方。
+ */
+function goEngineInfo(ctx, cfg) {
+  return {
+    name: 'go_engine_info',
+    description:
+      '查看当前复盘实际使用的 KataGo 引擎与权重（是否可用、来源、路径、权重文件名与大小），以及换引擎/换权重/调搜索量的具体改法。用户问「现在用的是哪个模型」「怎么换模型」「为什么没补算」时调用。',
+    parameters: { type: 'object', properties: {} },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          available: { type: 'boolean' },
+          source: { type: 'string' },
+          engineDir: { type: 'string' },
+          kataGoPath: { type: 'string' },
+          configPath: { type: 'string' },
+          modelPath: { type: 'string' },
+          modelName: { type: 'string' },
+          modelSizeMB: { type: 'number' },
+          modelSource: { type: 'string' },
+          platform: { type: 'string' },
+          warning: { type: 'string' },
+          note: { type: 'string' },
+          howTo: { type: 'array', items: { type: 'string' } },
+        },
+        required: [
+          'available', 'source', 'engineDir', 'kataGoPath', 'configPath', 'modelPath',
+          'modelName', 'modelSizeMB', 'modelSource', 'platform', 'warning', 'note', 'howTo',
+        ],
+      },
+      render: (args, value) => textBlock([
+        value.available ? `✅ ${value.note}` : `⚠ ${value.note}`,
+        value.available ? `引擎：${value.kataGoPath}` : '',
+        value.modelPath !== '' ? `权重：${value.modelPath}` : '',
+        value.warning !== '' ? `⚠ ${value.warning}` : '',
+        '换法：',
+        ...value.howTo.map((line) => `- ${line}`),
+      ].filter((line) => line !== '')),
+    },
+    isConcurrencySafe: () => true,
+    timeoutMs: 10000,
+    async execute() {
+      const engine = resolveEngine(cfg)
+      return {
+        available: engine.available,
+        source: engine.source,
+        engineDir: engine.engineDir,
+        kataGoPath: engine.kataGoPath,
+        configPath: engine.configPath,
+        modelPath: engine.modelPath,
+        modelName: engine.modelName,
+        modelSizeMB: engine.modelSizeMB,
+        modelSource: engine.modelSource,
+        platform: engine.platform,
+        warning: engine.warning,
+        note: engine.available ? `当前可用：${describeEngine(engine)}` : engine.hint,
+        howTo: [
+          '把任意 *.bin.gz 权重丢进引擎目录，插件自动挑其中最大的一个（b28 比 b18 大，也更强）',
+          '想指定具体权重：配置 kataGoModel 填 .bin.gz 的完整路径',
+          '想换引擎或换后端（CUDA / CPU 版等）：配置 engineDir 指向你自己的引擎目录（内含 katago 可执行文件、analysis_example.cfg、权重）',
+          '只想临时换一次：go_engine_analyze 支持 engineDir / kataGoPath / kataGoConfig / kataGoModel 参数覆盖',
+          '想调搜索量：配置 maxVisits（默认 100，越大越准越慢）',
+          '改完配置需要重启 dsh web 才会重新注册补算工具',
+        ],
+      }
     },
   }
 }
@@ -753,8 +842,11 @@ function goEngineAnalyze(ctx, cfg, cache, policy) {
 export function registerGoTools(ctx, cfg, cache = new ReviewCache()) {
   // 每次执行解析一次沙箱策略：既用于路径解析基准，也随写入携带给沙箱后端。
   const policy = compileSandboxPolicy(ctx)
-  const tools = [goParseSgf, goReviewMoves, goPositionContext, goWriteReview, goExportReport]
-  if (cfg.kataGoPath) tools.push(goEngineAnalyze)
+  const engine = resolveEngine(cfg)
+  // go_engine_info 始终注册：引擎不可用时它正是解释"为什么没有补算/怎么配"的地方。
+  const tools = [goParseSgf, goReviewMoves, goPositionContext, goWriteReview, goExportReport, goEngineInfo]
+  // 引擎可用（配置指定，或随包自带的 engine/ 目录）才注册补算工具，与提示语一致。
+  if (engine.available) tools.push(goEngineAnalyze)
   for (const factory of tools) {
     const def = factory(ctx, cfg, cache, policy)
     // 顶层统一收紧 lossless JSON：所有返回值（含 go_parse_sgf 的 info 等
@@ -769,7 +861,7 @@ export function registerGoTools(ctx, cfg, cache = new ReviewCache()) {
 export { buildReportSkeleton }
 
 /**
- * 无分析数据且已配置引擎时，自动自起 KataGo 补算并把结果合成进 `game`。
+ * 无分析数据且引擎可用时，自动自起 KataGo 补算并把结果合成进 `game`。
  *
  * **为什么要抽成独立函数**：面板数据路由（`index.mjs` 的 `registerPanelRoute`）
  * 与 `go_review_moves` 都必须走这一步。早期把它内联在 `go_review_moves.execute`
@@ -778,7 +870,8 @@ export { buildReportSkeleton }
  * 一份，是这次修复的核心。
  *
  * 语义：
- *  - 仅在 `cfg.kataGoPath` 有值、棋谱**完全无分析数据**、且 19 路时触发；
+ *  - 仅在**引擎可用**（配置指定，或随包自带的 `engine/` 目录解析成功）、
+ *    棋谱**完全无分析数据**、且 19 路时触发；
  *  - 成功时**原地**替换 `game.moves`（换成含补算分析的副本）；
  *  - 失败**不抛错、不阻断**，返回 `{ autoEngine: { failed } }` 让调用方如实上报。
  *
@@ -787,11 +880,12 @@ export { buildReportSkeleton }
  * @param {object} game `parseGame` 返回值；成功时其 `moves` 被原地替换
  * @param {{ from?: number, to?: number, signal?: AbortSignal }} [opts]
  * @returns {Promise<{ autoEngine: object | undefined }>}
- *   `autoEngine` = `{from,to,moves,seconds}`（成功）或 `{failed}`（失败）；未触发时为 undefined
+ *   `autoEngine` = `{from,to,moves,seconds,engine,model}`（成功）或 `{failed}`（失败）；未触发时为 undefined
  */
 export async function autoComputeIfNeeded(ctx, cfg, game, opts = {}) {
+  const engine = resolveEngine(cfg)
   const noAnalysisData = !game.moves.some((m) => m.analysis !== null)
-  if (!cfg.kataGoPath || !noAnalysisData || game.info.size !== 19) {
+  if (!engine.available || !noAnalysisData || game.info.size !== 19) {
     return { autoEngine: undefined }
   }
   const totalMoves = game.moves.length
@@ -804,9 +898,9 @@ export async function autoComputeIfNeeded(ctx, cfg, game, opts = {}) {
       return { autoEngine: { failed: 'subprocess 服务不可用，无法自起 KataGo 补算' } }
     }
     const result = await runKataAnalyze((spec) => subprocess.spawn(spec), {
-      kataGoPath: cfg.kataGoPath,
-      configPath: cfg.kataGoConfig ?? '',
-      modelPath: cfg.kataGoModel ?? '',
+      kataGoPath: engine.kataGoPath,
+      configPath: engine.configPath,
+      modelPath: engine.modelPath,
       game,
       from,
       to,
@@ -815,7 +909,17 @@ export async function autoComputeIfNeeded(ctx, cfg, game, opts = {}) {
     })
     if (result.merge === undefined) return { autoEngine: undefined }
     game.moves = result.merge.moves
-    return { autoEngine: { from, to, moves: result.moves, seconds: result.seconds } }
+    return {
+      autoEngine: {
+        from,
+        to,
+        moves: result.moves,
+        seconds: result.seconds,
+        engine: result.engine ?? 'KataGo',
+        model: engine.modelName,
+        source: engine.source,
+      },
+    }
   } catch (error) {
     // 补算失败不能阻断复盘：降级为 theory 模式，并把原因如实带出
     return { autoEngine: { failed: String(error?.message ?? error) } }

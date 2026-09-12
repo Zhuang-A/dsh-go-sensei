@@ -2,9 +2,10 @@
 
 给 DSH（DeepSeek Harness）装一位围棋老师。把手上一盘棋的 SGF 棋谱交给它，它会像陪练老师那样逐手讲给你听：这手棋原本想干什么、问题出在哪、改下哪里会更好。讲完可以把讲解写回棋谱文件，也可以导出一份 Markdown 复盘报告。
 
-- **有棋谱就能用**：棋谱里没有 AI 分析数据、你也没装任何围棋软件，照样能讲——这一档只讲棋理，不报胜率。
-- **想听 AI 的判断**（胜率、目差、AI 推荐点、变化图）：在本机装一次 [KataGo](https://github.com/lightvector/KataGo)（免费开源），插件会自动调用它补算，不需要你手动敲命令。
-- **不需要 Java，也不需要别的围棋软件。** KataGo 是唯一可能被插件启动的外部程序，而且只在你把它的路径填进配置之后。
+- **装完即用（Windows）**：插件**自带**一套 KataGo v1.16.4 + 18b 权重；棋谱里没有 AI 分析数据时自动补算，不需要你下载引擎，也不需要填任何路径。
+- **没有引擎也能讲**：引擎不可用（比如 macOS / Linux 没用到自带引擎）时照样能用——这一档只讲棋理，不报胜率。
+- **口子都留着**：想换更强的权重、换 CUDA / CPU 版引擎、调搜索量，[有五个改法](#katago-引擎自带一套不够用再换)；想确认现在用的是哪个模型，问一句「现在用的是哪个模型？」即可。
+- **不需要 Java，也不需要别的围棋软件。** KataGo 是唯一可能被插件启动的外部程序。
 
 ---
 
@@ -14,7 +15,7 @@
 - [5 分钟上手](#5-分钟上手)
 - [接入 DSH：安装、验证、卸载](#接入-dsh安装验证卸载)
 - [配置项](#配置项)
-- [装一次 KataGo，让讲解带上 AI 数字](#装一次-katago让讲解带上-ai-数字)
+- [KataGo 引擎：自带一套，不够用再换](#katago-引擎自带一套不够用再换)
 - [棋谱要求（SGF 格式）](#棋谱要求sgf-格式)
 - [棋谱从哪来（常见来源）](#棋谱从哪来常见来源)
 - [对话里怎么问](#对话里怎么问)
@@ -52,7 +53,7 @@ dsh plugin --profile web add ./dsh-go-sensei
 
 > 复盘这盘棋 [庄生梦1n4k]vs[鍾易成1]1788532348030034222.sgf
 
-Sensei 会自己读谱、找问题手、逐手讲解。想听 AI 的胜率与候选点，再花十分钟[装一次 KataGo](#装一次-katago让讲解带上-ai-数字)；不装也能得到一个只讲棋理的版本。
+Sensei 会自己读谱、找问题手、逐手讲解。棋谱里没有 AI 分析数据也不打紧：**插件自带 KataGo 引擎与 18b 权重（Windows）**，会自动补算，你不需要装任何东西。想换成更强的权重或换后端，见 [KataGo 引擎](#katago-引擎自带一套不够用再换) 一节。
 
 ## 接入 DSH：安装、验证、卸载
 
@@ -63,6 +64,7 @@ Sensei 会自己读谱、找问题手、逐手讲解。想听 AI 的胜率与候
 | DSH | 能正常启动 `dsh web` |
 | Node.js | **≥ 22.19**（见 `package.json` 的 `engines`；本机实测 v24.19.0） |
 | 运行环境 | Windows / macOS / Linux 均可；依赖只有 3 个纯 JS 包，`npm install` 即可，**无编译步骤** |
+| 自带引擎 | `engine/` 里随包分发的是 **Windows x64 OpenCL** 版 KataGo + 18b 权重；macOS / Linux 需自己下载对应平台的引擎（[见下文](#自己装一套非-windows或想换后端)） |
 
 ### 安装
 
@@ -75,7 +77,9 @@ dsh plugin --profile web add D:\path\to\dsh-go-sensei      # 也可以用绝对�
 dsh plugin --profile web add github:Zhuang-A/dsh-go-sensei
 ```
 
-`dsh plugin` 会把这个包装进 `web` 这个 profile，并自动把声明了 `dsh.bundle` 的依赖加入 profile 的图层列表——不需要你手工改 `bundles`。**装完重启 `dsh web` 才生效。**
+`dsh plugin` 会把这个包装进 `web` 这个 profile，并自动把声明了 `dsh.bundle` 的依赖加入 profile 图层列表——不需要你手工改 `bundles`。**装完重启 `dsh web` 才生效。**
+
+> 仓库里带着引擎与权重，**约 110 MB**，clone / 首次安装会慢一些；本地目录安装用的是 `link:`，不复制文件，改完源码重启 `dsh web` 即生效。不需要自带引擎的话，删掉 `engine/` 目录即可。
 
 ### 验证装好了
 
@@ -111,6 +115,7 @@ dsh plugin --profile web remove dsh-go-sensei        # 卸载
 
 ```yaml
 # ── DeepGo Sensei ─────────────────────────────────────────
+# 全部可选：一段都不写也能用（自带引擎会自动被发现）。
 # 路径用正斜杠，既被 Windows 接受，也避免 YAML 反斜杠转义踩坑。
 - id: go-sensei
   config:
@@ -120,9 +125,10 @@ dsh plugin --profile web remove dsh-go-sensei        # 卸载
     maxCandidates: 10           # 每次复盘最多返回多少个问题手
     pvDepth: 6                  # 每条变化图保留多少手
     tokenBudget: 50000          # 单局讲解的 token 预算（软约束）
-    kataGoPath: D:/katago/katago.exe                                # 留空＝不启用补算
-    kataGoConfig: D:/katago/analysis_example.cfg                    # 可选
-    kataGoModel: D:/katago/kata1-b18c384nbt-s9996604416-....bin.gz  # 可选
+    engineDir: ''               # 引擎目录；留空＝用插件自带的 engine/
+    kataGoPath: ''              # 可选：可执行文件（默认取 engineDir 里的 katago）
+    kataGoConfig: ''            # 可选：analysis 配置（默认取 engineDir 里的 analysis_example.cfg）
+    kataGoModel: ''             # 可选：权重文件；留空＝自动挑 engineDir 里最大的 *.bin.gz
     maxVisits: 100              # 补算每手搜索量：越大越准越慢
 ```
 
@@ -136,32 +142,63 @@ dsh plugin --profile web remove dsh-go-sensei        # 卸载
 | `maxCandidates` | `10` | 单次复盘返回的问题手上限（按严重度排序取前 N） |
 | `pvDepth` | `6` | 每条候选变化图截断到几手 |
 | `tokenBudget` | `50000` | 单局讲解预算，写进人设段作为软约束 |
-| `kataGoPath` | `''` | KataGo 可执行文件。**留空＝不注册 `go_engine_analyze`、也不会自动补算** |
-| `kataGoConfig` | `''` | analysis 配置文件（可选） |
-| `kataGoModel` | `''` | 模型权重（可选；填了就用 `-model` 传给引擎） |
+| `engineDir` | `''` | 引擎目录（放可执行文件 + analysis 配置 + 权重）。**留空＝用插件自带的 `engine/`** |
+| `kataGoPath` | `''` | 可执行文件路径；留空＝取 `engineDir` 里的 `katago` / `katago.exe` |
+| `kataGoConfig` | `''` | analysis 配置路径；留空＝取 `engineDir` 里的 `analysis_example.cfg` |
+| `kataGoModel` | `''` | 权重路径；**留空＝自动挑 `engineDir` 里最大的 `*.bin.gz`**（再退回配置里的 `modelFile`） |
 | `maxVisits` | `100` | 补算每手搜索量 |
 
-## 装一次 KataGo，让讲解带上 AI 数字
+引擎不可用（非 Windows 且没配 `engineDir`）时，`go_engine_analyze` 不会注册，复盘自动走纯棋理模式；随时可以让 Sensei 调 `go_engine_info` 看当前状态与改法。
 
-### 先判断你需要不需要它
+## KataGo 引擎：自带一套，不够用再换
 
-| 你的棋谱 | 插件会怎么做 | 要装 KataGo 吗 |
+### 先判断你会走到哪条路
+
+| 你的棋谱 | 插件会怎么做 | 要自己装引擎吗 |
 |---|---|---|
 | 自带 AI 分析数据（`WV[]`/`LZ[]` 属性，或注释里有胜率行） | 直接读棋谱里的分析来讲解 | ❌ 不用 |
-| 没有任何分析数据 | 自动起 KataGo 补算问题手，再讲解 | ✅ 要 |
-| 没有任何分析数据，也没配引擎 | 走「纯棋理」模式：只讲棋理，不虚构胜率与变化图 | ❌ 不用 |
+| 没有任何分析数据（野狐导出的对局大多是这种） | 用**插件自带的引擎**自动补算问题手，再讲解 | ❌ 不用（Windows） |
+| 没有任何分析数据，且引擎不可用 | 走「纯棋理」模式：只讲棋理，不虚构胜率与变化图 | ✅ 需要（非 Windows，见下文） |
 
 怎么判断棋谱有没有分析数据：用记事本打开 `.sgf`，搜 `WV[` 或 `LZ[`，或者搜「胜率」。搜得到就是自带分析。
 
-### 需要备齐三样（缺一不可）
+### 开箱即用：插件自带的 18b 引擎
 
-1. **`katago.exe`** —— 版本 **v1.14 以上**（v1.14 起 analysis 模式默认 JSON 协议；本机实测 v1.16.4）。
+`engine/` 目录随插件分发，**不需要填任何配置**就能补算：
+
+| 文件 | 是什么 |
+|---|---|
+| `katago.exe` | KataGo **v1.16.4**，OpenCL 后端（Windows x64） |
+| `*.dll` | 引擎必需的运行库（缺一个就起不来） |
+| `analysis_example.cfg` | analysis 模式配置（官方版本，未改动） |
+| `kata1-b18c384nbt-….bin.gz` | 18b 权重（约 93 MB），业余复盘足够 |
+| `LICENSE.txt` | KataGo 的 MIT 许可与第三方组件声明 |
+
+想确认现在到底在用哪套引擎、哪个权重，直接问一句「现在用的是哪个模型？」，Sensei 会调 `go_engine_info` 念给你听。
+
+### 换引擎 / 换权重 / 调速度：五个口子
+
+| 你想做什么 | 怎么改 |
+|---|---|
+| **换更强的权重**（如 b28，约 270 MB） | 把 `.bin.gz` 丢进 `<插件目录>/engine/`，插件自动挑其中**最大**的那个 |
+| **指定某个权重文件** | 配置 `kataGoModel: D:/katago/kata1-b28c512nbt-….bin.gz` |
+| **换引擎或换后端**（CUDA / 纯 CPU 版 / 别的版本） | 配置 `engineDir: D:/katago`，该目录里放可执行文件 + analysis 配置 + 权重即可 |
+| **只临时换一次**（不动配置） | 让 Sensei 在 `go_engine_analyze` 里带上 `engineDir` / `kataGoPath` / `kataGoConfig` / `kataGoModel` 参数 |
+| **调搜索量**（越大越准越慢） | 配置 `maxVisits`（默认 100；业余复盘 60~200 都合理） |
+
+生效时机要分清：权重与路径**每次调用都重新解析**，所以往 `engine/` 里丢一个新权重，下一盘复盘就用上了；而 `go_engine_analyze` 这个工具本身注册与否在插件加载时决定，改了 `engineDir` / `kataGoPath` 记得**重启 `dsh web`**。想强制重算某盘棋（不吃缓存），用 `go_engine_analyze` 指定手数区间。
+
+### 自己装一套（非 Windows，或想换后端）
+
+自带的是 Windows x64 OpenCL 版：**macOS / Linux 上插件不会自动启用它**，需要自己下载对应平台的引擎，再把 `engineDir`（或 `kataGoPath`）指过去。人肉装机要备齐三样，缺一不可：
+
+1. **`katago` 可执行文件** —— 版本 **v1.14 以上**（v1.14 起 analysis 模式默认 JSON 协议；自带的是 v1.16.4）。
 2. **模型权重** —— 形如 `kata1-b18c384nbt-….bin.gz` 的文件。
 3. **一份 analysis 配置文件** —— 必须是 analysis 配置，**不能**拿 GTP 配置顶替。
 
-### 步骤 1：下载引擎
+**步骤 1：下载引擎**
 
-打开 [KataGo releases](https://github.com/lightvector/KataGo/releases)，挑一个文件名里带 `windows-x64` 的压缩包，按你的机器选后端：
+打开 [KataGo releases](https://github.com/lightvector/KataGo/releases)，挑一个匹配你系统的压缩包，按机器选后端：
 
 | 你的机器 | 选哪个 | 说明 |
 |---|---|---|
@@ -169,12 +206,13 @@ dsh plugin --profile web remove dsh-go-sensei        # 卸载
 | NVIDIA 显卡，愿意折腾驱动 | cuda 版 | 最快，但要装对应版本的 CUDA 运行库 |
 | 没有独显 / 只有核显 / 不想碰驱动 | **eigen** 或 `eigenavx2` 版 | 纯 CPU，慢一些但一定能跑 |
 | 服务器、专业显卡 | tensorrt 版 | 最快也最挑环境，新手不建议 |
+| macOS | metal 版（v1.16+） | Apple 芯片走 Metal |
 
 解压到一个固定目录，例如 `D:\katago\`。
 
 > ⚠️ **整个目录一起留着，别只拷 `katago.exe`。** 它依赖同目录的一堆 DLL（`libcrypto-3-x64.dll`、`libssl-3-x64.dll`、`libz.dll`、`libzip.dll`、`msvcp140*.dll`、`vcruntime140*.dll`），只拷 exe 会启动即失败。
 
-### 步骤 2：下载模型权重
+**步骤 2：下载模型权重**
 
 到 [katagotraining.org](https://katagotraining.org/) 下载最新的权重文件：
 
@@ -183,20 +221,20 @@ dsh plugin --profile web remove dsh-go-sensei        # 卸载
 
 放进同一个目录，例如 `D:\katago\kata1-b18c384nbt-s9996604416-d4316597426.bin.gz`。
 
-### 步骤 3：准备 analysis 配置文件
+**步骤 3：准备 analysis 配置文件**
 
 用引擎目录里自带的 **`analysis_example.cfg`**（官方压缩包里就有），**不需要改任何一行**：
 
 - 搜索量由插件在查询里指定（`maxVisits`，见配置项），配置文件里的 `maxVisits` 不生效。
 - 插件会额外加 `-override-config numAnalysisThreads=1`，避免多线程和单次查询抢资源。
-- 配置里的 `reportAnalysisWinratesAs` 决定胜率视角（本机随包配置实测是 `BLACK`），插件会读这一个键做口径换算——所以别删它。
+- 配置里的 `reportAnalysisWinratesAs` 决定胜率视角（随包配置实测是 `BLACK`），插件会读这一个键做口径换算——所以别删它。
 
 如果你的压缩包里没有这个文件，从官方仓库取：
 <https://raw.githubusercontent.com/lightvector/KataGo/master/cpp/configs/analysis_example.cfg>
 
 > ⚠️ **别拿 GTP 配置顶替**（形如 `default_gtp.cfg`、`myconfig.cfg` 的那类）。GTP 配置缺 analysis 模式必需的键，引擎会直接报 `Could not find key`。
 
-### 步骤 4：先自己验证一次引擎
+**步骤 4：先自己验证一次引擎**
 
 ```powershell
 D:\katago\katago.exe version
@@ -213,25 +251,33 @@ Using OpenCL backend
 
 能打印版本号与 `Using <后端> backend` 就算过了。这一步报错就先别往插件里填，先把引擎跑通。
 
-### 步骤 5：把三个路径填进插件配置
+**步骤 5：把它填进插件配置**
 
 回到 [配置项](#配置项)，在 `%USERPROFILE%\.dsh\profiles\web\cordis.patch.yml` 里写：
 
 ```yaml
 - id: go-sensei
   config:
-    kataGoPath: D:/katago/katago.exe
-    kataGoConfig: D:/katago/analysis_example.cfg
-    kataGoModel: D:/katago/kata1-b18c384nbt-s9996604416-d4316597426.bin.gz
+    engineDir: D:/katago          # 该目录里有引擎、analysis 配置和权重
     maxVisits: 100
 ```
 
+（也可以更细：`kataGoPath` 指可执行文件、`kataGoConfig` 指配置文件、`kataGoModel` 指权重，三者各自覆盖 `engineDir` 里的自动发现。）
+
 重启 `dsh web`。之后凡是**没有分析数据、19 路**的棋谱，`go_review_moves` 与 Web 面板都会**自动补算**，不需要你手动调工具；补算失败不会打断复盘，会降级成纯棋理模式并把失败原因如实带回。
+
+### 自带引擎的边界
+
+- **平台**：自带的 `katago.exe` 是 Windows x64 OpenCL 版，其他平台不会自动启用，请走上面的"自己装一套"。
+- **许可**：引擎与权重按 KataGo 官方 MIT 许可随插件分发（第三方组件声明见 `engine/LICENSE.txt`），上游条款以官方发布为准。
+- **体积**：仓库因此约 110 MB，clone 会慢一些；不需要自带引擎的话，删掉 `engine/` 即可（插件会退回"自己装 / 纯棋理"两条路）。
+- **显卡**：OpenCL 后端要求显卡驱动带 OpenCL 运行时；驱动太旧或纯远程桌面环境可能起不来，换成 CPU（eigen）版最稳。
 
 ### 常见装机坑
 
 | 现象 | 原因与解法 |
 |---|---|
+| 自带引擎也报「没有可用的 KataGo」 | `engine/` 目录被删或移走了；恢复它，或配置 `engineDir` 指向你自己的引擎 |
 | 引擎起不来 / 一闪而过 | 只拷了 exe 没拷 DLL；或后端和自己的显卡不匹配（用 `katago.exe version` 验证） |
 | `Could not find key` | 配置文件用错了——需要 analysis 配置，不是 GTP 配置 |
 | `Must be a integer or half-integer from -150.0 to 150.0`（`field` 却写着 `rules`） | 这是**贴目**超范围/非半整数，不是规则字符串的问题（KataGo v1.16.4 实测会把字段误标为 `rules`）。插件已把棋谱 `KM[]` 就近吸附到 0.5 的倍数并夹到 `[-150, 150]`；仍报则检查棋谱贴目 |
@@ -280,11 +326,11 @@ Using OpenCL backend
 2. **分析属性**：`LZ[]` / `LZOP[]`（部分打谱软件保存分析数据时写入的私有属性）。
 3. **注释里的胜率行**：把分析写进 `C[]` 的软件，形如 `Move 42 黑胜率: 94.3% (±0.1%) (KataGo-18b / 1.0k 计算量)`。插件按通行口径解析这类文本。
 
-### 无分析数据 + 已配 KataGo → 自动补算
+### 无分析数据 + 引擎可用 → 自动补算
 
 触发条件（三条同时满足）：
 
-- 配置里 `kataGoPath` 非空；
+- **引擎可用**：插件自带的 `engine/` 能解析到（Windows），或用 `engineDir` / `kataGoPath` 指向了自己的引擎；
 - 棋谱**完全没有**分析数据（有一手带分析就不触发）；
 - 棋盘是 **19 路**。
 
@@ -341,13 +387,16 @@ Web 页面**输入框下方**有一行折叠面板「**DeepGo Sensei**」：
 | `go_position_context` | 某一手前后各 N 手的局面 + 该手的 AI 候选与变化图 | 无 |
 | `go_write_review` | 把讲解写回棋谱注释（默认追加、可覆盖） | 无 |
 | `go_export_report` | 导出 Markdown 报告（骨架或你给的全文） | 无 |
-| `go_engine_analyze` | 对指定手数区间补算 | **需 KataGo**；`kataGoPath` 留空时此工具不出现 |
+| `go_engine_analyze` | 对指定手数区间补算（可临时覆盖引擎目录 / 权重 / 搜索量） | 引擎可用（自带或配置）；不可用时此工具不出现 |
+| `go_engine_info` | 报告当前实际使用的引擎与权重、路径与来源，以及换引擎/换权重的改法 | 无（始终可用） |
 
 ## 常见问题
 
 - **面板没出现**：确认 `dsh --profile web --dump-config` 里有 `go-sensei` 这一层，并**重启过 `dsh web`**；卸载插件后要刷新页面才会消失。
 - **野狐棋谱棋手名乱码**：文件是 GBK 或双重乱码，插件会自动解码并尽量回修；个别字符已损坏时保留原文并给出 warning，不影响棋局分析。
-- **棋谱没有分析数据**：插件走纯棋理模式；想让 Sensei 出胜率与候选点，按上文配一次 KataGo（有引擎时会自动补算）。
+- **棋谱没有分析数据**：插件会直接用**自带引擎**自动补算（Windows）；引擎不可用时才退回纯棋理模式。
+- **「现在用的是哪个模型？怎么换？」**：让 Sensei 调一次 `go_engine_info`——它会报当前引擎、权重文件名与大小、路径来源，并列出五种改法（[引擎章节](#katago-引擎自带一套不够用再换)）。
+- **macOS / Linux 上自带引擎用不了**：自带的 `katago.exe` 是 Windows 版。自己下一份对应平台的 KataGo（+ 权重 + `analysis_example.cfg`），配置 `engineDir` 指向它即可。
 - **面板说找不到文件**：相对路径以**会话工作区**为基准；不确定就直接给绝对路径。
 - **复盘很慢**：补算时间是「棋谱手数 × `maxVisits`」的函数，且每次都要加载模型；把 `maxVisits` 调小、或只补算关心的手数区间（`go_engine_analyze` 支持 `from`/`to`）。
 - **写回之后文件排版变了**：写回会重新序列化整个棋谱——手数、旁支、属性与原有注释都保留（实测 106 手分析谱写回后手数、变化图数量不变），但**原文件的排版与逐字节格式不再保留**，输出统一 UTF-8。介意排版的话，写回前先备份棋谱。
@@ -355,6 +404,9 @@ Web 页面**输入框下方**有一行折叠面板「**DeepGo Sensei**」：
 
 ## 已知限制
 
+- **自带引擎只在 Windows x64 上自动启用**（OpenCL 后端）；其他平台请自备引擎并配置 `engineDir`。
+- **权重与路径每次调用实时解析**（丢个新 `*.bin.gz` 进 `engine/` 下次补算即用），但 `go_engine_analyze` 工具是否注册在插件加载期决定——改了 `engineDir` / `kataGoPath` 要重启 `dsh web` 才会出现。
+- **仓库体积约 110 MB**（引擎 + 18b 权重）：clone 会慢一些，GitHub 也会对单文件 >50 MB 给出提示；不需要可删掉 `engine/`。
 - **补算只支持 19 路**；让子棋支持 2~9 子，更多子数会明确报错。
 - **补算规则按棋谱的 `RU[]` 判断**：含 `japan` 用日本规则，其余一律中国规则；贴目取自 `KM[]`，会吸附到 0.5 的整数倍并夹在 `[-150, 150]`。
 - **胜率视角取决于引擎配置**：插件读 `kataGoConfig` 里的 `reportAnalysisWinratesAs` 做换算（读不到时按 KataGo 默认＝行棋方视角）。改了引擎配置，同一盘棋的胜率数字会变，属预期。
@@ -375,6 +427,10 @@ node scripts/demo.mjs <sgf路径> [起始手] [结束手]
 
 `test/engine.test.mjs` 里的真机 KataGo 集成测试，只在环境变量 `KATAGO_PATH` 指向可用引擎时运行（受限沙箱下启动子进程会被拒，测试会自动跳过），无引擎环境同样跳过。
 
+> ⚠️ `npm test`（`node --test`）会为每个测试文件起子进程。若你的环境禁止创建管道（受限沙箱会全线报 `Error: spawn EPERM`），改用 `node --test --test-isolation=none` 在单进程里跑，结果等价。
+
+目录结构：`index.mjs`（宿主 half）· `client.js`（浏览器 half）· `src/`（解析/复盘/工具/引擎/缓存）· `engine/`（随包分发的 KataGo）· `test/`（含真实野狐棋谱夹具）。
+
 源码仓库：<https://github.com/Zhuang-A/dsh-go-sensei>（`main` 分支，语义化版本 tag）。发一版时同步改 `package.json` 的 `version` 并打同名 tag，`git push --follow-tags`。
 
 ### 改工具 schema 前必读
@@ -390,8 +446,11 @@ node scripts/demo.mjs <sgf路径> [起始手] [结束手]
 ### 仓库约定
 
 - 换行策略见 `.gitattributes`：源码统一 LF（不依赖各机器的 `core.autocrlf`）；`test/fixtures/*.sgf` 标 `-text`，按**字节原样**提交——真实野狐导出的夹具本身是 CRLF，一旦被 EOL 规范化改写，逐字节依赖夹具的解析测试就会失真。
+- `engine/` 里的可执行文件与动态库同样按二进制原样提交（`*.exe` / `*.dll` / `*.gz` 均标 `binary`）：任何 EOL 或编码转换都会让 `katago.exe` 起不来。引擎运行产生的 `analysis_logs/` 与 `KataGoData/` 不入库。
 - 不入库：`node_modules/`、`test/tmp-workspace/`、`*.tgz`、`*.demo.sgf`、`*.log`。
 
 ## 许可
 
 MIT。
+
+`engine/` 目录随包分发 KataGo 官方发布的引擎与权重（KataGo 本体 MIT；第三方组件声明见 `engine/LICENSE.txt`），仅为省去用户手动安装；上游条款以官方发布为准。

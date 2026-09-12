@@ -31,7 +31,9 @@ export const Config = Schema.object({
   pvDepth: Schema.number().default(6),
   /** 单局讲解 token 预算（提示词与裁剪策略的软约束）。 */
   tokenBudget: Schema.number().default(50000),
-  /** KataGo 引擎可执行文件路径（为空则不注册补算工具）。 */
+  /** 引擎目录（含 katago 可执行文件、analysis 配置、*.bin.gz 权重）；留空＝用插件自带的 engine/ 目录。 */
+  engineDir: Schema.string().default(''),
+  /** KataGo 引擎可执行文件路径（为空则用 engineDir 里找到的，或插件自带的）。 */
   kataGoPath: Schema.string().default(''),
   /** KataGo 配置文件路径（可选）。 */
   kataGoConfig: Schema.string().default(''),
@@ -48,6 +50,7 @@ const DEFAULT_CONFIG = {
   maxCandidates: 10,
   pvDepth: 6,
   tokenBudget: 50000,
+  engineDir: '',
   kataGoPath: '',
   kataGoConfig: '',
   kataGoModel: '',
@@ -68,7 +71,7 @@ function buildPersona(cfg) {
 5. 工具纪律：先 go_parse_sgf 了解棋谱，再 go_review_moves 找问题手，逐手讲解后调用 go_write_review 写回 SGF 注释，需要落盘报告时用 go_export_report；同一局重复复盘优先复用工具返回的缓存结果（cached=true 时不再重复获取全量数据）；单局讲解预算约 ${cfg.tokenBudget} tokens，用"先问后讲"与数据裁剪控制消耗。`
 }
 
-const TOOL_GUIDANCE = `围棋复盘工具（DeepGo Sensei）：go_parse_sgf 读棋谱，go_review_moves 找问题手，go_position_context 取某手前后局面与 AI 候选，go_write_review 把讲解写回 SGF 的 C[] 注释（Lizzieyzy 原生显示），go_export_report 落盘 Markdown 报告。路径参数支持绝对路径或相对当前会话工作区的相对路径。`
+const TOOL_GUIDANCE = `围棋复盘工具（DeepGo Sensei）：go_parse_sgf 读棋谱，go_review_moves 找问题手，go_position_context 取某手前后局面与 AI 候选，go_write_review 把讲解写回 SGF 的 C[] 注释，go_export_report 落盘 Markdown 报告，go_engine_info 查看/说明当前使用的 KataGo 引擎与权重。补算引擎默认用插件自带的 engine 目录（开箱即用），也可用配置 engineDir / kataGoPath / kataGoModel 换成用户自己的引擎与权重。路径参数支持绝对路径或相对当前会话工作区的相对路径。`
 
 /** 面板一次最多返回的问题手数（数据裁剪 + 渲染上限一起生效）。 */
 const MAX_PANEL_CANDIDATES = 20
