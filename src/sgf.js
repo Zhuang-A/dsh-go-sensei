@@ -409,6 +409,22 @@ export function winrateForColor(move, color) {
 }
 
 /**
+ * 棋谱是否带**可用的逐手胜率数据**（复盘能据此算落差的那种）。
+ *
+ * 为什么不能用 `move.analysis !== null` 判断：只要节点上有任何 C[] 注释，
+ * extractAnalysis 就会产出一个 analysis 对象（哪怕注释只是一段人工复盘文字，
+ * 里面提到"胜率 37%"这种数字）。那种棋谱"看起来有分析"，实际每个数字都取不到，
+ * 复盘退化成 theory 模式；而补算又因为"已有分析"被跳过 —— 两头落空，面板上就是
+ * 「纯棋理 · 0 个问题手」。所以判定必须落在**能不能取到胜率**上。
+ *
+ * @param {object} game parseGame 的返回值
+ * @returns {boolean} 至少有一手能取到落子者视角胜率
+ */
+export function hasWinrateData(game) {
+  return (game?.moves ?? []).some((move) => winrateForMover(move) !== undefined)
+}
+
+/**
  * 返回某手在其落子者视角的目数领先（正=领先）。无数据返回 undefined。
  * DM 为黑方视角；C[]"领先"为落子者视角；LZ score 为对手视角（取负即落子者视角）。
  * @param {object} move parseGame 产生的某一手

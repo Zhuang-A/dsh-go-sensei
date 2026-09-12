@@ -364,7 +364,17 @@ window.__ModuleLoader__.load({
         }))
       }
 
-      // 问题手：按严重度取色画圈（紫/红/橙），一眼看出"这一手错得有多重"
+      // 所有问题手：每处点一个小色点（Lizzieyzy 的着法质量色块同款做法），
+      // 这样**不跳到那一手也看得见**问题都出在哪；当前停在问题手上时再套一个大圈。
+      var marks = Array.isArray(opts.marks) ? opts.marks : []
+      marks.forEach(function (m, index) {
+        kids.push(React.createElement('circle', {
+          key: 'mark' + index, cx: pos(m.x), cy: pos(m.y), r: step * 0.16,
+          fill: m.color, fillOpacity: 0.92, pointerEvents: 'none',
+        }))
+      })
+
+      // 当前这一手的问题手：大圈强调（颜色＝严重度）
       if (opts.problem !== null && opts.problem !== undefined) {
         kids.push(React.createElement('circle', {
           key: 'problem', cx: pos(opts.problem.x), cy: pos(opts.problem.y), r: radius * 1.12,
@@ -599,9 +609,13 @@ window.__ModuleLoader__.load({
             setBusy(false)
             if (body && body.ok === true) {
               setData(body.data)
-              // 载入即停在末手：复盘通常从终局往回看
+              // 载入后停在哪一手：有问题手就停在**最严重的那一手**（讲解时最想看的就是
+              // 它，盘上的标记也才立即可见），没有问题手才停在末手。
               var board = body.data && body.data.board ? body.data.board : null
-              setUpto(board && Array.isArray(board.moves) ? board.moves.length : 0)
+              var total = board && Array.isArray(board.moves) ? board.moves.length : 0
+              var list = body.data && Array.isArray(body.data.candidates) ? body.data.candidates : []
+              var worst = list.length > 0 && typeof list[0].moveNumber === 'number' ? list[0].moveNumber : 0
+              setUpto(worst > 0 ? Math.min(worst, total) : total)
             } else {
               setData(null)
               setErr(body && body.error ? String(body.error) : '读取失败')
@@ -754,6 +768,17 @@ window.__ModuleLoader__.load({
       var problemPoint = problem !== null && curMove !== null && curMove.x >= 0
         ? { x: curMove.x, y: curMove.y, key: problem.labelKey, label: problem.label }
         : null
+      // 所有问题手的位置：不跳到那一手也要在盘上看得见（小色点，颜色＝严重度）
+      var problemMarks = []
+      if (board !== null) {
+        for (var mi = 0; mi < list.length; mi++) {
+          var cand = list[mi]
+          var mv = typeof cand.moveNumber === 'number' ? board.moves[cand.moveNumber - 1] : null
+          if (mv !== undefined && mv !== null && mv.x >= 0) {
+            problemMarks.push({ x: mv.x, y: mv.y, color: markColor(cand.labelKey, cand.label) })
+          }
+        }
+      }
 
       // ── 棋盘表头（收起态只留这一行；未载入棋谱时说明状态并给出开启跟随的入口）──
       kids.push(React.createElement('div', { className: 'dgs-boardwrap', key: 'boardhead' },
@@ -820,6 +845,7 @@ window.__ModuleLoader__.load({
               board: board,
               upto: cur,
               problem: problemPoint,
+              marks: problemMarks,
               pv: pvPoints,
               hintLabel: hint && hint.label ? hint.label : '',
               onPick: askPoint,
@@ -850,7 +876,12 @@ window.__ModuleLoader__.load({
                                 .filter(function (t) { return t !== ''; }).join(', ')
                             : '')
                       : null)
-                : '点棋盘交叉点可就该点提问；「▸」把棋盘收起来',
+                : problemMarks.length > 0
+                  // 没停在问题手上时，说明盘上那些小色点是什么（否则用户不知道能看什么）
+                  ? React.createElement('span', null,
+                      React.createElement('span', { className: 'dgs-prob' }, '● 盘上色点＝问题手'),
+                      '（共 ' + problemMarks.length + ' 处，紫＞红＞橙）　点列表任意一行跳到那一手')
+                  : '点棋盘交叉点可就该点提问；「▸」把棋盘收起来',
             ),
           )
           kids.push(React.createElement('div', { className: 'dgs-split', key: 'split' }, boardCol,

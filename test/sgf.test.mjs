@@ -17,6 +17,7 @@ import {
   winrateForMover,
   winrateForColor,
   scoreForMover,
+  hasWinrateData,
   injectComments,
 } from '../src/sgf.js'
 
@@ -86,6 +87,19 @@ test('parseGame: 根节点 AB/AW 摆子（让子局、死活题都要画出来�
 test('parseGame: 无摆子时 setup 形状稳定（两个空数组）', () => {
   const game = parseGame('(;GM[1]SZ[19];B[pd];W[dp])')
   assert.deepEqual(game.setup, { black: [], white: [] })
+})
+
+test('hasWinrateData: 只认「能取到逐手胜率」的棋谱', () => {
+  // 带 LZ 属性 → 有可用胜率
+  assert.equal(hasWinrateData(parseGame(readFixture('synthetic-analysis.sgf').toString('utf8'))), true)
+  // 只有人工注释（注释里提到"胜率 45%"），解析不出可用胜率 → 不算有分析数据。
+  // 这是用户报的「无备注的棋谱不能补算」的根因：旧判据用 analysis !== null，
+  // 这类棋谱被当成"已有分析"跳过补算，复盘又只能退化成纯棋理，两头落空。
+  const commentOnly = parseGame('(;GM[1]SZ[19];B[pd]C[这手胜率 45%，有点贪];W[dp]C[正常])')
+  assert.ok(commentOnly.moves[0].analysis !== null, '注释会产生 analysis 对象（旧判据因此误判）')
+  assert.equal(hasWinrateData(commentOnly), false)
+  // 光秃秃的棋谱
+  assert.equal(hasWinrateData(parseGame('(;GM[1]SZ[19];B[pd];W[dp])')), false)
 })
 
 test('parseGame: 摆子过滤虚着与越界坐标（tt / 小棋盘路数外）', () => {

@@ -5,7 +5,7 @@
 // 相对路径按调用会话工作区解析（exec.agent.session.header.cwd，与官方
 // read/write 工具同一机制）。工具注册是 effect：随插件 fiber 自动反注册。
 
-import { decodeBuffer, parseGame, injectComments, coordLabel } from './sgf.js'
+import { decodeBuffer, parseGame, injectComments, coordLabel, hasWinrateData } from './sgf.js'
 import { reviewGame, inferLevel, RANKS } from './review.js'
 import { ReviewCache } from './cache.js'
 import { resolveEngine, describeEngine } from './engine-resolve.js'
@@ -218,7 +218,8 @@ function goParseSgf(ctx, cfg, cache, policy) {
           players: game.info.players,
         },
         moveCount: game.moves.length,
-        hasAnalysis: game.moves.some((m) => m.analysis !== null),
+        // 「有分析数据」＝能取到逐手胜率；只写注释不算（否则会让人以为不用补算）
+        hasAnalysis: hasWinrateData(game),
         encoding: game._meta.encoding,
         moves: game.moves.slice(0, MAX_MOVE_LIST).map((m) => ({
           number: m.number,
@@ -929,7 +930,9 @@ export { buildReportSkeleton }
  */
 export async function autoComputeIfNeeded(ctx, cfg, game, opts = {}) {
   const engine = resolveEngine(cfg)
-  const noAnalysisData = !game.moves.some((m) => m.analysis !== null)
+  // 判据是「有没有可用的逐手胜率」，不是「有没有 analysis 对象」：只写了一般注释
+  // 的棋谱也会产出 analysis，若按后者判定就会既跳过补算、又算不出问题手。
+  const noAnalysisData = !hasWinrateData(game)
   if (!engine.available || !noAnalysisData || game.info.size !== 19) {
     return { autoEngine: undefined }
   }

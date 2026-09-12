@@ -175,6 +175,14 @@ before(() => {
   mkdirSync(WORKSPACE, { recursive: true })
   copyFileSync(fixture('synthetic-analysis.sgf'), join(WORKSPACE, 'game.sgf'))
   copyFileSync(fixture('real-analysis.sgf'), join(WORKSPACE, 'real.sgf'))
+  // 只有人工注释、没有分析数字的棋谱：注释里带"胜率"字样，但不是可用的逐手胜率。
+  // 这类棋谱曾经被判成"有分析数据"→ 跳过补算，复盘却算不出问题手（两头落空）。
+  writeFileSync(join(WORKSPACE, 'comment-only.sgf'), [
+    '(;GM[1]FF[4]SZ[19]KM[7.5]PB[甲]PW[乙];B[pd]C[第 1 手：这手占角，胜率 50% 左右]',
+    ';W[dp]C[第 2 手：小目，胜率 49%]',
+    ';B[qp]C[第 3 手：这手有点贪，胜率 45%]',
+    ';W[dd]C[第 4 手：正常，胜率 48%])',
+  ].join('\n'), 'utf8')
   gameSgfInWorkspace = join(WORKSPACE, 'game.sgf')
   ctx = makeCtx(WORKSPACE)
   apply(ctx, CFG)
@@ -239,6 +247,35 @@ test('apply: engineDir 指向自带引擎目录的等价形态 → 注册补算�
   rmSync(engineDir, { recursive: true, force: true })
 })
 
+test('autoComputeIfNeeded: 只有人工注释（取不到胜率）的棋谱也要触发补算', async () => {
+  // 这条盯的是用户报的「无备注的棋谱不能补算」：旧判据用 move.analysis !== null，
+  // 而任何 C[] 注释都会造出 analysis 对象 → 判成"已有分析"跳过补算，可注释里的
+  // 胜率又解析不出来，复盘只能退化成纯棋理：两头落空。
+  const engineDir = join(here, 'tmp-engine-autocompute')
+  rmSync(engineDir, { recursive: true, force: true })
+  mkdirSync(engineDir, { recursive: true })
+  writeFileSync(join(engineDir, 'katago.exe'), 'stub')
+  writeFileSync(join(engineDir, 'analysis_example.cfg'), 'reportAnalysisWinratesAs = BLACK\n')
+  writeFileSync(join(engineDir, 'kata1-b18c384nbt-a.bin.gz'), Buffer.alloc(1024))
+  const cfg = Config({ engineDir, kataGoPath: '' })
+  const { autoComputeIfNeeded } = await import('../src/tools.js')
+
+  // 本测试的 ctx 没有 subprocess 服务：走到补算就会如实报"服务不可用"，
+  // 这正好是"判定为需要补算"的证据（跳过的话 autoEngine 是 undefined）
+  const c = makeCtx(WORKSPACE)
+  const commentOnly = parseGame(readFileSync(join(WORKSPACE, 'comment-only.sgf'), 'utf8'))
+  const r1 = await autoComputeIfNeeded(c, cfg, commentOnly, {})
+  assert.ok(r1.autoEngine !== undefined, '只有注释的棋谱不应被当成"已有分析"而跳过补算')
+  assert.match(String(r1.autoEngine.failed ?? ''), /subprocess/)
+
+  // 对照：真带 LZ 分析数据的棋谱不触发补算
+  const withAnalysis = parseGame(readFileSync(join(WORKSPACE, 'game.sgf'), 'utf8'))
+  const r2 = await autoComputeIfNeeded(makeCtx(WORKSPACE), cfg, withAnalysis, {})
+  assert.equal(r2.autoEngine, undefined, '有可用胜率数据时不该再补算')
+
+  rmSync(engineDir, { recursive: true, force: true })
+})
+
 test('go_engine_info: 无引擎时如实说明并给出改法', async () => {
   const info = await callJson(ctx.registered.get('go_engine_info'), WORKSPACE, {})
   assert.equal(info.available, false)
@@ -263,6 +300,16 @@ test('go_parse_sgf: 文件不存在时报错', async () => {
     () => call(ctx.registered.get('go_parse_sgf'), WORKSPACE, { path: 'nope.sgf' }),
     /找不到文件/,
   )
+})
+
+test('go_parse_sgf: 只有人工注释（注释里提到胜率）不算"有分析数据"', async () => {
+  // 判据必须是"能不能取到逐手胜率"：否则面板会显示「纯棋理 · 0 个问题手」，
+  // 同时补算又被当成"已有分析"跳过 —— 用户看到的正是这个两头落空。
+  const value = await callJson(ctx.registered.get('go_parse_sgf'), WORKSPACE, { path: 'comment-only.sgf' })
+  assert.equal(value.moveCount, 4)
+  assert.equal(value.hasAnalysis, false, '注释里的胜率字样不是可用的分析数据')
+  const rendered = ctx.registered.get('go_parse_sgf').output.render({ path: 'comment-only.sgf' }, value)
+  assert.ok(rendered[0].text.includes('无 AI 分析数据'), `渲染结果应如实说明：${rendered[0].text}`)
 })
 
 test('go_review_moves: 候选正确 + 缓存命中', async () => {

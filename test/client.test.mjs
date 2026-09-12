@@ -647,6 +647,69 @@ test('路由: /go-sensei/focus 跟随讲解（工具调用 -> 局面指针）', 
   assert.equal(r.body.focus.name, 'other.sgf')
 })
 
+test('client: 载入后停在最严重的问题手，并把所有问题手点在盘上', async () => {
+  const { registered, react } = loadClient()
+  const gamePath = fixture('real-analysis.sgf')
+  const BOARD8 = {
+    size: 19,
+    moves: [
+      { c: 'B', x: 3, y: 3 }, { c: 'W', x: 15, y: 15 }, { c: 'B', x: 4, y: 4 },
+      { c: 'W', x: 15, y: 3 }, { c: 'B', x: 3, y: 15 }, { c: 'W', x: 9, y: 9 },
+      { c: 'B', x: 2, y: 2 }, { c: 'W', x: 16, y: 16 },
+    ],
+    setup: { black: [], white: [] },
+  }
+  // 宿主按严重度排序：[0] = 最严重（第 3 手），第 6 手是次要的一处
+  const candidates = [
+    { moveNumber: 3, color: 'B', coord: 'dd', coordLabel: 'D16', label: '大恶手', labelKey: 'blunder', winrateLoss: 25, scoreLoss: 12, pv: [{ label: 'Q16', winratePct: 50 }] },
+    { moveNumber: 6, color: 'W', coord: 'jj', coordLabel: 'K10', label: '失误', labelKey: 'mistake', winrateLoss: 9, scoreLoss: 5, pv: [] },
+  ]
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      ok: true,
+      data: { path: gamePath, mode: 'analysis', level: '18K', moveCount: 8, variations: 0, candidates, board: BOARD8 },
+    }),
+  })
+
+  const props = { inputActions: { setDraft() {} } }
+  react.reset()
+  let tree = registered[0].component(props)
+  walk(tree).find((n) => n.type === 'button' && texts([n]).includes('展开')).props.onClick()
+  react.reset()
+  tree = registered[0].component(props)
+  walk(tree).find((n) => n.type === 'input').props.onChange({ target: { value: gamePath } })
+  react.reset()
+  tree = registered[0].component(props)
+  walk(tree).find((n) => n.type === 'button' && texts([n]).includes('读取问题手')).props.onClick()
+  await new Promise((r) => setTimeout(r, 30))
+  react.reset()
+  tree = registered[0].component(props)
+  // 展开棋盘（默认是收起的）
+  walk(tree).find((n) => n.type === 'button' && texts([n]).includes('棋盘 ▸')).props.onClick()
+  react.reset()
+  tree = registered[0].component(props)
+
+  // 自动停在第 3 手（最严重的那一处），而不是末手
+  assert.ok(texts(walk(tree)).join('|').includes('第 3/8 手'), '载入后应停在最严重的问题手')
+  const nodes = walk(tree)
+  const dotOf = (color) => nodes.filter((n) => n.type === 'circle' && n.props.fill === color
+    && Math.abs(Number(n.props.r) - 0.16 * (84 / 18)) < 0.001)
+  assert.equal(dotOf('#9b1996').length, 1, '大恶手应有一个紫点')
+  assert.equal(dotOf('#d01013').length, 1, '失误应有一个红点')
+  assert.ok(nodes.some((n) => n.type === 'circle' && n.props.stroke === '#9b1996'), '当前这一手还要有大圈')
+
+  // 把棋盘拨回开局：小色点仍在（停在哪一手都看得见），说明行讲清它们是什么
+  walk(tree).find((n) => n.type === 'button' && texts([n]).includes('⏮')).props.onClick()
+  react.reset()
+  tree = registered[0].component(props)
+  const nodes2 = walk(tree)
+  assert.equal(nodes2.filter((n) => n.type === 'circle'
+    && ['#9b1996', '#d01013'].includes(n.props.fill)).length, 2, '离开问题手后小色点仍应留在盘上')
+  assert.ok(!nodes2.some((n) => n.type === 'circle' && n.props.stroke === '#9b1996'), '大圈只套在当前这一手上')
+  assert.ok(texts(nodes2).join('|').includes('盘上色点＝问题手'), '应说明盘上色点的含义')
+})
+
 test('client: 棋盘可收起；点问题手自动展开并跳到那一手（含红圈/绿圈）', async () => {
   const { registered, react } = loadClient()
   const drafts = []
