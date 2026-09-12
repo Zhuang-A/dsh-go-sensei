@@ -102,6 +102,34 @@ function panelDefaultRoot() {
 }
 
 /**
+ * 按会话 id 反查工作区根。
+ *
+ * 为什么必须放在宿主：右侧栏的文档标签页给的是**会话内相对路径**（地址形如
+ * `dsh-resource://file/session/<会话>/<相对路径>`），而浏览器侧拿不到会话 cwd
+ * （客户端快照里没有这个字段，实测）。插件自记的 roots 又只在模型调用过 go_*
+ * 之后才存在 —— 重启后第一次从文件列表打开棋谱，正好落在那个空窗里。
+ * 宿主有 sessions 服务，可以直接拿 id 问出工作区根。
+ *
+ * sessions 是可选依赖：缺席或查不到返回空串，路径解析退回既有候选顺序。
+ *
+ * @param {object} ctx Cordis 上下文
+ * @param {string|null} sessionId 会话 id（来自文档地址）
+ * @returns {string} 工作区根；无法确定时为空串
+ */
+function sessionRootOf(ctx, sessionId) {
+  if (typeof sessionId !== 'string' || sessionId === '') return ''
+  try {
+    const sessions = ctx.get('sessions')
+    if (sessions === undefined || typeof sessions.get !== 'function') return ''
+    const session = sessions.get(sessionId)
+    const cwd = session?.header?.cwd
+    return typeof cwd === 'string' ? cwd : ''
+  } catch {
+    return ''
+  }
+}
+
+/**
  * 棋盘数据：把主变化线与摆子压成坐标整数，浏览器直接画，不必自己解析 SGF。
  *
  * 为什么与问题手同一路由返回：客户端拿不到 game（它既不能读盘也不能调工具），
@@ -279,10 +307,13 @@ function registerPanelRoute(ctx, cfg) {
             send(400, { ok: false, error: '缺少 path 参数' })
             return
           }
-          // 解析基准顺序：浏览器带来的 cwd → 已知工作区根 → 进程 cwd
+          // 解析基准顺序：浏览器带来的 cwd → 会话根（文档标签页给的是会话内相对路径）
+          // → 已知工作区根（模型调过 go_* 才知道）→ 进程 cwd
           const candidates = []
           const explicit = url.searchParams.get('cwd')
           if (explicit) candidates.push(explicit)
+          const sessionRoot = sessionRootOf(ctx, url.searchParams.get('session'))
+          if (sessionRoot !== '') candidates.push(sessionRoot)
           for (const root of roots) candidates.push(root)
           candidates.push(panelDefaultRoot())
 

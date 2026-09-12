@@ -24,12 +24,19 @@ const NO_ENGINE_CFG = { kataGoPath: '', engineDir: join(here, 'no-such-engine') 
 // React / ModuleLoader / slots 桩
 // ---------------------------------------------------------------------------
 
-function makeReactStub() {
+function makeReactStub({ withEffects = false } = {}) {
   const hooks = []
+  const effects = []
   let cursor = 0
   return {
     hooks,
-    reset() { cursor = 0 },
+    effects,
+    reset() { cursor = 0; if (withEffects) effects.length = 0 },
+    /** 手动跑第 index 个 effect（桩默认不跑，免得轮询定时器在测试里乱窜）。 */
+    runEffect(index) {
+      assert.ok(effects[index], `第 ${index} 个 effect 不存在`)
+      return effects[index].fn()
+    },
     api: {
       createElement(type, props) {
         const children = Array.prototype.slice.call(arguments, 2)
@@ -41,7 +48,10 @@ function makeReactStub() {
         const set = (next) => { hooks[index] = typeof next === 'function' ? next(hooks[index]) : next }
         return [hooks[index], set]
       },
-      useEffect() {},
+      useEffect(fn, deps) {
+        cursor++
+        if (withEffects) effects.push({ fn, deps })
+      },
     },
   }
 }
@@ -67,19 +77,35 @@ function texts(nodes) {
 }
 
 /** 装载 client.js，返回 entry 与测试用的桩对象。 */
-function loadClient({ withReact = true } = {}) {
-  const react = makeReactStub()
+function loadClient({ withReact = true, withDocuments = false, withEffects = false, withInject = false } = {}) {
+  const react = makeReactStub({ withEffects })
   const registered = []
   const injected = []
   const loaded = []
+  const documents = []
+  const docInjected = []
+  const injectDeps = []
+  let pendingInject = null
   globalThis.window = {
     __ModuleLoader__: { load(entry) { loaded.push(entry) } },
   }
   const slots = {
-    inject(target, callback) { injected.push(target); return callback() },
+    inject(target, callback) {
+      if (target === 'sidebar.right.tab.document') docInjected.push(target)
+      injected.push(target)
+      return callback()
+    },
     register(options, component) { registered.push({ options, component }); return () => {} },
   }
-  const ctx = { get: (name) => (name === 'slots' ? slots : undefined) }
+  const documentPreviews = { register(definition) { documents.push(definition); return () => {} } }
+  const get = (name) => (name === 'slots'
+    ? slots
+    : name === 'documentPreviews' && withDocuments ? documentPreviews : undefined)
+  const ctx = { get, effect: (fn) => fn() }
+  if (withInject) {
+    // 真实客户端上下文有 inject：服务没出现时它会等，而不是当场返回 undefined
+    ctx.inject = (deps, callback) => { injectDeps.push(deps); pendingInject = callback }
+  }
   const requireStub = (name) => {
     if (name === 'react' && withReact) return react.api
     throw new Error('module not found: ' + name)
@@ -91,7 +117,13 @@ function loadClient({ withReact = true } = {}) {
   const entry = loaded[0]
   const plugin = entry.factory(requireStub)
   plugin.apply(ctx)
-  return { entry, plugin, registered, injected, react }
+  /** 模拟依赖到齐：用带该服务的 scoped ctx 跑挂载回调。 */
+  const runInject = () => {
+    assert.ok(pendingInject, '应通过 ctx.inject 注册了等待回调')
+    const scopedGet = (name) => (name === 'documentPreviews' ? documentPreviews : get(name))
+    return pendingInject({ get: scopedGet, effect: (fn) => fn() })
+  }
+  return { entry, plugin, registered, injected, react, documents, docInjected, injectDeps, runInject }
 }
 
 // ---------------------------------------------------------------------------
@@ -345,7 +377,7 @@ function makeFsStub() {
 }
 
 /** 路由测试用的完整 ctx 桩：apply() 需要 systemPrompt/tools/fs/on，路由需要 webServer。 */
-function makeRouteCtx({ withWebServer = true } = {}) {
+function makeRouteCtx({ withWebServer = true, sessions = null } = {}) {
   const routes = []
   const registered = new Map()
   const sections = []
@@ -371,6 +403,10 @@ function makeRouteCtx({ withWebServer = true } = {}) {
     get(name) {
       if (name === 'webServer' && withWebServer) {
         return { register: (route) => { routes.push(route); return () => {} } }
+      }
+      // 会话服务：宿主用它按 id 反查工作区根（右侧栏文档给的是会话内相对路径）
+      if (name === 'sessions' && sessions !== null) {
+        return { get: (id) => sessions[id] }
       }
       return undefined
     },
@@ -942,4 +978,157 @@ test('client: 棋盘可收起；点问题手自动展开并跳到那一手（含
   // 再点一次「棋盘 ▾」应收起（可收起）
   click('棋盘 ▾')
   assert.equal(walk(tree).find((n) => n.type === 'svg'), undefined, '收起后棋盘应消失')
+})
+
+// ---------------------------------------------------------------------------
+// 右侧栏：.sgf 的原生文档预览（棋盘开在右边，对话留在左边）
+// ---------------------------------------------------------------------------
+
+test('client: dsh-resource 文件地址解析（Windows 盘符 / 转义 / 非会话地址）', () => {
+  const { plugin } = loadClient()
+  const { filePathOfAddress } = plugin.__internals
+  assert.equal(typeof filePathOfAddress, 'function', '__internals 应暴露地址解析')
+  assert.equal(
+    filePathOfAddress('dsh-resource://file/session/sess-1/C:/dsh/WeiQi/a.sgf'),
+    'C:/dsh/WeiQi/a.sgf',
+  )
+  // 路径段逐段解码：带中文与空格的文件名要还原
+  assert.equal(
+    filePathOfAddress('dsh-resource://file/session/s1/C:/%E6%A3%8B%E8%B0%B1/my%20game.sgf'),
+    'C:/棋谱/my game.sgf',
+  )
+  assert.equal(filePathOfAddress('dsh-resource://file/session/s1/a.sgf?line=3'), 'a.sgf', '查询串应忽略')
+  assert.equal(filePathOfAddress('dsh-resource://file/workspace/w1/a.sgf'), '', '非会话作用域不认')
+  assert.equal(filePathOfAddress('https://example.com/a.sgf'), '')
+  assert.equal(filePathOfAddress(undefined), '')
+})
+
+test('client: 为 .sgf 注册右侧栏文档预览（外部档，排在内置兜底之前）', () => {
+  const { documents, docInjected, registered } = loadClient({ withDocuments: true })
+  assert.equal(documents.length, 1, '应注册一个文档预览实现')
+  const definition = documents[0]
+  assert.deepEqual(definition.extensions, ['sgf'])
+  assert.notEqual(definition.priority, 'builtin', '第三方插件属外部档（priority !== builtin 才排在内置兜底前）')
+  assert.equal(typeof definition.title, 'function')
+  assert.equal(definition.loading, 'text-pages')
+  assert.equal(definition.wrap, false)
+  // 正文注册进右侧栏的 document 标签页，key 必须与定义的 id 一致（外壳据此配对）
+  assert.deepEqual(docInjected, ['sidebar.right.tab.document'])
+  const bodyReg = registered.filter((r) => r.options.name === 'sidebar.right.tab.document')
+  assert.equal(bodyReg.length, 1)
+  assert.equal(bodyReg[0].options.key, definition.id)
+  assert.equal(typeof bodyReg[0].component, 'function')
+})
+
+test('client: 宿主没有 documentPreviews 服务时静默跳过（不影响其余注册）', () => {
+  const { documents, docInjected, injected } = loadClient()
+  assert.equal(documents.length, 0)
+  assert.equal(docInjected.length, 0)
+  // 面板与左侧栏那三处照常
+  assert.deepEqual(injected, ['conversation.composer.dock', 'sidebar.panellist', 'main'])
+})
+
+test('client: 右侧栏预览等服务出现再注册（apply 早于官方预览包时不能静默丢）', () => {
+  // 真机踩过：插件 apply 早于提供 documentPreviews 的官方包 → ctx.get 拿到
+  // undefined 就 return，产物里有代码、右侧栏却仍是纯文本预览。
+  const withInject = loadClient({ withInject: true })
+  assert.deepEqual(withInject.injectDeps, [['documentPreviews']], '应通过 ctx.inject 等待服务')
+  assert.equal(withInject.documents.length, 0, '服务还没出现时不应注册')
+  withInject.runInject()
+  assert.equal(withInject.documents.length, 1, '服务出现后应完成注册')
+  assert.deepEqual(withInject.docInjected, ['sidebar.right.tab.document'])
+  // 老路（无 inject 的极简上下文）仍然工作
+  const direct = loadClient({ withDocuments: true })
+  assert.equal(direct.documents.length, 1)
+})
+
+test('路由: session 参数按会话反查工作区根（重启后右侧栏相对路径也能读）', async () => {
+  const fixturesDir = join(here, 'fixtures')
+  const sessions = { 'sess-1': { header: { id: 'sess-1', cwd: fixturesDir } } }
+  const ctx = makeRouteCtx({ sessions })
+  apply(ctx, Config(NO_ENGINE_CFG))
+  const route = ctx.routes.find((r) => r.path === '/go-sensei/review')
+
+  // 没有 go_* 调用、没有已知根：相对路径解析不了（正是重启后的空窗）
+  const cold = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent('real-analysis.sgf'))
+  assert.equal(cold.status, 404, '冷启动时单纯相对路径应 404')
+
+  // 带上会话 id：宿主问 sessions 服务拿到工作区根，命中
+  const warm = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent('real-analysis.sgf')
+    + '&session=sess-1')
+  assert.equal(warm.status, 200, JSON.stringify(warm.body))
+  assert.equal(warm.body.data.moveCount, 106)
+
+  // 查不到的会话 id 不应炸，退回既有候选顺序
+  const unknown = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent('real-analysis.sgf')
+    + '&session=nope')
+  assert.equal(unknown.status, 404)
+})
+
+test('路由: 没有 sessions 服务时 session 参数被忽略（不抛错）', async () => {
+  const ctx = makeRouteCtx()
+  apply(ctx, Config(NO_ENGINE_CFG))
+  const route = ctx.routes.find((r) => r.path === '/go-sensei/review')
+  const r = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent('real-analysis.sgf')
+    + '&session=sess-1')
+  assert.equal(r.status, 404)
+})
+
+test('client: 右侧栏正文渲染棋盘与问题手（拿 resourceAddress 当棋谱路径）', async () => {
+  const { registered, react, docInjected } = loadClient({ withDocuments: true, withEffects: true })
+  assert.deepEqual(docInjected, ['sidebar.right.tab.document'])
+  const bodyReg = registered.filter((r) => r.options.name === 'sidebar.right.tab.document')
+  assert.equal(bodyReg.length, 1)
+  const Body = bodyReg[0].component
+
+  const gamePath = fixture('real-analysis.sgf')
+  const candidates = [{
+    moveNumber: 3, color: 'B', coord: 'dd', coordLabel: 'D16', label: '大恶手', labelKey: 'blunder',
+    winrateLoss: 25, scoreLoss: 12, pv: [{ label: 'Q16', winratePct: 50 }],
+  }]
+  const board = {
+    size: 19,
+    moves: [
+      { c: 'B', x: 3, y: 3 }, { c: 'W', x: 15, y: 15 }, { c: 'B', x: 4, y: 4 },
+      { c: 'W', x: 15, y: 3 }, { c: 'B', x: 3, y: 15 }, { c: 'W', x: 9, y: 9 },
+    ],
+    setup: { black: [], white: [] },
+  }
+  const seen = []
+  globalThis.fetch = async (url) => {
+    seen.push(String(url))
+    return {
+      ok: true,
+      json: async () => (String(url).includes('/go-sensei/focus')
+        ? { ok: true, focus: null }
+        : { ok: true, data: { path: gamePath, mode: 'analysis', level: '18K', moveCount: 6, variations: 0, candidates, board } }),
+    }
+  }
+
+  const address = 'dsh-resource://file/session/s1/' + gamePath.replace(/\\/g, '/')
+  react.reset()
+  Body({ resourceAddress: address })
+  // 正文在 effect 里加载；桩不自动跑 effect，这里手动跑第 0 个（第 1 个是跟随轮询）
+  react.runEffect(0)
+  await new Promise((r) => setTimeout(r, 30))
+  react.reset()
+  const tree = Body({ resourceAddress: address })
+
+  const wanted = encodeURIComponent(gamePath.replace(/\\/g, '/'))
+  assert.ok(seen.some((u) => u.includes('/go-sensei/review') && u.includes(wanted)),
+    `应带着文件路径请求复盘：${seen.join(' , ')}`)
+  assert.ok(seen.some((u) => u.includes('session=s1')),
+    `应带上会话 id（宿主靠它反查工作区根）：${seen.join(' , ')}`)
+  const nodes = walk(tree)
+  const svg = nodes.find((n) => n.type === 'svg')
+  assert.ok(svg, '右侧栏正文应渲染棋盘')
+  assert.equal(svg.props['data-dgs-board'], '19')
+  const text = texts(nodes).join('|')
+  assert.ok(text.includes('Sensei 棋盘'), text)
+  assert.ok(text.includes('第 3/6 手'), '应停在最严重的问题手：' + text)
+  assert.ok(text.includes('AI 首选 Q16'), text)
+  assert.ok(nodes.some((n) => n.type === 'circle' && n.props.stroke === '#9b1996'), '大恶手紫圈')
+  assert.ok(nodes.some((n) => n.type === 'circle' && n.props.stroke === '#0000ff'), 'AI 首选蓝圈')
+  const items = nodes.filter((n) => n.type === 'button' && n.props.className === 'dgs-item')
+  assert.equal(items.length, 1)
 })

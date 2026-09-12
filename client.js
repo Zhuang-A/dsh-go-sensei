@@ -95,6 +95,14 @@ window.__ModuleLoader__.load({
       '[data-dgs] .dgs-icon { display: block; }',
       '[data-dgs] .dgs-prob { color: var(--dsw-alias-state-error-primary, #e5534b); }',
       '[data-dgs] .dgs-rec { color: var(--dsw-alias-state-success-primary, #3fb950); }',
+      // ── 右侧栏文档预览（.sgf 在原生右侧栏里打开时的棋盘）────────────────
+      '[data-dgs].dgs-doc { border: none; background: transparent; margin: 0; padding: 8px 10px;',
+      '  max-width: none; border-radius: 0; }',
+      '[data-dgs] .dgs-doc-head { display: flex; align-items: center; gap: 8px; }',
+      '[data-dgs] .dgs-doc-head .dgs-spacer { flex: 1; }',
+      '[data-dgs] .dgs-doc-status { font-size: 12px; margin: 6px 0 2px; }',
+      '[data-dgs] .dgs-doc-board { width: 100%; max-width: 480px; margin: 0 auto; }',
+      '[data-dgs] .dgs-doc-list { max-height: none; }',
     ].join('\n')
 
     /** 注入样式（幂等；只插一次，避免重复注册时堆积）。 */
@@ -910,11 +918,16 @@ window.__ModuleLoader__.load({
       // 会话工作区根：客户端快照里没有 cwd 字段，这里只作「锦上添花」尝试；
       // 真正可靠的基准由 Host 用 tools/result 记下的工作区根提供。
       var cwd = ''
+      // 会话 id：相对路径的解析基准由宿主按 id 反查（浏览器拿不到会话 cwd），
+      // 这样重启后还没调用过任何 go_* 工具时也能直接读相对路径。
+      var sessionId = ''
       try {
         var snapshot = props && typeof props.useSession === 'function'
           ? props.useSession(function (s) { return s })
           : null
         if (snapshot && snapshot.header && snapshot.header.cwd) cwd = String(snapshot.header.cwd)
+        if (snapshot && snapshot.header && snapshot.header.id) sessionId = String(snapshot.header.id)
+        else if (snapshot && snapshot.id) sessionId = String(snapshot.id)
       } catch (error) {
         cwd = ''
       }
@@ -931,6 +944,7 @@ window.__ModuleLoader__.load({
         setBusy(true); setErr(''); setNotice(''); setHint('')
         var url = '/go-sensei/review?path=' + encodeURIComponent(wanted)
           + (base ? '&cwd=' + encodeURIComponent(base) : '')
+          + (sessionId ? '&session=' + encodeURIComponent(sessionId) : '')
         // 没有分析数据的棋谱要等宿主现场补算（真机实测 87 秒）。不给说明的话，
         // 按钮上一直写着「读取中…」，用户会以为卡死了。
         var slowTimer = setTimeout(function () {
@@ -1343,6 +1357,338 @@ window.__ModuleLoader__.load({
       })
     }
 
+    // -----------------------------------------------------------------------
+    // 右侧栏：为 .sgf 注册一个原生「文档」预览实现
+    //
+    // 平台事实（读 dsh-client-ui-sidebar-documentpreview 的产物确认，第三方插件
+    // 唯一能进右侧栏的正路 —— 侧栏标签页的创建是外壳内部的东西，插件开不了）：
+    //   · ctx.documentPreviews.register({ id, extensions, priority, title, loading, wrap })
+    //     匹配规则：priority !== 'builtin' 属"外部档"排前，然后比最长后缀，再按注册顺序；
+    //     .sgf 没有内置实现抢，所以这一条会胜出。
+    //   · 正文注册进 sidebar.right.tab.document，key = 定义的 id；
+    //     props 给 { resourceAddress, content, wrap, scrollportRef, useTabInfo }，
+    //     其中 resourceAddress 形如 dsh-resource://file/session/<会话>/<路径>。
+    // 于是：在对话里点文件的「打开」（或文件列表里点开 .sgf）→ 棋盘出现在右侧栏，
+    // 对话留在左边。这正是"左右排版"的原生做法，不遮挡任何原生控件。
+    // -----------------------------------------------------------------------
+
+    /** 右侧栏文档正文的注册 key（与文档预览定义的 id 同一个值）。 */
+    var DOC_BODY_ID = 'dsh-go-sensei/board'
+
+    /**
+     * dsh-resource 文件地址 → 会话 id。
+     * 右侧栏文档给的是会话内相对路径，宿主得靠这个 id 反查工作区根才能解析
+     * （客户端没有会话 cwd）。
+     * @param {string} address 形如 dsh-resource://file/session/<id>/<路径>
+     * @returns {string} 会话 id；不是会话文件地址时返回空串
+     */
+    function sessionIdOfAddress(address) {
+      var prefix = 'dsh-resource://file/'
+      var text = String(address == null ? '' : address)
+      if (text.indexOf(prefix) !== 0) return ''
+      var end = text.search(/[?#]/)
+      var parts = text.slice(prefix.length, end === -1 ? undefined : end).split('/')
+      if (parts[0] !== 'session') return ''
+      var id = parts[1]
+      if (id === undefined || id === '') return ''
+      try {
+        return decodeURIComponent(id)
+      } catch (error) {
+        return id
+      }
+    }
+
+    /**
+     * dsh-resource 文件地址 → 文件路径。
+     * 与官方 parseFileAddress 同规则：前缀 20 字符，第二段是 scope，
+     * 第三段是会话 id，其余各段解码后用 '/' 拼回路径（Windows 盘符是一段，如 'C:'）。
+     * @param {string} address 形如 dsh-resource://file/session/<id>/C:/dir/a.sgf
+     * @returns {string} 文件路径；不是会话文件地址时返回空串
+     */
+    function filePathOfAddress(address) {
+      var prefix = 'dsh-resource://file/'
+      var text = String(address == null ? '' : address)
+      if (text.indexOf(prefix) !== 0) return ''
+      var end = text.search(/[?#]/)
+      var parts = text.slice(prefix.length, end === -1 ? undefined : end).split('/')
+      if (parts[0] !== 'session') return ''
+      var segments = parts.slice(2)
+      if (segments.length === 0) return ''
+      var decoded = []
+      for (var i = 0; i < segments.length; i++) {
+        try {
+          decoded.push(decodeURIComponent(segments[i]))
+        } catch (error) {
+          decoded.push(segments[i])
+        }
+      }
+      return decoded.join('/')
+    }
+
+    /**
+     * 右侧栏文档正文：一块纵向排布的棋盘（棋盘在上、问题手列表在下）。
+     * 与输入框下方那块不同，这里没有 inputActions，所以点行改为复制追问语。
+     */
+    function SenseiDocumentBody(props) {
+      var path = filePathOfAddress(props && props.resourceAddress)
+      var sessionId = sessionIdOfAddress(props && props.resourceAddress)
+      var dataState = React.useState(null)
+      var data = dataState[0]
+      var setData = dataState[1]
+      var busyState = React.useState(false)
+      var busy = busyState[0]
+      var setBusy = busyState[1]
+      var errState = React.useState('')
+      var err = errState[0]
+      var setErr = errState[1]
+      var uptoState = React.useState(0)
+      var upto = uptoState[0]
+      var setUpto = uptoState[1]
+      var followState = React.useState(true)
+      var follow = followState[0]
+      var setFollow = followState[1]
+      var copiedState = React.useState('')
+      var copied = copiedState[0]
+      var setCopied = copiedState[1]
+
+      React.useEffect(function () {
+        if (path === '') return undefined
+        var alive = true
+        setBusy(true); setErr(''); setData(null); setUpto(0)
+        // 带上会话 id：文档地址里的路径是会话内相对路径，宿主靠这个反查工作区根
+        fetch('/go-sensei/review?path=' + encodeURIComponent(path)
+          + (sessionId ? '&session=' + encodeURIComponent(sessionId) : ''))
+          .then(function (response) { return response.json().catch(function () { return {} }) })
+          .then(function (body) {
+            if (!alive) return
+            setBusy(false)
+            if (!body || body.ok !== true) {
+              setErr(body && body.error ? String(body.error) : '读取失败')
+              return
+            }
+            var next = body.data
+            var board = next && next.board && Array.isArray(next.board.moves) ? next.board : null
+            var total = board === null ? 0 : board.moves.length
+            var list = next && Array.isArray(next.candidates) ? next.candidates : []
+            var worst = list.length > 0 && typeof list[0].moveNumber === 'number' ? list[0].moveNumber : 0
+            setData(next)
+            setUpto(worst > 0 ? Math.min(worst, total) : total)
+          })
+          .catch(function (error) {
+            if (!alive) return
+            setBusy(false); setErr(String(error && error.message ? error.message : error))
+          })
+        return function () { alive = false }
+      }, [path])
+
+      function pollFocusDoc() {
+        fetch('/go-sensei/focus')
+          .then(function (response) { return response.json().catch(function () { return {} }) })
+          .then(function (body) {
+            var f = body && body.ok === true ? body.focus : null
+            if (!f || typeof f.seq !== 'number') return
+            if (f.seq > focusPointer.seen) focusPointer.seen = f.seq
+            if (f.seq <= focusPointer.seq) return
+            focusPointer.seq = f.seq
+            if (path !== '' && sameFile(path, f.path || f.name || '')) {
+              if (typeof f.moveNumber === 'number' && f.moveNumber > 0) setUpto(f.moveNumber)
+            }
+          })
+          .catch(function () { /* 轮询失败静默重试 */ })
+      }
+
+      React.useEffect(function () {
+        if (!follow || path === '') return undefined
+        var timer = setInterval(pollFocusDoc, 3000)
+        pollFocusDoc()
+        return function () { clearInterval(timer) }
+      }, [follow, path])
+
+      function copyFollowUpDoc(candidate) {
+        var text = followUpText(candidate, path)
+        var done = function () { setCopied('已复制第 ' + candidate.moveNumber + ' 手的追问语') }
+        try {
+          if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, function () { setCopied('复制失败：请手动选中') })
+            return
+          }
+        } catch (error) {
+          /* 无剪贴板权限：退回提示 */
+        }
+        setCopied('复制失败：请手动选中')
+      }
+
+      if (path === '') {
+        return React.createElement('div', { className: 'dgs-doc' },
+          React.createElement('div', { className: 'dgs-sub' }, 'Sensei 棋盘：这个标签页的文件地址无法解析。'))
+      }
+
+      var board = data && data.board && Array.isArray(data.board.moves) ? data.board : null
+      var total = board === null ? 0 : board.moves.length
+      var cur = Math.max(0, Math.min(upto, total))
+      var curMove = board !== null && cur > 0 ? board.moves[cur - 1] : null
+      var list = data && Array.isArray(data.candidates) ? data.candidates : []
+      var problem = null
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].moveNumber === cur) { problem = list[i]; break }
+      }
+      var hint = problem && problem.pv && problem.pv[0] ? problem.pv[0] : null
+      var pvPoints = board === null || problem === null || !Array.isArray(problem.pv)
+        ? []
+        : problem.pv.slice(0, 3).map(function (p) { return parsePointLabel(p && p.label, board.size) })
+      var problemPoint = problem !== null && curMove !== null && curMove.x >= 0
+        ? { x: curMove.x, y: curMove.y, key: problem.labelKey, label: problem.label }
+        : null
+      var problemMoves = list.map(function (c) { return c.moveNumber }).filter(function (n) {
+        return typeof n === 'number'
+      }).sort(function (a, b) { return a - b })
+
+      function jumpProblem(direction) {
+        if (problemMoves.length === 0) return
+        var target = null
+        var k
+        if (direction > 0) {
+          for (k = 0; k < problemMoves.length; k++) {
+            if (problemMoves[k] > cur) { target = problemMoves[k]; break }
+          }
+          if (target === null) target = problemMoves[0]
+        } else {
+          for (k = problemMoves.length - 1; k >= 0; k--) {
+            if (problemMoves[k] < cur) { target = problemMoves[k]; break }
+          }
+          if (target === null) target = problemMoves[problemMoves.length - 1]
+        }
+        setUpto(target)
+      }
+
+      var kids = [
+        React.createElement('div', { className: 'dgs-doc-head', key: 'h' },
+          React.createElement('span', { className: 'dgs-title' }, 'Sensei 棋盘'),
+          React.createElement('span', { className: 'dgs-sub' }, baseName(path)),
+          React.createElement('span', { className: 'dgs-spacer' }),
+          React.createElement('button', {
+            className: 'dgs-follow',
+            title: '开启后：Sensei 在对话里讲到第几手，这里就跟到第几手',
+            onClick: function () { setFollow(!follow) },
+          }, follow ? '跟随讲解 ✓' : '跟随讲解 ✕'),
+        ),
+      ]
+      if (busy) kids.push(React.createElement('div', { className: 'dgs-sub', key: 'b' }, '读取中…'))
+      if (err) kids.push(React.createElement('div', { className: 'dgs-err', key: 'e' }, err))
+      if (copied) kids.push(React.createElement('div', { className: 'dgs-ok', key: 'c' }, copied))
+
+      if (board !== null) {
+        kids.push(React.createElement('div', { className: 'dgs-doc-status', key: 's' },
+          boardStatusText(board, cur, curMove),
+          data.mode === 'analysis' ? ' · AI 分析' : ' · 纯棋理'))
+        kids.push(React.createElement('div', { className: 'dgs-doc-board', key: 'bd' },
+          renderBoard({
+            board: board,
+            upto: cur,
+            problem: problemPoint,
+            pv: pvPoints,
+            hintLabel: hint && hint.label ? hint.label : '',
+          })))
+        kids.push(React.createElement('div', { className: 'dgs-ctl', key: 'ctl' },
+          React.createElement('button', { onClick: function () { setUpto(0) }, title: '回到开局' }, '⏮'),
+          React.createElement('button', { onClick: function () { setUpto(Math.max(0, cur - 1)) }, title: '上一手' }, '◀'),
+          React.createElement('button', { onClick: function () { setUpto(Math.min(total, cur + 1)) }, title: '下一手' }, '▶'),
+          React.createElement('button', { onClick: function () { setUpto(total) }, title: '跳到末手' }, '⏭'),
+          React.createElement('button', {
+            className: 'dgs-jump', disabled: problemMoves.length === 0,
+            onClick: function () { jumpProblem(-1) }, title: '上一处问题手',
+          }, '◀恶点'),
+          React.createElement('button', {
+            className: 'dgs-jump', disabled: problemMoves.length === 0,
+            onClick: function () { jumpProblem(1) }, title: '下一处问题手',
+          }, '恶点▶'),
+          React.createElement('input', {
+            type: 'range', min: 0, max: total, value: cur,
+            onChange: function (event) { setUpto(Number(event.target.value)) },
+          })))
+        if (problem !== null) {
+          kids.push(React.createElement('div', { className: 'dgs-note', key: 'n' },
+            React.createElement('span', { className: 'dgs-prob' },
+              '○ 实战 ' + String(problem.moveNumber) + ' 手 ' + String(problem.coordLabel || '')),
+            hint && hint.label
+              ? React.createElement('span', { className: 'dgs-rec' }, '　◌ AI 首选 ' + String(hint.label)
+                  + (hint.winratePct == null ? '' : '（胜率 ' + String(hint.winratePct) + '%）'))
+              : null))
+        }
+        kids.push(React.createElement('div', { className: 'dgs-sub', key: 'm' },
+          String(data.moveCount || 0) + ' 手 · ' + list.length + ' 个问题手'
+          + (data.autoEngine ? ' · 引擎补算 ' + String(data.autoEngine.moves ?? '') + ' 手' : '')))
+        kids.push(React.createElement('div', { className: 'dgs-list dgs-doc-list', key: 'list' },
+          list.map(function (candidate, index) {
+            var top = candidate.pv && candidate.pv[0] ? candidate.pv[0] : null
+            return React.createElement('button', {
+              className: 'dgs-item',
+              key: String(candidate.moveNumber) + '-' + index,
+              title: '点击：棋盘跳到这一手，并复制追问语',
+              onClick: function () {
+                setUpto(candidate.moveNumber)
+                copyFollowUpDoc(candidate)
+              },
+            },
+              React.createElement('div', { className: 'dgs-l1' },
+                React.createElement('span', { className: 'dgs-mv' }, '第 ' + candidate.moveNumber + ' 手'),
+                React.createElement('span', null, candidate.color === 'B' ? '黑' : '白'),
+                React.createElement('span', { className: 'dgs-coord' }, candidate.coordLabel || candidate.coord || ''),
+                React.createElement('span', {
+                  className: 'dgs-badge',
+                  style: { color: severityColor(candidate.label) },
+                }, candidate.label || '')),
+              React.createElement('div', { className: 'dgs-l2' },
+                '−' + (candidate.winrateLoss == null ? '?' : candidate.winrateLoss) + '% 胜率'
+                + (candidate.scoreLoss == null ? '' : ' / ' + candidate.scoreLoss + ' 目')
+                + (top && top.label ? ' · AI 首选：' + top.label : '')))
+          })))
+      } else if (!busy && err === '') {
+        kids.push(React.createElement('div', { className: 'dgs-sub', key: 'w' }, '正在准备棋盘…'))
+      }
+      return React.createElement('div', { className: 'dgs-doc', 'data-dgs': '' }, kids)
+    }
+
+    /**
+     * 注册 .sgf 的文档预览实现（右侧栏）。
+     *
+     * 用 ctx.inject 等 documentPreviews 出现再注册，而不是一开始就 ctx.get：
+     * 客户端服务按挂载顺序出现，本插件的 apply 完全可能早于提供该服务的官方
+     * 文档预览包 —— 早一步 get 就是 undefined，注册会被静默跳过（真机实测踩过：
+     * 产物里有代码、右侧栏却仍是纯文本预览）。
+     * 无 inject 的极简上下文（单测桩）退回即时 get。
+     */
+    function registerDocumentPreview(ctx) {
+      if (React === null || typeof React.createElement !== 'function') return
+      var mount = function (scoped) {
+        var host = scoped === undefined ? ctx : scoped
+        var documents = host.get('documentPreviews')
+        if (documents === undefined || typeof documents.register !== 'function') return
+        var slots = host.get('slots')
+        if (slots === undefined || typeof slots.register !== 'function') return
+        ensureStyles()
+        var definition = {
+          id: DOC_BODY_ID,
+          extensions: ['sgf'],
+          // 非 'builtin' 即"外部档"：比内置兜底优先，且 .sgf 没有内置实现抢
+          priority: 'external',
+          title: function () { return 'Sensei 棋盘' },
+          loading: 'text-pages',
+          wrap: false,
+        }
+        if (typeof host.effect === 'function') host.effect(function () { return documents.register(definition) })
+        else documents.register(definition)
+        slots.inject('sidebar.right.tab.document', function () {
+          return slots.register({ name: 'sidebar.right.tab.document', key: DOC_BODY_ID }, SenseiDocumentBody)
+        })
+      }
+      if (typeof ctx.inject === 'function') {
+        ctx.inject(['documentPreviews'], function (scoped) { mount(scoped) })
+        return
+      }
+      mount(undefined)
+    }
+
     exports.name = 'dsh-go-sensei'
     // 两个都是**软**依赖：缺席时各自静默降级，不做硬注入（否则整包永久 pending）。
     exports.inject = []
@@ -1351,6 +1697,11 @@ window.__ModuleLoader__.load({
         registerPanel(ctx)
       } catch (error) {
         // 面板注册失败绝不能影响插件其余部分（工具与服务端半照常工作）
+      }
+      try {
+        registerDocumentPreview(ctx)
+      } catch (error) {
+        // 右侧栏预览注册失败同样不能影响面板与工具
       }
     }
     // 棋盘规则是纯函数，但只存在于这个单文件 bundle 里（浏览器半零构建、无模块系统），
@@ -1364,6 +1715,7 @@ window.__ModuleLoader__.load({
       boardAt: boardAt,
       starPoints: starPoints,
       baseName: baseName,
+      filePathOfAddress: filePathOfAddress,
       sameFile: sameFile,
       renderBoard: renderBoard,
       focusPointer: focusPointer,
