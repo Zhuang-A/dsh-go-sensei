@@ -793,10 +793,9 @@ test('client: 载入后停在最严重的问题手，并把所有问题手点在
   await new Promise((r) => setTimeout(r, 30))
   react.reset()
   tree = registered[0].component(props)
-  // 展开棋盘（默认是收起的）
-  walk(tree).find((n) => n.type === 'button' && texts([n]).includes('棋盘 ▸')).props.onClick()
-  react.reset()
-  tree = registered[0].component(props)
+  // 载入成功即自动展开棋盘（不然读完还只看到一行表头）
+  assert.ok(walk(tree).some((n) => n.type === 'svg' && n.props.className === 'dgs-board'),
+    '读取成功后棋盘应自动展开')
 
   // 自动停在第 3 手（最严重的那一处），而不是末手
   assert.ok(texts(walk(tree)).join('|').includes('第 3/8 手'), '载入后应停在最严重的问题手')
@@ -885,7 +884,11 @@ test('client: 棋盘可收起；点问题手自动展开并跳到那一手（含
   react.reset()
   tree = registered[0].component(props)
 
-  // 收起态：只有表头，没有 svg；表头给出当前手
+  // 载入后棋盘已自动展开；点「棋盘 ▾」收起 → 只剩表头、没有 svg
+  assert.ok(walk(tree).some((n) => n.type === 'svg' && n.props.className === 'dgs-board'), '载入后应已展开')
+  walk(tree).find((n) => n.type === 'button' && texts([n]).includes('棋盘 ▾')).props.onClick()
+  react.reset()
+  tree = registered[0].component(props)
   assert.ok(texts(walk(tree)).join('|').includes('棋盘 ▸'), '应有收起态的棋盘入口')
   assert.equal(walk(tree).find((n) => n.type === 'svg'), undefined, '收起时不应渲染棋盘')
 

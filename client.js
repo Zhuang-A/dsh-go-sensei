@@ -543,6 +543,9 @@ window.__ModuleLoader__.load({
       data: null,
       path: '',
       upto: 0,
+      // 面板自己展开/收起的状态也要共享：主区域一次只渲染一个面板，切到整页棋盘
+      // 再切回来时 dock 是重新挂载的——不共享的话用户每次回来都要再点一次「展开」。
+      open: false,
       boardOpen: false,
       follow: true,
       subs: [],
@@ -680,6 +683,63 @@ window.__ModuleLoader__.load({
         }
         if (prevProblem === null) prevProblem = problemMoves[problemMoves.length - 1]
       }
+
+      /**
+       * 整页视图自己也要轮询跟随：主区域一次只渲染一个面板，切到这一页时输入框下方
+       * 那块面板已经被卸载（它的轮询也随之停了）。没有这一段，整页就成了"看着像跟随
+       * 讲解开着、其实永远不动"。
+       */
+      function loadIntoStore(target, cwdOverride) {
+        var wanted = String(target == null ? '' : target).trim()
+        if (wanted === '') return
+        var key = wanted + '|' + String(cwdOverride || '')
+        var last = focusPointer.tried[key] || 0
+        if (Date.now() - last < 20000) return
+        focusPointer.tried[key] = Date.now()
+        var url = '/go-sensei/review?path=' + encodeURIComponent(wanted)
+          + (cwdOverride ? '&cwd=' + encodeURIComponent(cwdOverride) : '')
+        fetch(url)
+          .then(function (response) { return response.json().catch(function () { return {} }) })
+          .then(function (body) {
+            if (!body || body.ok !== true || !body.data) return
+            var next = body.data
+            var nextBoard = next.board && Array.isArray(next.board.moves) ? next.board : null
+            var nextTotal = nextBoard === null ? 0 : nextBoard.moves.length
+            var nextList = Array.isArray(next.candidates) ? next.candidates : []
+            var worst = nextList.length > 0 && typeof nextList[0].moveNumber === 'number' ? nextList[0].moveNumber : 0
+            senseiPatch({
+              data: next, path: wanted,
+              upto: worst > 0 ? Math.min(worst, nextTotal) : nextTotal,
+            })
+          })
+          .catch(function () { /* 下一轮再试 */ })
+      }
+
+      function pollFocusPage() {
+        fetch('/go-sensei/focus')
+          .then(function (response) { return response.json().catch(function () { return {} }) })
+          .then(function (body) {
+            var f = body && body.ok === true ? body.focus : null
+            if (!f || typeof f.seq !== 'number') return
+            if (f.seq > focusPointer.seen) focusPointer.seen = f.seq
+            if (f.seq <= focusPointer.seq) return
+            focusPointer.seq = f.seq
+            var loaded = senseiStore.data && senseiStore.data.path ? senseiStore.data.path : ''
+            if (loaded !== '' && sameFile(loaded, f.path || f.name || '')) {
+              if (typeof f.moveNumber === 'number' && f.moveNumber > 0) senseiPatch({ upto: f.moveNumber })
+              return
+            }
+            loadIntoStore(f.path, f.cwd)
+          })
+          .catch(function () { /* 轮询失败静默重试 */ })
+      }
+
+      React.useEffect(function () {
+        if (!store.follow) return undefined
+        var timer = setInterval(pollFocusPage, 3000)
+        pollFocusPage()
+        return function () { clearInterval(timer) }
+      }, [store.follow, store.data])
 
       function copyFollowUp(candidate) {
         var text = followUpText(candidate, data ? data.path : '')
@@ -827,7 +887,7 @@ window.__ModuleLoader__.load({
       var noticeState = React.useState('')
       var notice = noticeState[0]
       var setNotice = noticeState[1]
-      var openState = React.useState(false)
+      var openState = React.useState(senseiStore.open)
       var open = openState[0]
       var setOpen = openState[1]
       // 内置棋盘：收起态只留一行表头；展开后才有棋盘本体与控制条
@@ -891,6 +951,9 @@ window.__ModuleLoader__.load({
               var list = body.data && Array.isArray(body.data.candidates) ? body.data.candidates : []
               var worst = list.length > 0 && typeof list[0].moveNumber === 'number' ? list[0].moveNumber : 0
               setUpto(worst > 0 ? Math.min(worst, total) : total)
+              // 读取成功就把棋盘展开：不然用户读完了还只看到一行表头，
+              // 得再点一下才知道盘上有东西（"棋盘不显示问题手"的观感有一半来自这里）
+              setBoardOpen(true)
             } else {
               setData(null)
               setErr(body && body.error ? String(body.error) : '读取失败')
@@ -1000,17 +1063,21 @@ window.__ModuleLoader__.load({
        * "Cannot update a component while rendering a different component"。
        */
       React.useEffect(function () {
-        senseiPatch({ data: data, path: path, upto: upto, boardOpen: boardOpen, follow: follow })
-      }, [data, path, upto, boardOpen, follow])
+        senseiPatch({
+          data: data, path: path, upto: upto,
+          open: open, boardOpen: boardOpen, follow: follow,
+        })
+      }, [data, path, upto, open, boardOpen, follow])
 
       /** 共享状态 → 面板：整页棋盘那边翻手/开关时跟着走（比较后再 set，避免打转）。 */
       React.useEffect(function () {
         return senseiSubscribe(function () {
+          if (senseiStore.open !== open) setOpen(senseiStore.open)
           if (senseiStore.upto !== upto) setUpto(senseiStore.upto)
           if (senseiStore.boardOpen !== boardOpen) setBoardOpen(senseiStore.boardOpen)
           if (senseiStore.follow !== follow) setFollow(senseiStore.follow)
         })
-      }, [upto, boardOpen, follow])
+      }, [open, upto, boardOpen, follow])
 
       /**
        * 点问题手一行：棋盘跳到那一手（并自动展开棋盘），同时把追问语插进输入框。
