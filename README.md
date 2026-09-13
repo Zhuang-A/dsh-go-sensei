@@ -522,7 +522,18 @@ node scripts/demo.mjs <sgf路径> [起始手] [结束手]
 
 目录结构：`index.mjs`（宿主 half）· `client.js`（浏览器 half）· `src/`（解析/复盘/工具/引擎/缓存）· `engine/`（随包分发的 KataGo）· `test/`（含真实野狐棋谱夹具）。
 
-源码仓库：<https://github.com/Zhuang-A/dsh-go-sensei>（`main` 分支，语义化版本 tag）。发一版时同步改 `package.json` 的 `version` 并打同名 tag，`git push --follow-tags`。
+源码仓库：<https://github.com/Zhuang-A/dsh-go-sensei>（`main` 分支，语义化版本 tag）。
+
+**发一版的完整步骤**（版本号按 patch 递增：0.2.0 → 0.2.1 → 0.2.2 都是这样，一批 feat 也走 patch）：
+
+1. 改 `package.json` 的 `version`，单独提交 `chore: 版本 X.Y.Z（本版一句话）`；
+2. 打**注记 tag**（`git tag -a`，不是轻量 tag），tag 消息就是发布说明的底稿：`git tag -a vX.Y.Z -m "vX.Y.Z：<中文，列本版用户可见的变化>"`；
+3. `git push --follow-tags`（提交与 tag 一起推）；
+4. 在 GitHub 上给这个 tag 建 **Release**（自 v0.2.2 起的固定动作）：标题与 tag 同名，正文＝tag 消息展开成要点 + `**Full Changelog**: https://github.com/Zhuang-A/dsh-go-sensei/compare/<上一 tag>...vX.Y.Z`，默认即为 "Latest release"。新建页可用查询参数直接预填 tag，省掉选 tag 的动作：
+   `https://github.com/Zhuang-A/dsh-go-sensei/releases/new?tag=vX.Y.Z` —— 打开后填标题与正文，点 **Publish release** 即可；
+5. 发布验收：把远端**重新克隆**到临时目录 → `npm install` → 跑全量测试（`node --test --test-isolation=none` 展开 `test/*.test.mjs`），确认"发布出去的那份代码"全绿，再删掉临时克隆。
+
+> 仓库的 tag 全是注记 tag，tag 页本身就能看到发布说明；Release 页与 tag 一一对应。
 
 ### 改工具 schema 前必读
 
