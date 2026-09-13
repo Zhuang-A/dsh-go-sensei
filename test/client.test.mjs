@@ -916,7 +916,12 @@ test('client: 棋盘可收起；点问题手自动展开并跳到那一手（含
     labelKey: 'mistake',
     winrateLoss: 12.3,
     scoreLoss: 4.5,
-    pv: [{ label: 'Q16', winratePct: 55.5 }, { label: 'D4', winratePct: 48.2 }],
+    // line ＝ 变化线（第一项是首选自己）：盘上画的是**首选之后的 D4、R6**，
+    // 不是这里的第 2 个候选点
+    pv: [
+      { label: 'Q16', winratePct: 55.5, line: 'Q16 D4 R6' },
+      { label: 'C10', winratePct: 48.2, line: 'C10 D4' },
+    ],
   }]
   globalThis.fetch = async (url) => ({
     ok: true,
@@ -979,11 +984,16 @@ test('client: 棋盘可收起；点问题手自动展开并跳到那一手（含
   assert.ok(Math.abs(bestRing.props.cx - 78) < 0.01 && Math.abs(bestRing.props.cy - 22) < 0.01,
     `蓝圈应在 Q16（实际 ${bestRing.props.cx},${bestRing.props.cy}）`)
   assert.ok(nodes.some((n) => n.type === 'rect' && n.props.fill === '#ffc800'), '首选点胜率用橙底信息条')
-  assert.ok(nodes.some((n) => n.type === 'circle' && n.props.fill === '#1668ff'), '变化图第 2 手应有蓝点')
+  // 蓝点＝首选之后的后续几手（D4、R6），不是第 2、3 个候选点
+  const pvDots = walk(tree).filter((n) => /^pv\d+$/.test(String(n.props.key || '')))
+  assert.deepEqual(pvDots.map((n) => n.props.cx), [8 + 3 * (84 / 18), 8 + 16 * (84 / 18)],
+    '变化图应画在 D4、R6（实际 ' + pvDots.map((n) => n.props.key).join(',') + '）')
+  assert.ok(!nodes.some((n) => n.props.cx === 8 + 2 * (84 / 18) && n.props.cy === 8 + 9 * (84 / 18)),
+    '第 2 个候选点 C10 不该上盘')
   const text = texts(nodes).join('|')
   assert.ok(text.includes('AI 首选 Q16'), text)
   assert.ok(text.includes('○ 实战 3 手 E16'), text)
-  assert.ok(text.includes('D4'), '说明行应给出变化图后续')
+  assert.ok(text.includes('后续：D4 → R6'), '说明行应给出变化图后续：' + text.slice(0, 300))
 
   // 步进：⏮ 回开局 → ▶ 一手；⏭ 回末手（提子生效，白子消失）
   const click = (label) => {
@@ -1258,6 +1268,142 @@ test('路由: 面板数据带上已写回的讲解注释（按手数）', async 
   assert.equal(typeof r.body.data.comments, 'object')
   assert.ok(String(r.body.data.comments['21'] ?? '').includes('这手太急'),
     `应按手数带上注释：${JSON.stringify(r.body.data.comments ?? {}).slice(0, 200)}`)
+})
+
+// 用户实报：「对于讲解点也需要标注 AI 首选和变化图」。
+// 讲解点未必是问题手（老师也会在好手、关键处写讲解），问题手列表里根本没有它 ——
+// 所以宿主另给一份逐手候选（payload.ai），面板靠它在任何一手都能画出首选与变化图。
+test('路由: 面板带上逐手 AI 候选（讲解点也有首选/变化图）', async () => {
+  const ctx = makeRouteCtx()
+  apply(ctx, Config(NO_ENGINE_CFG))
+  const route = ctx.routes.find((r) => r.path === '/go-sensei/review')
+
+  const r = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent(fixture('real-analysis.sgf')))
+  assert.equal(r.status, 200, JSON.stringify(r.body).slice(0, 200))
+  const ai = r.body.data.ai
+  assert.equal(typeof ai, 'object', 'payload 应带 ai 逐手候选')
+  // 与列表同口径：第 21 手（黑 F14 大恶手）的首选正是 F16、99.9%（落子者视角），
+  // 且带上它的变化线 —— 盘上要画的是**首选之后的后续几手**，所以 line 必须跟着走
+  assert.deepEqual(ai['21'][0], { label: 'F16', winratePct: 99.9, line: 'F16 N17 Q5 R14 R15' })
+  assert.equal(ai['21'][0].line.split(' ')[0], ai['21'][0].label,
+    'line 的第一项是该候选自己，后续才是变化图（面板据此 slice(1)）')
+  assert.equal(ai['1'], undefined, '第 1 手没有上一手节点，不该有候选')
+  assert.ok(ai['2'], '第 2 手应能看到第 1 手节点给的候选')
+  assert.ok(Object.keys(ai).length > r.body.data.candidates.length,
+    `有候选的手应多于问题手列表：${Object.keys(ai).length} vs ${r.body.data.candidates.length}`)
+  // 只带标签、胜率与变化线：整块分析数据不推给浏览器
+  for (const list of Object.values(ai)) {
+    assert.ok(list.length <= 3, '每手最多 3 个候选')
+    for (const p of list) assert.deepEqual(Object.keys(p).sort(), ['label', 'line', 'winratePct'])
+  }
+  // 问题手列表里的候选同样要带变化线（盘上画的是它）
+  const c21 = r.body.data.candidates.find((c) => c.moveNumber === 21)
+  assert.ok(c21, '第 21 手应在问题手列表里')
+  assert.equal(c21.pv[0].line, 'F16 N17 Q5 R14 R15', '列表候选也要带变化线')
+})
+
+test('client: 讲解点（不是问题手）也标出 AI 首选与变化图', async () => {
+  const { registered, react } = loadClient()
+  const gamePath = fixture('real-analysis.sgf')
+  const board = {
+    size: 19,
+    moves: [{ c: 'B', x: 3, y: 3 }, { c: 'W', x: 15, y: 15 }, { c: 'B', x: 4, y: 4 }],
+    setup: { black: [], white: [] },
+  }
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      ok: true,
+      data: {
+        path: gamePath, mode: 'analysis', level: '18K', moveCount: 3, variations: 0,
+        // 关键：这一手**不在**问题手列表里，只在 ai 里 —— 以前盘上是空白的。
+        // line = 变化线，第一项是首选自己，后续几手才是盘上要画的蓝点。
+        candidates: [],
+        board,
+        comments: { 3: '这手是全局要点，先占住这里。' },
+        ai: { 3: [
+          { label: 'Q16', winratePct: 56.3, line: 'Q16 D4 R6 C10' },
+          // 第 2、3 个候选只该出现在列表说明里，绝不上盘（用户 2026-09-13 明确）
+          { label: 'R14', winratePct: 45.1, line: 'R14 D4' },
+          { label: 'C6', winratePct: 44.9, line: 'C6 D4' },
+        ] },
+      },
+    }),
+  })
+
+  const props = { inputActions: { setDraft() {} } }
+  react.reset()
+  let tree = registered[0].component(props)
+  walk(tree).find((n) => n.type === 'button' && texts([n]).includes('展开')).props.onClick()
+  react.reset()
+  tree = registered[0].component(props)
+  walk(tree).find((n) => n.type === 'input').props.onChange({ target: { value: gamePath } })
+  react.reset()
+  tree = registered[0].component(props)
+  walk(tree).find((n) => n.type === 'button' && texts([n]).includes('读取问题手')).props.onClick()
+  await new Promise((r) => setTimeout(r, 30))
+  react.reset()
+  tree = registered[0].component(props)
+
+  const nodes = walk(tree)
+  const boardSvg = nodes.find((n) => n.type === 'svg' && String(n.props.className || '').includes('dgs-board'))
+  assert.ok(boardSvg, '应画出棋盘')
+  const inBoard = walk(boardSvg)
+  const best = inBoard.find((n) => n.props.key === 'best')
+  assert.ok(best && best.props.fill === 'rgba(0, 255, 255, 0.5)', '讲解点也要画出 AI 首选青圆')
+  assert.equal(best.props.cx, 8 + 15 * (84 / 18))
+  assert.equal(best.props.cy, 8 + 3 * (84 / 18))
+  assert.ok(inBoard.some((n) => n.props.key === 'bestring' && n.props.stroke === '#0000ff'), '首选点带蓝圈')
+  const hint = inBoard.find((n) => n.type === 'rect' && n.props.fill === '#ffc800')
+  assert.ok(hint, '首选点旁应有橙底信息条')
+
+  // 蓝点 ＝ **首选之后的后续几手**（变化线 D4 → R6 → C10），不是第 2、3 个候选点
+  const step = 84 / 18
+  const dots = inBoard.filter((n) => /^pv\d+$/.test(String(n.props.key || '')))
+  assert.equal(dots.length, 3, `盘上应只有变化线的 3 个蓝点（实际 ${dots.map((n) => n.props.key).join(',')}）`)
+  assert.deepEqual(dots.map((n) => n.props.cx), [8 + 3 * step, 8 + 16 * step, 8 + 2 * step], 'D4 → R6 → C10')
+  assert.deepEqual(dots.map((n) => n.props.cy), [8 + 15 * step, 8 + 13 * step, 8 + 9 * step])
+  assert.deepEqual(
+    inBoard.filter((n) => /^pvt\d+$/.test(String(n.props.key || ''))).map((n) => n.children.join('')),
+    ['2', '3', '4'], '序号从 2 起：变化里的第 2、3、4 手')
+  // 候选点不上盘：第 2 个候选 R14 在 (16,5)、第 3 个 C6 在 (2,13)，盘上都不该有点
+  assert.ok(!inBoard.some((n) => n.props.cx === 8 + 16 * step && n.props.cy === 8 + 5 * step),
+    '第 2 个候选点不该画到盘上')
+  assert.ok(!inBoard.some((n) => n.props.cx === 8 + 2 * step && n.props.cy === 8 + 13 * step),
+    '第 3 个候选点不该画到盘上')
+
+  const all = texts(nodes).join('|')
+  assert.ok(all.includes('Q16'), `信息条与盘下都要念出首选点：${all.slice(0, 200)}`)
+  assert.ok(all.includes('AI 首选 Q16（胜率 56.3%）'), all.slice(0, 300))
+  assert.ok(all.includes('后续：D4 → R6 → C10'), `盘下要念出变化线：${all.slice(0, 400)}`)
+  assert.ok(all.includes('本手有讲解'), '讲解点还应提示本手有讲解')
+  // 讲解小方点与 AI 标注并存（两类记号互不吞掉对方）
+  assert.equal(inBoard.filter((n) => n.type === 'rect' && n.props.fill === '#7c8cff').length, 1)
+
+  // 画序：AI 首选圆盘要画在讲解小方点**之前**（在下面）。
+  // 每一手都会画首选点，而它常常正落在刚下的那一手上；画在后面会给小方点
+  // 压一层半透明青色 —— 用户最关心的"这手有讲解"反而糊了。
+  const bestIdx = inBoard.findIndex((n) => n.type === 'circle' && n.props.fill === 'rgba(0, 255, 255, 0.5)')
+  const noteIdx = inBoard.findIndex((n) => n.type === 'rect' && n.props.fill === '#7c8cff')
+  const lastIdx = inBoard.findIndex((n) => n.type === 'circle' && n.props.fill === '#f3f4f6')
+  assert.ok(bestIdx >= 0 && noteIdx >= 0 && lastIdx >= 0, '三类记号都应在盘上')
+  assert.ok(bestIdx < noteIdx && bestIdx < lastIdx, 'AI 圆盘应画在小记号之下')
+
+  // 图例开关照旧管住这一层：关掉后盘上与文字一起消失（不留下"漏画了"的错觉）
+  const chip = walk(tree).find((n) => n.type === 'button'
+    && String(n.props.className || '').includes('dgs-keyitem')
+    && texts(walk(n)).join('|').includes('AI 首选 / 变化图'))
+  assert.ok(chip, '图例里应有 AI 首选 / 变化图 开关')
+  chip.props.onClick()
+  react.reset()
+  tree = registered[0].component(props)
+  const after = walk(tree).find((n) => n.type === 'svg' && String(n.props.className || '').includes('dgs-board'))
+  const afterNodes = walk(after)
+  assert.ok(!afterNodes.some((n) => n.type === 'circle' && n.props.fill === 'rgba(0, 255, 255, 0.5)'),
+    '关掉这一层后不再画首选点')
+  assert.ok(!texts(walk(tree)).join('|').includes('AI 首选 Q16'), '说明文字也一起消失')
+  assert.equal(afterNodes.filter((n) => n.type === 'rect' && n.props.fill === '#7c8cff').length, 1,
+    '讲解小方点不受影响')
 })
 
 test('client: 面板显示当前手的讲解注释，并在列表里标出「有讲解」', async () => {

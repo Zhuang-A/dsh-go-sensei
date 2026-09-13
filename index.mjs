@@ -8,7 +8,7 @@ import Schema from '@deepseek-ai/schemastery'
 import { basename } from 'node:path'
 import { registerGoTools, autoComputeIfNeeded } from './src/tools.js'
 import { ReviewCache } from './src/cache.js'
-import { RANKS, reviewGame, inferLevel } from './src/review.js'
+import { RANKS, reviewGame, inferLevel, aiCandidatesByMove } from './src/review.js'
 import { parseGame, decodeBuffer, coordLabel } from './src/sgf.js'
 import { senseiPathFor } from './src/derived.js'
 
@@ -78,6 +78,42 @@ const TOOL_GUIDANCE = `围棋复盘工具（DeepGo Sensei）：go_parse_sgf 读�
 /** 面板一次最多返回的问题手数（数据裁剪 + 渲染上限一起生效）。 */
 const MAX_PANEL_CANDIDATES = 20
 
+/** 面板一次最多带多少手的逐手 AI 候选（正常一局 ≤ 400 手，防御性上限）。 */
+const MAX_PANEL_AI_MOVES = 400
+
+/**
+ * 逐手「AI 首选与变化图」：手数 -> 候选点（≤3 个，只留标签、胜率与变化线）。
+ *
+ * 为什么要单独带一份：`candidates` 只含**超阈值的问题手**，而讲解点未必是问题手
+ * ——老师也会在好手、关键处写讲解。只靠 candidates 的话，翻到那些手时盘上就没有
+ * 首选点与变化图（2026-09-13 用户实报：「对于讲解点也需要标注 AI 首选和变化图」）。
+ *
+ * 口径与列表里的候选同源（都取上一手节点，见 src/review.js 的 aiCandidatesByMove），
+ * 所以同一手在列表里与盘上给出的首选点永远一致。
+ *
+ * @param {object} game parseGame 的返回值
+ * @param {object} cfg 已校验的插件配置
+ * @returns {Record<string, Array<{label: string, winratePct: number|null, line: string}>>}
+ */
+function compactAi(game, cfg) {
+  const byMove = aiCandidatesByMove(game, {
+    pvDepth: cfg.pvDepth,
+    maxCandidates: 3,
+    limit: MAX_PANEL_AI_MOVES,
+  })
+  const out = {}
+  for (const [key, list] of Object.entries(byMove)) {
+    out[key] = list.map((p) => ({
+      label: p.label ?? '',
+      winratePct: p.winratePct ?? null,
+      // 变化线（首选之后的后续几手）：'F16 N17 Q5 R14' —— **第一个是该候选自己**，
+      // 面板从第二个开始画。缺了它盘上就只剩一个光秃秃的首选点。
+      line: typeof p.pv === 'string' ? p.pv : '',
+    }))
+  }
+  return out
+}
+
 /** 裁剪为面板需要的最小字段，避免把整个 review 对象推给浏览器。 */
 function compactForPanel(candidate) {
   return {
@@ -93,6 +129,9 @@ function compactForPanel(candidate) {
     pv: (candidate.pv ?? []).slice(0, 3).map((p) => ({
       label: p.label ?? '',
       winratePct: p.winratePct ?? null,
+      // 该候选的变化线（'F16 N17 Q5 R14'，第一个是该候选自己）：盘上要画的是
+      // **首选之后的后续几手**，不是"第 2、3 个候选点"（用户 2026-09-13 明确）。
+      line: typeof p.pv === 'string' ? p.pv : '',
     })),
   }
 }
@@ -447,6 +486,8 @@ function registerPanelRoute(ctx, cfg) {
               variations: game.stats.variations,
               candidates: review.candidates.map(compactForPanel),
               board: compactBoard(game),
+              // 逐手「AI 首选与变化图」：问题手列表之外的**讲解点**也要能在盘上标出来
+              ai: compactAi(game, cfg),
               // 已写回棋谱的讲解：面板/整页/右侧栏都靠它显示"这一手怎么讲的"
               comments: compactComments(game),
               // 棋盘表头要显示"谁跟谁下、结果如何"，这些是讲解时最常用的一句话背景

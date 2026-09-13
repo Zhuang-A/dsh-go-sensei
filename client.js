@@ -392,6 +392,38 @@ window.__ModuleLoader__.load({
         }
       }
 
+      // 变化图（PV）：首选点 = 青色实心圆 + 蓝圈；后续几手 = 蓝点 + 序号。
+      //
+      // 位置有讲究：AI 标注要画在**讲解小方点 / 最后一手圆点 / 问题手色点之前**。
+      // 自 2026-09-13 起每一手（含讲解点）都会画首选点，青色半透明圆盘常常正落在
+      // 刚下的那一手上 —— 画在后面会把用户最关心的那几个小记号（"这手有讲解"
+      // "最后一手"）压上一层青色。记号小而实、圆盘大而淡，让小的在上面才对。
+      var pv = opts.showHint === false || !Array.isArray(opts.pv) ? [] : opts.pv
+      pv.forEach(function (p, index) {
+        if (p === null || p === undefined) return
+        if (index === 0) {
+          kids.push(React.createElement('circle', {
+            key: 'best', cx: pos(p.x), cy: pos(p.y), r: radius + 0.2, fill: BEST_FILL,
+            pointerEvents: 'none',
+          }))
+          kids.push(React.createElement('circle', {
+            key: 'bestring', cx: pos(p.x), cy: pos(p.y), r: radius + 0.6, fill: 'none',
+            stroke: BEST_RING, strokeWidth: 0.45, pointerEvents: 'none',
+          }))
+        } else if (grid[p.y * size + p.x] === 0) {
+          // 变化图的手如果落在实战已占的点上（那条变化与当前局面无关），不画——
+          // 画上去会像是把子叠在子上，反而误导
+          kids.push(React.createElement('circle', {
+            key: 'pv' + index, cx: pos(p.x), cy: pos(p.y), r: radius * 0.58, fill: PV_BLUE,
+            pointerEvents: 'none',
+          }))
+          kids.push(React.createElement('text', {
+            key: 'pvt' + index, x: pos(p.x), y: pos(p.y) + 0.85, fontSize: 2.3, fill: '#ffffff',
+            textAnchor: 'middle', pointerEvents: 'none',
+          }, String(index + 1)))
+        }
+      })
+
       // 已写回的讲解：有讲解的手在棋子左上角点一个小方点（与 Lizzieyzy 的
       // 注释节点标记同一语义），学生一眼看出"哪几手有老师的话"。
       // 两条规则：① 可在图例里关掉（showNote=false 时整类不画）；
@@ -440,32 +472,7 @@ window.__ModuleLoader__.load({
         }))
       }
 
-      // 变化图（PV）：首选点 = 青色实心圆 + 蓝圈；后续几手 = 蓝点 + 序号
-      var pv = opts.showHint === false || !Array.isArray(opts.pv) ? [] : opts.pv
-      pv.forEach(function (p, index) {
-        if (p === null || p === undefined) return
-        if (index === 0) {
-          kids.push(React.createElement('circle', {
-            key: 'best', cx: pos(p.x), cy: pos(p.y), r: radius + 0.2, fill: BEST_FILL,
-            pointerEvents: 'none',
-          }))
-          kids.push(React.createElement('circle', {
-            key: 'bestring', cx: pos(p.x), cy: pos(p.y), r: radius + 0.6, fill: 'none',
-            stroke: BEST_RING, strokeWidth: 0.45, pointerEvents: 'none',
-          }))
-        } else if (grid[p.y * size + p.x] === 0) {
-          // 变化图的手如果落在实战已占的点上（那条变化与当前局面无关），不画——
-          // 画上去会像是把子叠在子上，反而误导
-          kids.push(React.createElement('circle', {
-            key: 'pv' + index, cx: pos(p.x), cy: pos(p.y), r: radius * 0.58, fill: PV_BLUE,
-            pointerEvents: 'none',
-          }))
-          kids.push(React.createElement('text', {
-            key: 'pvt' + index, x: pos(p.x), y: pos(p.y) + 0.85, fontSize: 2.3, fill: '#ffffff',
-            textAnchor: 'middle', pointerEvents: 'none',
-          }, String(index + 1)))
-        }
-      })
+      // 变化图（PV）与首选点在棋子之后、各类小记号之前画（见上面的说明）
 
       // 首选点的胜率：橙底黑字（Lizzieyzy drawStringForOrder 的信息条样式）。
       // pv[0] 可能解析失败（候选标签不是坐标，比如 'pass' 或空字符串）——
@@ -574,6 +581,82 @@ window.__ModuleLoader__.load({
       }
       out.sort(function (a, b) { return a - b })
       return out
+    }
+
+    /**
+     * 当前这一手的 AI 候选（首选 + 变化图）。
+     *
+     * 两条来源，顺序不能反：
+     *   ① 问题手列表里那一行的候选（同一个口径，列表与盘上必然一致）；
+     *   ② 宿主按手数给的**逐手**候选（payload.ai）—— 让讲解点（未必是问题手，
+     *      老师也会在好手、关键处写讲解）在盘上同样能看到首选点与变化图。
+     *
+     * @returns {Array<{label: string, winratePct: number|null}>} 无数据时为空数组
+     */
+    function aiCandidatesAt(data, problem, moveNumber) {
+      if (problem !== null && problem !== undefined
+        && Array.isArray(problem.pv) && problem.pv.length > 0) {
+        return problem.pv
+      }
+      var map = data && data.ai ? data.ai : null
+      var list = map === null ? null : map[String(moveNumber)]
+      return Array.isArray(list) ? list : []
+    }
+
+    /** 「◌ AI 首选 X（胜率 Y%）」——三处视图共用同一句。 */
+    function aiHintText(list) {
+      var best = Array.isArray(list) && list.length > 0 ? list[0] : null
+      if (best === null || best === undefined || !best.label) return ''
+      return '◌ AI 首选 ' + String(best.label)
+        + (best.winratePct == null ? '' : '（胜率 ' + String(best.winratePct) + '%）')
+    }
+
+    /** 首选之后最多画几手变化图（数据侧由 pvDepth 截断，这里再兜一道）。 */
+    var MAX_PV_DOTS = 5
+
+    /**
+     * 盘上要画的 AI 线：`[首选点, 变化第 2 手, 第 3 手…]`。
+     *
+     * 画的是**首选之后的后续几手**（用户 2026-09-13 明确：「不需要候选点，需要首选
+     * 之后的后续几手」），不是第 2、3 个候选点。数据来自候选的 `line`
+     * （形如 'F16 N17 Q5 R14'，**第一个就是该候选自己**，所以从第二个开始取）。
+     *
+     * 首选点解析不出来时整条线都不画：那时第一个点会被当成首选画成青圆，等于撒谎。
+     *
+     * @param {Array<object>} aiList AI 候选（第 0 项＝首选）
+     * @param {number} size 棋盘路数
+     * @returns {Array<{x: number, y: number}>} 空数组表示没有可画的点
+     */
+    function aiLinePoints(aiList, size) {
+      var best = Array.isArray(aiList) && aiList.length > 0 ? aiList[0] : null
+      if (best === null || best === undefined) return []
+      var head = parsePointLabel(best.label, size)
+      if (head === null) return []
+      var out = [head]
+      var tokens = String(best.line == null ? '' : best.line).split(/\s+/)
+      for (var i = 1; i < tokens.length && out.length <= MAX_PV_DOTS; i++) {
+        if (tokens[i] === '') continue
+        var pt = parsePointLabel(tokens[i], size)
+        if (pt !== null) out.push(pt)
+      }
+      return out
+    }
+
+    /** 变化线的文字（「改下 X 之后：N17 → Q5 → …」），三处视图共用。 */
+    function aiLineText(list) {
+      var best = Array.isArray(list) && list.length > 0 ? list[0] : null
+      if (best === null || best === undefined) return ''
+      var tokens = String(best.line == null ? '' : best.line).split(/\s+/).filter(function (t) { return t !== '' })
+      return tokens.slice(1).join(' → ')
+    }
+
+    /**
+     * 盘下那句 AI 说明。图例里把「AI 首选 / 变化图」关掉时返回空串 ——
+     * 盘上已经没有那个记号了，文字留着只会让人以为漏画了。
+     */
+    function aiNoteText(list) {
+      if (senseiStore.showHint === false) return ''
+      return aiHintText(list)
     }
 
     /**
@@ -745,7 +828,7 @@ window.__ModuleLoader__.load({
       { key: 'showNote', kind: 'square', color: '#7c8cff', label: '有讲解',
         hint: '棋谱写回注释的手（左上角小方点），只标已经下到的' },
       { key: 'showHint', kind: 'ring', color: BEST_RING, label: 'AI 首选 / 变化图',
-        hint: '当前这一手改下哪里：青圆蓝圈＝首选，旁边橙底数字＝它的胜率，蓝点带序号＝后续几手' },
+        hint: '每一手（含讲解点）改下哪里：青圆蓝圈＝首选，橙底数字＝它的胜率，蓝点带序号＝首选之后的后续几手' },
     ]
 
     function markerKeyRow() {
@@ -835,10 +918,11 @@ window.__ModuleLoader__.load({
       for (var pi = 0; pi < list.length; pi++) {
         if (list[pi].moveNumber === cur) { problem = list[pi]; break }
       }
-      var hint = problem && problem.pv && problem.pv[0] ? problem.pv[0] : null
-      var pvPoints = board === null || problem === null || !Array.isArray(problem.pv)
-        ? []
-        : problem.pv.slice(0, 3).map(function (p) { return parsePointLabel(p && p.label, board.size) })
+      // AI 首选与变化图：问题手候选优先，其次用宿主给的逐手候选 ——
+      // 盘上画的是**首选之后的后续几手**（不是第 2、3 个候选点）。
+      var aiList = aiCandidatesAt(data, problem, cur)
+      var hint = aiList.length > 0 ? aiList[0] : null
+      var pvPoints = board === null ? [] : aiLinePoints(aiList, board.size)
       var problemMarks = []
       if (board !== null) {
         for (var mi = 0; mi < list.length; mi++) {
@@ -1047,9 +1131,12 @@ window.__ModuleLoader__.load({
             React.createElement('div', { className: 'dgs-note' },
               problem !== null
                 ? '○ 实战这一手是问题手　◌ AI 首选（青圆蓝圈）　蓝点＝变化图后续'
-                : problemMarks.length > 0
-                  ? '● 盘上色点＝问题手（紫＞红＞橙）：点右边任意一行跳过去'
-                  : '未发现明显问题手'),
+                : aiNoteText(aiList) !== ''
+                  // 不是问题手但有 AI 候选（讲解点最常落在这里）：把首选与后续念出来
+                  ? aiNoteText(aiList) + (aiLineText(aiList) === '' ? '' : '　后续：' + aiLineText(aiList))
+                  : problemMarks.length > 0
+                    ? '● 盘上色点＝问题手（紫＞红＞橙）：点右边任意一行跳过去'
+                    : '未发现明显问题手'),
             markerKeyRow(),
             // 已写回棋谱的讲解：翻到哪一手读到哪一手
             commentBox(commentOf(data, cur)),
@@ -1345,11 +1432,11 @@ window.__ModuleLoader__.load({
           if (list[pi].moveNumber === cur) { problem = list[pi]; break }
         }
       }
-      var hint = problem && problem.pv && problem.pv[0] ? problem.pv[0] : null
-      // 变化图前几手：与 Lizzieyzy 一样在盘上按序标出（首选 = 青圆蓝圈，后续 = 蓝点序号）
-      var pvPoints = board === null || problem === null || !Array.isArray(problem.pv)
-        ? []
-        : problem.pv.slice(0, 3).map(function (p) { return parsePointLabel(p && p.label, board.size) })
+      // AI 首选与变化图：问题手候选优先，其次用宿主给的逐手候选（讲解点也能标）；
+      // 画的是首选**之后的后续几手**（变化线），不是第 2、3 个候选点。
+      var aiList = aiCandidatesAt(data, problem, cur)
+      var hint = aiList.length > 0 ? aiList[0] : null
+      var pvPoints = board === null ? [] : aiLinePoints(aiList, board.size)
       var problemPoint = problem !== null && curMove !== null && curMove.x >= 0
         ? { x: curMove.x, y: curMove.y, key: problem.labelKey, label: problem.label }
         : null
@@ -1525,12 +1612,16 @@ window.__ModuleLoader__.load({
                           '　',
                           React.createElement('span', { className: 'dgs-rec' }, '◌ AI 首选 ' + String(hint.label)),
                           hint.winratePct == null ? '' : '（胜率 ' + String(hint.winratePct) + '%）',
-                          pvPoints.length > 1
-                            ? ' → ' + problem.pv.slice(1).map(function (p) { return String(p && p.label ? p.label : '') })
-                                .filter(function (t) { return t !== ''; }).join(', ')
-                            : '')
+                          // 变化图＝首选之后的后续几手（不再是"第 2、3 个候选"）
+                          aiLineText(aiList) === '' ? '' : '　后续：' + aiLineText(aiList))
                       : null)
-                : problemMarks.length > 0
+                : aiNoteText(aiList) !== ''
+                  // 讲解点（未必是问题手）：同样把 AI 首选与后续变化念出来
+                  ? React.createElement('span', null,
+                      React.createElement('span', { className: 'dgs-rec' }, aiNoteText(aiList)),
+                      aiLineText(aiList) === '' ? '' : '　后续：' + aiLineText(aiList),
+                      commentOf(data, cur) !== '' ? '　本手有讲解（见下方）' : '')
+                  : problemMarks.length > 0
                   // 没停在问题手上时，说明盘上那些小色点是什么（否则用户不知道能看什么）
                   ? React.createElement('span', null,
                       React.createElement('span', { className: 'dgs-prob' }, '● 盘上色点＝问题手'),
@@ -1769,10 +1860,11 @@ window.__ModuleLoader__.load({
       for (var i = 0; i < list.length; i++) {
         if (list[i].moveNumber === cur) { problem = list[i]; break }
       }
-      var hint = problem && problem.pv && problem.pv[0] ? problem.pv[0] : null
-      var pvPoints = board === null || problem === null || !Array.isArray(problem.pv)
-        ? []
-        : problem.pv.slice(0, 3).map(function (p) { return parsePointLabel(p && p.label, board.size) })
+      // AI 首选与变化图：问题手候选优先，其次用宿主给的逐手候选（讲解点也能标）；
+      // 盘上画首选之后的后续几手，不是第 2、3 个候选点。
+      var aiList = aiCandidatesAt(data, problem, cur)
+      var hint = aiList.length > 0 ? aiList[0] : null
+      var pvPoints = board === null ? [] : aiLinePoints(aiList, board.size)
       var problemPoint = problem !== null && curMove !== null && curMove.x >= 0
         ? { x: curMove.x, y: curMove.y, key: problem.labelKey, label: problem.label }
         : null
@@ -1881,14 +1973,19 @@ window.__ModuleLoader__.load({
           }))
         inner.push(ctl)
         kids.push(React.createElement('div', { className: 'dgs-doc-inner', key: 'inner' }, inner))
-        if (problem !== null) {
+        // AI 首选与变化图：问题手要说，讲解点（未必是问题手）同样要说
+        var aiText = aiNoteText(aiList)
+        if (problem !== null || aiText !== '') {
           kids.push(React.createElement('div', { className: 'dgs-note', key: 'n' },
-            React.createElement('span', { className: 'dgs-prob' },
-              '○ 实战 ' + String(problem.moveNumber) + ' 手 ' + String(problem.coordLabel || '')),
-            hint && hint.label
-              ? React.createElement('span', { className: 'dgs-rec' }, '　◌ AI 首选 ' + String(hint.label)
-                  + (hint.winratePct == null ? '' : '（胜率 ' + String(hint.winratePct) + '%）'))
-              : null))
+            problem !== null
+              ? React.createElement('span', { className: 'dgs-prob' },
+                  '○ 实战 ' + String(problem.moveNumber) + ' 手 ' + String(problem.coordLabel || ''))
+              : null,
+            aiText === ''
+              ? null
+              : React.createElement('span', { className: 'dgs-rec' },
+                  (problem !== null ? '　' : '') + aiText
+                  + (aiLineText(aiList) === '' ? '' : '　后续：' + aiLineText(aiList)))))
         }
         // 盘上标注的图例 + 开关（与 dock / 整页共用同一条）
         kids.push(React.createElement('div', { key: 'markkey' }, markerKeyRow()))

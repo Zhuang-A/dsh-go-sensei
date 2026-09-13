@@ -110,7 +110,7 @@ export function reviewGame(game, opts = {}) {
     // （LZ 约定：节点候选的 winrate 记该节点行棋方）。
     // 旧实现取本手节点，得到的是"这手之后的对手应手"，与工具描述（改下 X）不符。
     // 对拍见 review-check/_compare-lz-kata.mjs。
-    const options = prev?.analysis ?? {}
+    // 同一条口径也供面板标注「讲解点」的首选与变化图使用（见 aiCandidatesAtMove）。
 
     candidates.push({
       moveNumber: move.number,
@@ -124,7 +124,7 @@ export function reviewGame(game, opts = {}) {
       winrateAfter: wAfter !== undefined ? round1(wAfter * 100) : undefined,
       scoreBefore: sBefore,
       scoreAfter: sAfter,
-      pv: trimCandidates(options.lz?.candidates ?? options.candidates, pvDepth, maxPvCandidates, game.info?.size ?? 19),
+      pv: candidatesFromPrev(prev, pvDepth, maxPvCandidates, game.info?.size ?? 19),
       engine: analysis.lz?.engine ?? analysis.commentAnalysis?.engine,
       playouts: analysis.lz?.playouts ?? analysis.commentAnalysis?.playouts,
       comment: typeof analysis.comment === 'string' ? analysis.comment.slice(0, 300) : undefined,
@@ -150,6 +150,72 @@ export function reviewGame(game, opts = {}) {
     players: game.info?.players,
   }
   return { mode, candidates: candidates.slice(0, maxCandidates), summary }
+}
+
+/**
+ * 某一手的候选着法：取**上一手节点**的分析，再裁剪成统一形状。
+ *
+ * 口径的唯一出处就在这儿（reviewGame 与面板标注共用它）：
+ * 第 N 手节点记的是"落子后"局面，它的候选属于**对手**；只有第 N−1 手节点的
+ * 行棋方才是第 N 手的落子者，那里的候选才回答「第 N 手改下 X 会怎样」，
+ * 且胜率天然是落子者自己视角（LZ 约定）。
+ *
+ * @param {object|undefined} prev 上一手节点（无则返回 undefined）
+ * @returns {object[]|undefined} { coord, label, visits, winratePct, scoreMean, pv }
+ */
+function candidatesFromPrev(prev, depth, maxCandidates, size) {
+  const options = prev?.analysis ?? {}
+  return trimCandidates(options.lz?.candidates ?? options.candidates, depth, maxCandidates, size)
+}
+
+/**
+ * 某一手的「AI 首选与变化图」候选（1-based 手数）。
+ *
+ * 为什么单独导出：面板要在**讲解点**上也标出首选点与变化图，而讲解点未必是
+ * 问题手（老师也会在好手、关键处写讲解），问题手列表里根本没有它 —— 2026-09-13
+ * 用户实报的缺口（「对于讲解点也需要标注 AI 首选和变化图」）。
+ *
+ * 口径必须与 reviewGame 同源：否则同一手会在列表里给一个首选点、在盘上给另一个。
+ * 这类"两套管线漂移"在本项目已踩过一次（见 src/tools.js 的 autoComputeIfNeeded）。
+ *
+ * @param {object} game parseGame 的返回值
+ * @param {number} moveNumber 手数（1-based）
+ * @param {{ pvDepth?: number, maxCandidates?: number }} [opts]
+ * @returns {object[]|undefined} 与 reviewGame 候选同形的裁剪后候选；无数据时为 undefined
+ */
+export function aiCandidatesAtMove(game, moveNumber, opts = {}) {
+  const { pvDepth = 6, maxCandidates = 3 } = opts
+  const moves = game?.moves ?? []
+  const index = moves.findIndex((m) => m.number === moveNumber)
+  // index 0 = 第 1 手：它前面没有节点，无从谈"改下哪里"
+  if (index <= 0) return undefined
+  return candidatesFromPrev(moves[index - 1], pvDepth, maxCandidates, game?.info?.size ?? 19)
+}
+
+/**
+ * 逐手「AI 首选与变化图」：`{ 手数: 候选数组 }`，没有候选的手不占键。
+ *
+ * 面板靠它在**每一手**（含讲解点）都能画首选点与变化图；limit 是防御性上限，
+ * 免得异常棋谱把 payload 撑大（正常一局 ≤ 400 手）。
+ *
+ * @param {object} game parseGame 的返回值
+ * @param {{ pvDepth?: number, maxCandidates?: number, limit?: number }} [opts]
+ * @returns {Record<string, object[]>}
+ */
+export function aiCandidatesByMove(game, opts = {}) {
+  const { pvDepth = 6, maxCandidates = 3, limit = 400 } = opts
+  const moves = game?.moves ?? []
+  const size = game?.info?.size ?? 19
+  const out = {}
+  let count = 0
+  // 从第 2 手起：第 1 手没有"上一手节点"
+  for (let i = 1; i < moves.length && count < limit; i++) {
+    const pv = candidatesFromPrev(moves[i - 1], pvDepth, maxCandidates, size)
+    if (pv === undefined || pv.length === 0) continue
+    out[String(moves[i].number)] = pv
+    count += 1
+  }
+  return out
 }
 
 /**

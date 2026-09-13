@@ -11,6 +11,8 @@ import {
   round1,
   normalizeRank,
   inferLevel,
+  aiCandidatesAtMove,
+  aiCandidatesByMove,
   RANKS,
 } from '../src/review.js'
 
@@ -152,6 +154,44 @@ test('reviewGame: 候选取上一手节点且为落子者视角（真实带分�
   const own = game.moves[20].analysis.lz.candidates[0]
   assert.equal(own.coord, 'F16')
   assert.equal(own.winratePer10000, 9894)
+})
+
+// 面板要在**讲解点**上也标出 AI 首选与变化图，而讲解点未必是问题手：
+// 逐手候选必须存在，且与 reviewGame 同一口径（取上一手节点）——
+// 否则同一手会在列表里给一个首选点、在盘上给另一个。
+test('aiCandidatesByMove: 逐手候选与 reviewGame 同源，且覆盖问题手之外的手', () => {
+  const game = loadGame('real-analysis.sgf')
+
+  // ① 与列表口径一致：第 21 手（问题手）两处给出的候选逐点相同
+  const m21 = reviewGame(game).candidates.find((c) => c.moveNumber === 21)
+  const ai21 = aiCandidatesAtMove(game, 21)
+  assert.deepEqual(ai21.map((p) => p.label), m21.pv.map((p) => p.label))
+  assert.equal(ai21[0].winratePct, 99.9, '候选胜率仍是落子者（黑）自己视角')
+  assert.deepEqual(Object.keys(ai21[0]).sort(),
+    ['coord', 'label', 'pv', 'scoreMean', 'visits', 'winratePct'])
+
+  // ② 第 1 手前面没有节点、越界手数没有节点：都不得凭空造候选
+  assert.equal(aiCandidatesAtMove(game, 1), undefined)
+  assert.equal(aiCandidatesAtMove(game, 9999), undefined)
+  assert.equal(aiCandidatesAtMove(parseGame('(;GM[1]FF[4]SZ[19])'), 1), undefined)
+
+  // ③ 逐手表：手数 -> 候选，没有候选的手不占键
+  const byMove = aiCandidatesByMove(game)
+  const keys = Object.keys(byMove).map(Number)
+  const problems = new Set(reviewGame(game, { maxCandidates: 999 }).candidates.map((c) => c.moveNumber))
+  assert.equal(byMove['1'], undefined, '第 1 手不占键')
+  assert.ok(keys.every((n) => n >= 2 && n <= game.moves.length), `手数越界：${keys.slice(0, 5)}`)
+  assert.ok(keys.length > problems.size,
+    `有候选的手应远多于问题手：${keys.length} vs ${problems.size}`)
+  assert.ok(keys.some((n) => !problems.has(n)),
+    '必须有不在问题手列表里的手 —— 讲解点正是靠这一份数据才有首选/变化图')
+  for (const n of keys) {
+    assert.ok(byMove[String(n)].length <= 3, `第 ${n} 手候选应裁剪到 ≤3`)
+    assert.equal(typeof byMove[String(n)][0].label, 'string')
+  }
+
+  // ④ limit 是防御性上限（异常棋谱不把 payload 撑大）
+  assert.equal(Object.keys(aiCandidatesByMove(game, { limit: 3 })).length, 3)
 })
 
 test('reviewGame: 让子棋谱（HA>0）theory 模式且信息完整', () => {
