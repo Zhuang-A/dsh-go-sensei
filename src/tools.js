@@ -247,7 +247,7 @@ function goReviewMoves(ctx, cfg, cache, policy) {
   return {
     name: 'go_review_moves',
     description:
-      '识别 SGF 棋谱中的问题手（胜率/目差落差超阈值的候选），返回按严重度排序的裁剪后列表（每手 ≤3 个 AI 候选点、PV 截断、数值 1 位小数、标签枚举：大恶手/失误/不精确）。无分析数据且引擎可用时自动用自带 KataGo 补算，并把逐手胜率/目差写回棋谱（WV[]/DM[]，analysisWritten 字段报告写回了多少手）——此后这份棋谱自带分析，面板与再次复盘都不必重算。完全无分析数据且引擎不可用时返回 theory 模式（纯棋理复盘）。同一局面重复复盘命中缓存。',
+      '识别 SGF 棋谱中的问题手（胜率/目差落差超阈值的候选），返回按严重度排序的裁剪后列表（每手 ≤3 个 AI 候选点、PV 截断、数值 1 位小数、标签枚举：大恶手/失误/不精确）。无分析数据且引擎可用时自动用自带 KataGo 补算，并把逐手胜率/目差与 AI 首选/变化图写回棋谱（WV[]/DM[]/LZ[]，analysisWritten 字段报告写回了多少手）——此后这份棋谱自带分析，面板与再次复盘都不必重算（首选与变化图也读得回来）。完全无分析数据且引擎不可用时返回 theory 模式（纯棋理复盘）。同一局面重复复盘命中缓存。',
     parameters: {
       type: 'object',
       properties: {
@@ -276,7 +276,7 @@ function goReviewMoves(ctx, cfg, cache, policy) {
           // 无分析数据时自动补算的结果（或失败原因）；有分析数据/未启用引擎时该键省略。
           // 注意：dsh-tools 只接受单一类型字符串，禁止写成 type: ['object', 'null']。
           autoEngine: { type: 'object' },
-          // 本次补算写回棋谱的逐手分析（WV/DM）：{ moves, missing }
+          // 本次补算写回棋谱的逐手分析（WV/DM + LZ 首选/变化图）：{ moves, missing }
           analysisWritten: { type: 'object' },
         },
         required: ['path', 'mode', 'level', 'cached', 'cacheKey', 'candidates', 'summary'],
@@ -325,7 +325,7 @@ function goReviewMoves(ctx, cfg, cache, policy) {
       // 不设 autoEngine 时保持 undefined，由 compact 剔除该键（null 不会被剔除，
       // 且与 output schema 声明的单一 object 类型不符）。
       const { autoEngine } = await autoComputeIfNeeded(ctx, cfg, game, { from, to, signal: exec.signal })
-      // 这次真的跑了引擎 → 把逐手分析写回棋谱，文件从此自带胜率/目差，
+      // 这次真的跑了引擎 → 把逐手分析写回棋谱，文件从此自带胜率/目差与首选/变化图，
       // 下次打开（面板或工具）都不必再算。缓存命中/本就有分析时不写。
       const analysisWritten = autoEngine !== undefined && autoEngine.failed === undefined && autoEngine.cached !== true
         ? await writeAnalysisBack(ctx, exec, policy(exec), game).catch(() => undefined)
@@ -741,7 +741,7 @@ function goEngineAnalyze(ctx, cfg, cache, policy) {
   return {
     name: 'go_engine_analyze',
     description:
-      '用本地 KataGo 引擎对指定手数区间补算分析（供无分析数据的棋谱）。默认使用插件自带的 engine 目录（开箱即用，无需配置）；也可用配置 engineDir / kataGoPath 指向自己的引擎，kataGoModel 指定权重。输出与 go_review_moves 同构的候选列表。补算出的逐手胜率/目差会写回棋谱的 WV[]/DM[] 属性（analysisWritten 字段报告写回了多少手），此后这份棋谱自带分析，面板与工具再打开都不必重算。',
+      '用本地 KataGo 引擎对指定手数区间补算分析（供无分析数据的棋谱）。默认使用插件自带的 engine 目录（开箱即用，无需配置）；也可用配置 engineDir / kataGoPath 指向自己的引擎，kataGoModel 指定权重。输出与 go_review_moves 同构的候选列表。补算出的逐手胜率/目差与 AI 首选/变化图会写回棋谱的 WV[]/DM[]/LZ[] 属性（analysisWritten 字段报告写回了多少手），此后这份棋谱自带分析（含首选与变化图），面板与工具再打开都不必重算。对早先只写过胜率/目差的棋谱再跑一次，即可补上首选与变化图。',
     parameters: {
       type: 'object',
       properties: {
@@ -820,8 +820,13 @@ function goEngineAnalyze(ctx, cfg, cache, policy) {
           `${describeEngine(engine)} 补算 ${result.moves} 手（${result.seconds}s），建议对关键手用 go_review_moves 复核。`
           + (engine.warning !== '' ? ` ⚠ ${engine.warning}` : ''),
       }
-      // 补算即写回：把逐手胜率/目差写进棋谱（WV/DM），文件从此自带分析，
-      // 面板与工具下次打开都不必重算。失败只记原因，不影响本次返回。
+      // 写回的是**这次补算的结果**，所以必须先把引擎分析并回 game.moves。
+      // 漏掉这一步时 writeAnalysisBack 读到的还是"读盘时的旧分析"：对一份全新棋谱
+      // 等于什么都没写（entries 为空 → 直接返回），对一份只有 WV/DM 的旧棋谱则只是
+      // 原样重写一遍 —— 2026-09-13 的 LZ 写回端到端验证正是这样暴露出来的。
+      if (result.merge !== undefined) game.moves = result.merge.moves
+      // 补算即写回：把逐手胜率/目差与 AI 首选/变化图写进棋谱（WV/DM/LZ），
+      // 文件从此自带分析，面板与工具下次打开都不必重算。失败只记原因，不影响本次返回。
       const written = await writeAnalysisBack(ctx, exec, policy(exec), game)
         .then((r) => r ?? { moves: 0, missing: 0 })
         .catch((error) => ({ moves: 0, failed: String(error?.message ?? error) }))
@@ -829,7 +834,7 @@ function goEngineAnalyze(ctx, cfg, cache, policy) {
         ...value,
         analysisWritten: written,
         note: value.note + (written.moves > 0
-          ? ` 已把逐手胜率/目差写回棋谱（${written.moves} 手），下次打开无需重算。`
+          ? ` 已把逐手胜率/目差与 AI 首选/变化图写回棋谱（${written.moves} 手），下次打开无需重算。`
           : ''),
       }
     },
@@ -1046,7 +1051,11 @@ export async function autoComputeIfNeeded(ctx, cfg, game, opts = {}) {
 }
 
 /**
- * 把补算出来的逐手分析写回棋谱文件（KataGo 属性 `WV`/`DM`）。
+ * 把补算出来的逐手分析写回棋谱文件（KataGo 属性 `WV`/`DM`，以及候选着法 `LZ`）。
+ *
+ * `LZ` 是**AI 首选与变化图**的载体：它们只存在候选着法里，只写 `WV`/`DM` 的话文件下次
+ * 被打开时会被判为"已有分析"→ 不再补算，而候选取不到 → 面板上只剩问题手、没有首选点和
+ * 变化图（2026-09-13 用户实报）。写入格式见 sgf.js 的 serializeLz。
  *
  * 解决的真机问题：讲解已写回 `C[]` 注释、但文件里没有任何胜率数据，于是每次
  * 重新打开同一份棋谱都要再补算一次（实测 30~100 秒），别的打谱软件看到的也

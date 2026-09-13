@@ -22,7 +22,9 @@ import {
   injectComments,
   injectAnalysis,
   analysisEntriesOf,
+  serializeLz,
 } from '../src/sgf.js'
+import { reviewGame } from '../src/review.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const fixture = (name) => join(here, 'fixtures', name)
@@ -449,4 +451,139 @@ test('analysisEntriesOf: 两种来源（引擎 LZ 通道 / 棋谱 WV-DM 通道�
   assert.ok(Math.abs(kata[0].moverWinrate - 0.6) < 1e-9, 'WV 是白方视角，黑棋落子要取反')
   assert.ok(Math.abs(kata[1].moverWinrate - 0.4) < 1e-9)
   assert.ok(Math.abs(kata[1].moverScoreLead + 2.5) < 1e-9, 'DM 是黑方视角，白棋落子要取反')
+})
+
+// ---------------------------------------------------------------------------
+// 分析写回（LZ）：AI 首选与变化图必须能读回来
+//
+// 缺陷背景（2026-09-13 用户实报「产出的文件没有 AI 首选和变化图」）：写回只落
+// WV/DM，补算出来的候选着法（首选 + 变化图）只活在内存里；文件再被打开时
+// hasWinrateData() 已为真 → 不再补算，而候选只能来自节点上的 lz.candidates
+// → 首选/变化图永久丢失。以下用例锁住「写回 = 可读回」。
+// ---------------------------------------------------------------------------
+
+const CANDIDATES = [
+  { coord: 'Q16', visits: 167, winratePer10000: 572, prior: 4255, scoreMean: -6.75, pv: ['Q16', 'D4', 'R4'] },
+  { coord: 'D16', visits: 36, winratePer10000: 549, prior: 934, scoreMean: -6.95, pv: ['D16', 'C4'] },
+]
+
+test('injectAnalysis: LZ 写回后 AI 首选与变化图原样读回', () => {
+  const { text, written } = injectAnalysis(PLAIN, [{
+    moveNumber: 1,
+    moverWinrate: 0.943,
+    moverScoreLead: 6.7,
+    engine: 'KataGo',
+    playouts: '250',
+    stdev: 14.8,
+    candidates: CANDIDATES,
+  }])
+  assert.deepEqual(written, [1])
+  // 头部逐字段：引擎 落子者胜率% 计算量 对手视角领先 不确定度
+  assert.ok(text.includes('LZ[KataGo 94.3 250 -6.7 14.8\n'), text)
+  // WV/DM 仍要写（问题手识别靠它们；LZ 是"首选/变化图"的补充，不是替代）
+  assert.ok(text.includes('WV['), text)
+  assert.ok(text.includes('DM['), text)
+
+  const lz = parseGame(text).moves[0].analysis.lz
+  assert.equal(lz.engine, 'KataGo')
+  assert.equal(lz.winratePct, 94.3)
+  assert.equal(lz.playouts, '250')
+  assert.equal(lz.scoreLeadOpponent, -6.7)
+  assert.equal(lz.stdev, 14.8)
+  assert.equal(lz.candidates.length, 2)
+  assert.equal(lz.candidates[0].coord, 'Q16')
+  assert.equal(lz.candidates[0].visits, 167)
+  assert.equal(lz.candidates[0].winratePer10000, 572)
+  assert.deepEqual(lz.candidates[0].pv, ['Q16', 'D4', 'R4'], '变化图（PV）必须原样保留')
+  assert.equal(lz.candidates[1].coord, 'D16')
+})
+
+test('injectAnalysis: LZ 幂等；没有候选时不写 LZ', () => {
+  const entry = {
+    moveNumber: 1,
+    moverWinrate: 0.6,
+    moverScoreLead: 3.2,
+    engine: 'KataGo',
+    playouts: '100',
+    stdev: 10,
+    candidates: CANDIDATES,
+  }
+  const once = injectAnalysis(PLAIN, [entry]).text
+  const twice = injectAnalysis(once, [entry]).text
+  assert.equal((twice.match(/LZ\[/g) ?? []).length, 1, twice)
+  // 老行为（无补算候选，例如棋谱本来就带 WV/DM）不得凭空造出 LZ
+  const plainOnly = injectAnalysis(PLAIN, [{ moveNumber: 1, moverWinrate: 0.6, moverScoreLead: 3.2 }]).text
+  assert.equal((plainOnly.match(/LZ\[/g) ?? []).length, 0, plainOnly)
+})
+
+test('serializeLz: 缺候选/缺胜率不写，非法坐标与缺字段有兜底', () => {
+  assert.equal(serializeLz({ moverWinrate: 0.5, candidates: [] }), undefined)
+  assert.equal(serializeLz({ candidates: CANDIDATES }), undefined, '没有落子者胜率 → 头部不完整，不写')
+  const value = serializeLz({
+    moverWinrate: 0.5,
+    opponentLead: 1.25,
+    candidates: [
+      { coord: 'pass', pv: ['pass'] },
+      { coord: 'D4', visits: 12, pv: [] },
+    ],
+  })
+  assert.equal(value.split('\n').length, 2, value)
+  assert.ok(!value.includes('pass'), value)
+  assert.ok(value.startsWith('KataGo 50.0 12 1.3 0.0\n'), value)
+  assert.ok(value.includes('move D4 visits 12 winrate 0 prior 0 scoreMean 0.00 pv D4'), value)
+})
+
+test('analysisEntriesOf: 引擎通道带出候选（首选/变化图的数据源）', () => {
+  const game = {
+    moves: [{
+      number: 1,
+      color: 'B',
+      analysis: {
+        lz: {
+          engine: 'KataGo',
+          winratePct: 94.3,
+          playouts: '250',
+          scoreLeadOpponent: -6.7,
+          stdev: 14.8,
+          candidates: CANDIDATES,
+        },
+      },
+    }, {
+      number: 2,
+      color: 'W',
+      analysis: { lz: { winratePct: 40, scoreLeadOpponent: 2.5 } },
+    }],
+  }
+  const entries = analysisEntriesOf(game)
+  assert.equal(entries.length, 2)
+  assert.deepEqual(entries[0].candidates, CANDIDATES)
+  assert.equal(entries[0].engine, 'KataGo')
+  assert.equal(entries[0].playouts, '250')
+  assert.equal(entries[0].stdev, 14.8)
+  assert.ok(!('candidates' in entries[1]), '没有候选的一手不该带空数组（写回时会跳过 LZ）')
+})
+
+// 端到端（不碰引擎）：写回 → 重读 → 复盘。问题的实质是**重读时**候选还在不在。
+test('写回→重读：复盘能取到 AI 首选与变化图（改下 X 的答案）', () => {
+  const { text } = injectAnalysis(PLAIN, [
+    {
+      moveNumber: 1,
+      moverWinrate: 0.94,
+      moverScoreLead: 6.7,
+      engine: 'KataGo',
+      playouts: '250',
+      stdev: 14.8,
+      candidates: CANDIDATES,
+    },
+    // 第 2 手（白）胜率/目差双降 → 必被判为问题手
+    { moveNumber: 2, moverWinrate: 0.2, moverScoreLead: -12, engine: 'KataGo', playouts: '250', stdev: 14.8 },
+  ])
+  const game = parseGame(text)
+  const { mode, candidates } = reviewGame(game, { winrateThreshold: 0.03, scoreThreshold: 3 })
+  assert.equal(mode, 'analysis')
+  const m2 = candidates.find((c) => c.moveNumber === 2)
+  assert.ok(m2 !== undefined, '第 2 手应被判为问题手')
+  assert.ok(Array.isArray(m2.pv) && m2.pv.length > 0, '写回的候选必须能被复盘取到（否则面板没有首选/变化图）')
+  assert.equal(m2.pv[0].coord, 'Q16')
+  assert.equal(m2.pv[0].pv, 'Q16 D4 R4', '变化图以人类可读坐标串给出')
 })

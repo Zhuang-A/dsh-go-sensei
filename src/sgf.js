@@ -162,6 +162,97 @@ export function parseLz(value) {
   return out
 }
 
+/**
+ * 把一手棋的分析序列化成 `LZ` 属性原文 —— {@link parseLz} 的逆运算。
+ *
+ * 为什么要有它：写回棋谱原先只落 `WV`/`DM`（逐手胜率/目差），**AI 首选与变化图
+ * （候选着法 + PV）只活在内存里**。后果是文件重新打开时 `hasWinrateData()` 判为
+ * 「已有分析」→ 不再补算，而 reviewGame 的候选只能来自节点上的 `lz.candidates`
+ * → 首选点与变化图永久丢失（面板上的表现正是「有问题手，但没有首选/变化图」）。
+ * 写回 `LZ` 后，任何一次读取（面板、工具、第三方 GUI）都不必重算就能拿到它们。
+ *
+ * 格式与第三方 GUI 逐字段对齐（实测 Lizzieyzy 2.5.3，见 test/fixtures/real-analysis.sgf）：
+ *   头部行：`引擎 落子者胜率% 计算量 对手视角领先 不确定度`
+ *   候选行：`move <GTP坐标> visits N winrate <万分比> prior N scoreMean X pv <GTP…>`，
+ *           多个候选以 ` info ` 分隔（parseLz 依赖这两个分隔符与头部行）
+ * 两点必须守住，否则读不回来：
+ *   · 候选的 winrate / scoreMean 都是**该节点行棋方**（= 候选点自己一方）视角；
+ *   · `prior` 必须在（parseLz 的正则要求它存在），缺失时补 0。
+ *
+ * @param {object} entry
+ * @param {string} [entry.engine]
+ * @param {number} entry.moverWinrate 落子者视角胜率（0~1）
+ * @param {number|string} [entry.playouts] 计算量（整数或 3.9k 这类紧凑写法）
+ * @param {number} [entry.opponentLead] 对手（= 该节点行棋方）视角领先目数
+ * @param {number} [entry.stdev] 目差不确定度
+ * @param {Array<{coord: string, visits?: number, winratePer10000?: number, prior?: number,
+ *   scoreMean?: number, pv?: string[]}>} entry.candidates 候选着法（按优先度降序）
+ * @returns {string|undefined} 无候选/无胜率时返回 undefined（此时不写 LZ）
+ */
+export function serializeLz(entry) {
+  const raw = Array.isArray(entry?.candidates) ? entry.candidates : []
+  const winratePct = toFixedSafe(entry?.moverWinrate !== undefined ? Number(entry.moverWinrate) * 100 : undefined, 1)
+  if (raw.length === 0 || winratePct === undefined) return undefined
+
+  const GTP = /^[A-Za-z]\d{1,2}$/
+  const lines = []
+  let firstVisits
+  for (const c of raw) {
+    const coord = typeof c?.coord === 'string' ? c.coord : undefined
+    if (coord === undefined || !GTP.test(coord)) continue
+    const pv = (Array.isArray(c?.pv) ? c.pv : []).filter((p) => typeof p === 'string' && GTP.test(p))
+    if (firstVisits === undefined) firstVisits = toIntSafe(c?.visits)
+    lines.push(
+      `move ${coord}` +
+      ` visits ${toIntSafe(c?.visits)}` +
+      ` winrate ${toIntSafe(c?.winratePer10000)}` +
+      ` prior ${toIntSafe(c?.prior)}` +
+      ` scoreMean ${toFixedSafe(c?.scoreMean, 2, 0)}` +
+      ` pv ${(pv.length > 0 ? pv : [coord]).join(' ')}`,
+    )
+  }
+  if (lines.length === 0) return undefined
+
+  const engine = typeof entry?.engine === 'string' && entry.engine.trim() !== '' ? entry.engine.trim() : 'KataGo'
+  const playouts = compactNumber(entry?.playouts) ?? String(firstVisits ?? 0)
+  const head = [
+    engine,
+    winratePct,
+    playouts,
+    toFixedSafe(entry?.opponentLead, 1, 0),
+    // 不确定度必须非负：parseLz 的头部正则不接受符号（`([\d.]+)`）
+    toFixedSafe(Math.abs(Number(entry?.stdev ?? 0)), 1, 0),
+  ].join(' ')
+  // 头部行必须在最前：parseLz 从第 2 行起找候选，缺了它第一条候选会被整条跳过
+  return `${head}\n${lines.join(' info ')}`
+}
+
+/**
+ * 定点格式化，非法值回落 fallback；-0 归一成 0（`(-0).toFixed()` 的符号会污染
+ * 读回时的数值，`-0` 又不是合法 lossless JSON）。
+ * @returns {string|undefined} value 非法且未给 fallback 时返回 undefined
+ */
+function toFixedSafe(value, digits, fallback) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return fallback === undefined ? undefined : fallback.toFixed(digits)
+  const r = Object.is(n, -0) ? 0 : n
+  const rounded = Number(r.toFixed(digits))
+  return (Object.is(rounded, -0) ? 0 : rounded).toFixed(digits)
+}
+
+/** 非负整数（LZ 格式里 visits/winrate/prior 都是整数）。 */
+function toIntSafe(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n < 0) return 0
+  return Math.round(n)
+}
+
+/** 计算量的紧凑写法（"250" / "3.9k"）；不合法时返回 undefined。 */
+function compactNumber(value) {
+  const text = typeof value === 'string' ? value.trim() : String(value ?? '')
+  return /^\d+(?:\.\d+)?[kKmM]?$/.test(text) ? text : undefined
+}
+
 // 第三方 GUI 的分析注释格式："Move <N> 黑胜率: <x>% (±y%) (引擎 / 计算量)"，
 // 以及 KataGo 注释行式 "engine winrate playouts scoreMean ..."。
 // 以下正则尽量宽松，按注释常见形态提取数值。
@@ -560,24 +651,31 @@ export function injectComments(sgfText, entries, opts = {}) {
 }
 
 /**
- * 把逐手分析（胜率/目差）写回 SGF 的 KataGo 属性。
+ * 把逐手分析写回 SGF 的 KataGo 属性（`WV`/`DM` 与 `LZ`）。
  *
  * 为什么要写回：补算结果原先只活在内存里 —— 每次重新打开同一份棋谱都要再跑一次
  * 引擎（真机实测 30~100 秒），而"讲解已写回注释、却没有胜率数据"的棋谱在别的
  * 打谱软件里也一样是空白的。写回后文件自带 `WV`/`DM`，任何一方再读都不必重算。
  *
+ * `LZ` 是第二件必须写回的东西：光有 `WV`/`DM` 只够算「问题手」，**AI 首选与变化图
+ * 存在候选着法里**，而候选又只认节点上的 `LZ`/`lz` 属性（见 reviewGame 的取候选处）。
+ * 缺了它，文件再次打开时既不会补算（已有胜率数据）、又拿不出首选/变化图。
+ *
  * 口径与读取端严格对齐（`src/sgf.js` 的 parseGame / winrateForColor）：
  *   · `WV` = **白方**视角胜率（0~1 小数）；
- *   · `DM` = **黑方**视角领先目数。
+ *   · `DM` = **黑方**视角领先目数；
+ *   · `LZ` = 头部落子者视角、候选该节点行棋方视角（见 serializeLz）。
  * 传入的是落子者视角的原始量，这里负责换算 —— 两个方向各写错一次就会得到
  * "胜率恒等于对手"的静默错误，故换算只在此处发生一次。
  *
  * 与 injectComments 同法：交给 @sabaki/sgf 解析出变化树，沿真正的第一个子节点
- * 走主线，替换/新增该节点的 WV、DM，再整树重新序列化（幂等：重复调用不会堆积）。
+ * 走主线，替换/新增该节点的 WV、DM、LZ，再整树重新序列化（幂等：重复调用不会堆积）。
  *
  * @param {string} sgfText 原始 SGF 文本
- * @param {Array<{ moveNumber: number, moverWinrate?: number, moverScoreLead?: number }>} entries
- *   `moverWinrate` = 落子者视角胜率（0~1）；`moverScoreLead` = 落子者视角领先目数
+ * @param {Array<{ moveNumber: number, moverWinrate?: number, moverScoreLead?: number,
+ *   engine?: string, playouts?: number|string, stdev?: number, candidates?: object[] }>} entries
+ *   `moverWinrate` = 落子者视角胜率（0~1）；`moverScoreLead` = 落子者视角领先目数；
+ *   `candidates` = 该节点的候选着法（有则写 `LZ`，即 AI 首选 + 变化图）
  * @returns {{ text: string, written: Array<number>, missing: Array<number> }}
  */
 export function injectAnalysis(sgfText, entries) {
@@ -627,6 +725,19 @@ export function injectAnalysis(sgfText, entries) {
       const black = isBlack ? lead : -lead
       found.node.data.DM = [String(Object.is(black, -0) ? 0 : Math.round(black * 10) / 10)]
     }
+    // AI 首选与变化图（候选着法 + PV）一并写回。只落 WV/DM 是**有损**的：文件下次被
+    // 读到时有逐手胜率 → hasWinrateData() 为真 → 不再补算，而候选只能来自节点上的
+    // lz.candidates → 首选点与变化图再也拿不回来（面板表现为「有问题手、没有首选/变化图」）。
+    const lzValue = serializeLz({
+      engine: entry.engine,
+      moverWinrate: entry.moverWinrate,
+      playouts: entry.playouts,
+      // LZ 头部第 4 个字段是**对手**（= 该节点行棋方）视角领先，与候选点同视角
+      opponentLead: Number.isFinite(Number(entry.moverScoreLead)) ? -Number(entry.moverScoreLead) : undefined,
+      stdev: entry.stdev,
+      candidates: entry.candidates,
+    })
+    if (lzValue !== undefined) found.node.data.LZ = [lzValue]
     out.written.push(moveNumber)
   }
 
@@ -643,8 +754,12 @@ export function injectAnalysis(sgfText, entries) {
  *   · 棋谱自带的 KataGo 属性 —— `analysis.winrateWhite` / `analysis.scoreLeadBlack`。
  * 统一换算成**落子者视角**交给 injectAnalysis，换算规则只在那里实现一次。
  *
+ * 引擎通道还会带上候选着法（`lz.candidates`）与头部元数据 —— 那是 AI 首选与变化图
+ * 的唯一来源，不带就等于写回一份"有问题手、没有首选/变化图"的棋谱。
+ *
  * @param {object} game parseGame 的返回值（可能已被补算就地替换 moves）
- * @returns {Array<{ moveNumber: number, moverWinrate?: number, moverScoreLead?: number }>}
+ * @returns {Array<{ moveNumber: number, moverWinrate?: number, moverScoreLead?: number,
+ *   engine?: string, playouts?: number|string, stdev?: number, candidates?: object[] }>}
  */
 export function analysisEntriesOf(game) {
   const out = []
@@ -663,10 +778,19 @@ export function analysisEntriesOf(game) {
       moverScoreLead = isBlack ? a.scoreLeadBlack : -a.scoreLeadBlack
     }
     if (moverWinrate === undefined && moverScoreLead === undefined) continue
+    const candidates = Array.isArray(a.lz?.candidates) ? a.lz.candidates : []
     out.push({
       moveNumber: move.number,
       ...(moverWinrate !== undefined ? { moverWinrate } : {}),
       ...(moverScoreLead !== undefined ? { moverScoreLead } : {}),
+      ...(candidates.length > 0
+        ? {
+            candidates,
+            ...(typeof a.lz.engine === 'string' ? { engine: a.lz.engine } : {}),
+            ...(a.lz.playouts !== undefined ? { playouts: a.lz.playouts } : {}),
+            ...(a.lz.stdev !== undefined ? { stdev: a.lz.stdev } : {}),
+          }
+        : {}),
     })
   }
   return out

@@ -27,7 +27,7 @@ const NO_ENGINE_DIR = join(here, 'no-such-engine')
 // 最小 ctx 仿真：仅实现 index.mjs 用到的服务方法
 // ---------------------------------------------------------------------------
 
-function makeCtx(workspace) {
+function makeCtx(workspace, services = {}) {
   const registered = new Map()
   const sections = []
   // 写入审计：记录每次 writeText 收到的沙箱策略（第 5 参数）。
@@ -85,6 +85,7 @@ function makeCtx(workspace) {
     // tools/result 观察者（面板路由用它记住工作区根）；测试里只登记不触发
     on() { return () => {} },
     get(name) {
+      if (services[name] !== undefined) return services[name]
       if (name === 'sandboxPolicy') {
         return {
           resolve() {
@@ -686,6 +687,58 @@ test('effectiveEngineConfig + resolveEngine: engineDir 覆盖配置里的 kataGo
   assert.equal(untouched.source, 'config')
 
   rmSync(dir, { recursive: true, force: true })
+})
+
+// ---------------------------------------------------------------------------
+// go_engine_analyze 的写回：必须是**这次补算的结果**（含 LZ 首选/变化图）
+// ---------------------------------------------------------------------------
+
+test('go_engine_analyze: 补算结果写回棋谱，AI 首选与变化图进文件', async () => {
+  // 真机回归（2026-09-13）：写回时没把 result.merge 并回 game.moves，
+  // 于是 writeAnalysisBack 读到的还是"读盘时的旧分析"—— 对全新棋谱一个字都写不下去，
+  // 对只有 WV/DM 的旧棋谱只是原样重写一遍，LZ（首选/变化图）永远补不上。
+  const engineDir = join(here, 'tmp-engine-writeback')
+  rmSync(engineDir, { recursive: true, force: true })
+  mkdirSync(engineDir, { recursive: true })
+  writeFileSync(join(engineDir, 'katago.exe'), 'stub')
+  writeFileSync(join(engineDir, 'analysis_example.cfg'), 'reportAnalysisWinratesAs = BLACK\n')
+  writeFileSync(join(engineDir, 'kata1-b18c384nbt-s.bin.gz'), Buffer.alloc(2048))
+
+  const target = join(WORKSPACE, 'engine-writeback.sgf')
+  writeFileSync(target, '(;GM[1]FF[4]SZ[19]KM[7.5]PB[甲]PW[乙];B[pd];W[dp];B[qp];W[dd])', 'utf8')
+  const stdout = [
+    '{"id":"go-sensei","turnNumber":1,"moveInfos":[{"move":"D16","order":0,"visits":100,"winrate":0.55,"scoreMean":1.5,"prior":0.3,"pv":["D16","Q4"]}]}',
+    '{"id":"go-sensei","turnNumber":2,"moveInfos":[{"move":"Q16","order":0,"visits":100,"winrate":0.52,"scoreMean":2,"prior":0.2,"pv":["Q16","D4"]}]}',
+  ].join('\n') + '\n'
+  const engineCtx = makeCtx(WORKSPACE, {
+    subprocess: {
+      spawn: () => ({
+        pid: 1,
+        done: Promise.resolve({ exitCode: 0, signal: null }),
+        collected: {
+          stdout: { readFrom: () => ({ text: stdout, nextOffset: 0, lossy: false }) },
+          stderr: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) },
+        },
+      }),
+    },
+  })
+  apply(engineCtx, Config({ engineDir, kataGoPath: '' }))
+
+  try {
+    const value = await callJson(engineCtx.registered.get('go_engine_analyze'), WORKSPACE, { path: target, from: 1, to: 2 })
+    assert.ok(value.analysisWritten.moves >= 2, `应有写回：${JSON.stringify(value.analysisWritten)}`)
+    const text = readFileSync(target, 'utf8')
+    assert.ok(text.includes('WV['), text)
+    assert.ok(text.includes('DM['), text)
+    assert.ok(text.includes('LZ['), `补算结果必须带上 LZ（首选/变化图）：${text}`)
+    const game = parseGame(text)
+    const first = game.moves[0].analysis.lz
+    assert.equal(first.candidates[0].coord, 'D16')
+    assert.deepEqual(first.candidates[0].pv, ['D16', 'Q4'], '变化图必须写进文件')
+    assert.equal(first.candidates[0].prior, 3000)
+  } finally {
+    rmSync(engineDir, { recursive: true, force: true })
+  }
 })
 
 test('mergeCachedAnalysis: 缓存只并回分析字段，不抹掉刚解析出的注释', () => {

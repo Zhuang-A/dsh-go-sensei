@@ -177,12 +177,13 @@ export function parseKataAnalysisOutput(stdout) {
 }
 
 /**
- * 从一个 turn 的候选着法列表构造 LZ 同约定的候选数组（供 reviewGame 消费）。
+ * 从一个 turn 的候选着法列表构造 LZ 同约定的候选数组（供 reviewGame 消费，
+ * 也直接决定写回棋谱的 `LZ[]` 内容 —— 见 sgf.js 的 serializeLz）。
  * @param {object[]} moveInfos 该 turn 的 moveInfo（按 order 升序）
  * @param {number} maxCandidates 保留的候选数上限
  * @param {{ winrateFrame?: 'black'|'mover', moveColor?: 'B'|'W' }} [opts]
  *   winrateFrame = 引擎输出口径；moveColor = 该 turn 刚落子的一方（用于推出该 turn 的行棋方）
- * @returns {object[]} { coord, visits, winratePer10000, scoreMean, pv }
+ * @returns {object[]} { coord, visits, winratePer10000, prior, scoreMean, pv }
  */
 function toLzCandidates(moveInfos, maxCandidates = 3, opts = {}) {
   const frame = opts.winrateFrame === 'mover' ? 'mover' : 'black'
@@ -198,6 +199,18 @@ function toLzCandidates(moveInfos, maxCandidates = 3, opts = {}) {
     if (frame === 'mover') return w // 引擎已按行棋方（SELF）输出
     return toMove === 'B' ? w : 1 - w // 引擎按固定黑方输出
   }
+  /**
+   * 候选点的 scoreMean 与 winrate 同视角：都是**该 turn 行棋方**（即候选点自己一方）的领先。
+   * 实测 real-analysis.sgf 第 2 手节点（落子者白）头部 scoreLeadOpponent=+6.7，其首选候选
+   * R4 记 scoreMean=+6.74 —— 同为黑方（该节点行棋方）领先。写回 LZ[] 时若不合这个口径，
+   * 第三方 GUI 读到的候选目差会整体反号（见 sgf.test.mjs 的 LZ 往返用例）。
+   * 归一 -0：恰为 0 的负零不是合法 lossless JSON（同 round1）。
+   */
+  const toCandidateScore = (s) => {
+    if (s === undefined) return undefined
+    const v = frame === 'mover' ? s : (toMove === 'B' ? s : -s)
+    return Object.is(v, -0) ? 0 : v
+  }
   const out = []
   for (const mi of moveInfos) {
     const pvMoves = Array.isArray(mi.pv) ? mi.pv.filter((p) => typeof p === 'string') : []
@@ -208,7 +221,11 @@ function toLzCandidates(moveInfos, maxCandidates = 3, opts = {}) {
       coord,
       visits: mi.visits ?? 0,
       winratePer10000: w !== undefined ? Math.round(w * 10000) : 0,
-      scoreMean: mi.scoreMean,
+      // prior（策略先验，0~1）与 winrate 一样按万分之一存整数：第三方 GUI 的 LZ 格式
+      // 写的就是整数（实测 real-analysis.sgf 为 prior 4255），且 parseLz 要求该字段存在，
+      // 缺了它整条候选行都解析不出来（写回的首选/变化图会读不回来）。
+      prior: mi.prior !== undefined && Number.isFinite(Number(mi.prior)) ? Math.round(Number(mi.prior) * 10000) : 0,
+      scoreMean: toCandidateScore(mi.scoreMean),
       pv: pvMoves.length > 0 ? pvMoves : [coord],
     })
     if (out.length >= maxCandidates) break

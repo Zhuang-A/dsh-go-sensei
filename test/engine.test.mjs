@@ -314,7 +314,7 @@ function runWithFakeEngine(stdout, configText, range) {
 test('runKataAnalyze: 候选点胜率换算到该 turn 行棋方视角', async () => {
   const stdout = [
     // turn2 = 白 dp 之后 → 行棋方为黑 → 黑方口径原样使用
-    '{"id":"go-sensei","turnNumber":2,"rootInfo":{"winrate":0.70,"currentPlayer":"B"},"moveInfos":[{"move":"Q16","order":0,"visits":100,"winrate":0.70,"scoreMean":5,"pv":["Q16","D4"]},{"move":"D4","order":1,"visits":50,"winrate":0.68,"scoreMean":4,"pv":["D4"]}]}',
+    '{"id":"go-sensei","turnNumber":2,"rootInfo":{"winrate":0.70,"currentPlayer":"B"},"moveInfos":[{"move":"Q16","order":0,"visits":100,"winrate":0.70,"scoreMean":5,"prior":0.4255,"pv":["Q16","D4"]},{"move":"D4","order":1,"visits":50,"winrate":0.68,"scoreMean":4,"pv":["D4"]}]}',
     // turn3 = 黑 qp 之后 → 行棋方为白 → 必须取反（1 - 0.65 = 0.35）
     '{"id":"go-sensei","turnNumber":3,"rootInfo":{"winrate":0.65,"currentPlayer":"W"},"moveInfos":[{"move":"D17","order":0,"visits":100,"winrate":0.65,"scoreMean":4,"pv":["D17"]}]}',
   ].join('\n') + '\n'
@@ -324,10 +324,15 @@ test('runKataAnalyze: 候选点胜率换算到该 turn 行棋方视角', async (
   assert.equal(m2.candidates[0].coord, 'Q16')
   assert.equal(m2.candidates[0].winratePer10000, 7000, '行棋方为黑时沿用黑方口径')
   assert.equal(m2.candidates[1].winratePer10000, 6800)
+  assert.equal(m2.candidates[0].scoreMean, 5, '候选目差同为该 turn 行棋方（黑）视角')
+  // prior 必须保留：写回 LZ[] 时 parseLz 要求该字段，缺了整条候选行都读不回来
+  assert.equal(m2.candidates[0].prior, 4255)
+  assert.equal(m2.candidates[1].prior, 0, '引擎没给 prior 时兜底 0，不能是 undefined')
 
   const m3 = result.merge.moves[2].analysis.lz // 第 3 手 = 黑 qp
   assert.equal(m3.candidates[0].coord, 'D17')
   assert.equal(m3.candidates[0].winratePer10000, 3500, '行棋方为白时必须取反')
+  assert.equal(m3.candidates[0].scoreMean, -4, '行棋方为白时候选目差取反（实测 real-analysis.sgf 同口径）')
 })
 
 // 回归：reportAnalysisWinratesAs 未设置（KataGo 默认 SELF）时，mi.winrate 是
