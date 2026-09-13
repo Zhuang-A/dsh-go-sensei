@@ -17,6 +17,7 @@ import {
 import { reviewGame, inferLevel, RANKS } from './review.js'
 import { ReviewCache, gameFingerprint } from './cache.js'
 import { resolveEngine, describeEngine } from './engine-resolve.js'
+import { senseiPathFor } from './derived.js'
 
 /** 工具返回值的裁剪上限，防止异常棋谱撑爆上下文。 */
 const MAX_MOVE_LIST = 400
@@ -70,18 +71,73 @@ async function resolveRegularFile(ctx, exec, p, policy) {
   return target
 }
 
+/**
+ * 解析「工作文件」：源棋谱 P 的复盘产物写在同目录的 `P-sensei.sgf` 里。
+ *
+ * 这就是"源文件只读"的全部实现：**读**优先用已存在的副本（那才是上一次复盘的成果：
+ * 分析数据 + 讲解注释），**写**一律落在副本（见 writeAnalysisBack / go_write_review）。
+ * 副本不存在时两者都退回源文件本身。
+ *
+ * @returns {Promise<{ source: object, target: object, derived: boolean }>}
+ *   source = 调用者给的那个文件的解析结果；target = 实际要读的文件
+ */
+async function resolveWorkingFile(ctx, exec, p, policy) {
+  const source = await resolveRegularFile(ctx, exec, p, policy)
+  const derivedPath = senseiPathFor(source.displayPath)
+  if (derivedPath === source.displayPath) return { source, target: source, derived: false }
+  const target = await ctx.fs.resolve(derivedPath, resolveOptions(exec, derivedPath, policy))
+  const info = await ctx.fs.stat(target, exec.signal)
+  if (info === undefined || info.type !== 'file') return { source, target: source, derived: false }
+  return { source, target, derived: true }
+}
+
+/** 复盘副本的写入目标（副本可以还不存在，故不用 resolveRegularFile）。 */
+async function derivedTargetFor(ctx, exec, sourcePath, policy) {
+  const derivedPath = senseiPathFor(sourcePath)
+  return ctx.fs.resolve(derivedPath, resolveOptions(exec, derivedPath, policy))
+}
+
 async function readGameFile(ctx, exec, p, policy) {
-  const target = await resolveRegularFile(ctx, exec, p, policy)
-  const bytes = await ctx.fs.readBytes(target, exec.signal, 64 * 1024 * 1024)
-  const { text, encoding } = decodeBuffer(bytes)
-  const game = parseGame(text)
-  // 原文留着：补算成功后要把它连同新增的分析属性一起写回（见 writeAnalysisBack）
-  game._meta = { path: target.displayPath, encoding, text }
+  const { source, target, derived } = await resolveWorkingFile(ctx, exec, p, policy)
+  const readText = async (t) => {
+    const bytes = await ctx.fs.readBytes(t, exec.signal, 64 * 1024 * 1024)
+    return decodeBuffer(bytes)
+  }
+  let used = target
+  let { text, encoding } = await readText(target)
+  let game
+  try {
+    game = parseGame(text)
+  } catch (error) {
+    if (!derived) throw error
+    // 副本坏了（空文件 / 半截写入 / 被别的程序改坏）不能让整盘棋读不出来：退回源棋谱。
+    // 之后若发生写回，目标仍由 sourcePath 推出的副本 —— 等于用源内容把副本重建一遍。
+    const fallback = await readText(source)
+    text = fallback.text
+    encoding = fallback.encoding
+    used = source
+    game = parseGame(text)
+  }
+  // 原文留着：补算成功后要把它连同新增的分析属性一起写回（见 writeAnalysisBack）。
+  // sourcePath 单独记着 —— 写回的目标永远由它推出（`-sensei` 副本），
+  // 而不是"从哪个文件读的"（读的可能是上一轮的副本）。
+  game._meta = {
+    path: used.displayPath,
+    sourcePath: source.displayPath,
+    derived: used.displayPath !== source.displayPath,
+    encoding,
+    text,
+  }
   return game
 }
 
 function displayPathOf(game) {
   return game._meta?.path ?? '?'
+}
+
+/** 写回目标（复盘副本）的路径；供工具返回值告知"到底写到哪个文件了"。 */
+function writeBackPathOf(game) {
+  return senseiPathFor(game._meta?.sourcePath ?? game._meta?.path ?? '')
 }
 
 function effectiveLevel(cfg, game, override) {
@@ -176,7 +232,7 @@ function goParseSgf(ctx, cfg, cache, policy) {
   return {
     name: 'go_parse_sgf',
     description:
-      '解析 SGF 围棋棋谱：返回棋局元信息（黑白棋手/段位/贴目/让子/结果/规则）与主变化线每手序列（坐标、颜色、虚着）。支持野狐/弈城导出的 GBK 编码，以及 KataGo 分析属性（WV/DM/PV）与注释内胜率行等带分析的棋谱。',
+      '解析 SGF 围棋棋谱：返回棋局元信息（黑白棋手/段位/贴目/让子/结果/规则）与主变化线每手序列（坐标、颜色、虚着）。支持野狐/弈城导出的 GBK 编码，以及 KataGo 分析属性（WV/DM/PV）与注释内胜率行等带分析的棋谱。**源棋谱只读**：若同目录已存在复盘副本 `<源名>-sensei.sgf`，读的就是副本（那才是上一次复盘的成果：分析数据 + 讲解注释），返回的 path 是实际读取的文件。',
     parameters: {
       type: 'object',
       properties: {
@@ -247,7 +303,7 @@ function goReviewMoves(ctx, cfg, cache, policy) {
   return {
     name: 'go_review_moves',
     description:
-      '识别 SGF 棋谱中的问题手（胜率/目差落差超阈值的候选），返回按严重度排序的裁剪后列表（每手 ≤3 个 AI 候选点、PV 截断、数值 1 位小数、标签枚举：大恶手/失误/不精确）。无分析数据且引擎可用时自动用自带 KataGo 补算，并把逐手胜率/目差与 AI 首选/变化图写回棋谱（WV[]/DM[]/LZ[]，analysisWritten 字段报告写回了多少手）——此后这份棋谱自带分析，面板与再次复盘都不必重算（首选与变化图也读得回来）。完全无分析数据且引擎不可用时返回 theory 模式（纯棋理复盘）。同一局面重复复盘命中缓存。',
+      '识别 SGF 棋谱中的问题手（胜率/目差落差超阈值的候选），返回按严重度排序的裁剪后列表（每手 ≤3 个 AI 候选点、PV 截断、数值 1 位小数、标签枚举：大恶手/失误/不精确）。无分析数据且引擎可用时自动用自带 KataGo 补算，并把逐手胜率/目差与 AI 首选/变化图写回（WV[]/DM[]/LZ[]，analysisWritten 字段报告写回了多少手与写到哪个文件）——**不覆盖源棋谱**：写入目标是同目录的 `<源名>-sensei.sgf` 副本。完全无分析数据且引擎不可用时返回 theory 模式（纯棋理复盘）。同一局面重复复盘命中缓存。',
     parameters: {
       type: 'object',
       properties: {
@@ -297,6 +353,17 @@ function goReviewMoves(ctx, cfg, cache, policy) {
               `🤖 棋谱原无分析数据，已自起 KataGo 补算第 ${value.autoEngine.from}~${value.autoEngine.to} 手`
               + `（${value.autoEngine.moves} 手 / ${value.autoEngine.seconds}s${model}）`,
             )
+          }
+        }
+        if (value.analysisWritten !== null && value.analysisWritten !== undefined) {
+          const w = value.analysisWritten
+          if (typeof w.moves === 'number' && w.moves > 0) {
+            lines.push(
+              `💾 已把逐手胜率/目差与 AI 首选/变化图写回 ${w.path ?? '复盘副本'}（${w.moves} 手）`
+              + '——源棋谱保持原样，副本与源棋谱同目录。',
+            )
+          } else if (w.failed !== undefined) {
+            lines.push(`⚠ 分析写回失败（不影响本次复盘）：${w.failed}`)
           }
         }
         lines.push(...candidatesText(value.candidates, value.level))
@@ -480,7 +547,7 @@ function goWriteReview(ctx, cfg, cache, policy) {
   return {
     name: 'go_write_review',
     description:
-      '把讲解写回 SGF 棋谱的 C[] 注释（任何能显示注释的打谱软件/App 都能看到）。entries 为 [{ moveNumber, comment }]，每局最多 200 条、单条 ≤2000 字；已有注释默认换行追加（replace=true 覆盖）。写入后请用 go_parse_sgf 复核。',
+      '把讲解写回棋谱的 C[] 注释（任何能显示注释的打谱软件/App 都能看到）。**不覆盖源棋谱**：写入目标是同目录的 `<源名>-sensei.sgf`（副本不存在时创建，已存在则在其上继续追加）。entries 为 [{ moveNumber, comment }]，每局最多 200 条、单条 ≤2000 字；已有注释默认换行追加（replace=true 覆盖）。写入后请用 go_parse_sgf 复核。',
     parameters: {
       type: 'object',
       properties: {
@@ -506,6 +573,8 @@ function goWriteReview(ctx, cfg, cache, policy) {
         additionalProperties: false,
         properties: {
           path: { type: 'string' },
+          sourcePath: { type: 'string' },
+          derived: { type: 'boolean' },
           written: { type: 'array', items: { type: 'integer' } },
           missing: { type: 'array', items: { type: 'integer' } },
           skipped: { type: 'array', items: { type: 'integer' } },
@@ -517,6 +586,9 @@ function goWriteReview(ctx, cfg, cache, policy) {
         textBlock([
           `已写回 ${value.path}：成功 ${value.written.length} 条（第 ${value.written.join('、') || '无'} 手），`,
           `不存在的手 ${value.missing.length} 条${value.skipped.length > 0 ? `，跳过 ${value.skipped.length} 条` : ''}。`,
+          ...(value.derived === true && typeof value.sourcePath === 'string'
+            ? [`源棋谱 ${value.sourcePath} 保持原样，讲解与 AI 分析都攒在副本里。`]
+            : []),
           '提示：用任意能显示 SGF 注释的打谱软件打开该棋谱即可看到注释；重复写回同一手会自动追加而非覆盖。',
         ]),
     },
@@ -535,18 +607,22 @@ function goWriteReview(ctx, cfg, cache, policy) {
         return { moveNumber, comment }
       })
       const sandboxPolicy = policy(exec)
-      const target = await resolveRegularFile(ctx, exec, args.path, sandboxPolicy)
-      const bytes = await ctx.fs.readBytes(target, exec.signal, 64 * 1024 * 1024)
-      const { text } = decodeBuffer(bytes)
-      const result = injectComments(text, cleaned, { replace: args.replace === true })
+      // 走同一条读取规则（副本优先、坏副本退回源棋谱），拿原文注入注释
+      const game = await readGameFile(ctx, exec, args.path, sandboxPolicy)
+      const result = injectComments(game._meta.text, cleaned, { replace: args.replace === true })
       if (result.written.length === 0) {
         throw new Error(`没有写入任何注释：指定手数均不存在（${result.missing.join(', ') || '未知原因'}）`)
       }
+      // 写：一律落到 `-sensei` 副本（源文件保持原样），副本不存在时由这次写入创建。
+      const target = await derivedTargetFor(ctx, exec, game._meta.sourcePath, sandboxPolicy)
+      const sourcePath = game._meta.sourcePath
       // 第 5 参数必须带沙箱策略，否则沙箱后端按自身默认策略拒写。
       await ctx.fs.writeText(target, result.text, undefined, exec.signal, sandboxPolicy)
       ctx.emit('fs/observed', target, { kind: 'present' }, exec)
       return {
         path: target.displayPath,
+        sourcePath,
+        derived: target.displayPath !== sourcePath,
         written: result.written,
         missing: result.missing,
         skipped: result.skipped,
@@ -560,7 +636,7 @@ function goExportReport(ctx, cfg, cache, policy) {
   return {
     name: 'go_export_report',
     description:
-      '把复盘报告落盘为 Markdown（默认与棋谱同目录、同名 .review.md）。content 为报告全文；省略时自动生成骨架报告（棋局信息 + 问题手表格 + 已写回注释）。',
+      '把复盘报告落盘为 Markdown（默认与**本次读取的棋谱**同目录、同名 .review.md；源棋谱有复盘副本时即 `<源名>-sensei.review.md`）。content 为报告全文；省略时自动生成骨架报告（棋局信息 + 问题手表格 + 已写回注释）。',
     parameters: {
       type: 'object',
       properties: {
@@ -741,7 +817,7 @@ function goEngineAnalyze(ctx, cfg, cache, policy) {
   return {
     name: 'go_engine_analyze',
     description:
-      '用本地 KataGo 引擎对指定手数区间补算分析（供无分析数据的棋谱）。默认使用插件自带的 engine 目录（开箱即用，无需配置）；也可用配置 engineDir / kataGoPath 指向自己的引擎，kataGoModel 指定权重。输出与 go_review_moves 同构的候选列表。补算出的逐手胜率/目差与 AI 首选/变化图会写回棋谱的 WV[]/DM[]/LZ[] 属性（analysisWritten 字段报告写回了多少手），此后这份棋谱自带分析（含首选与变化图），面板与工具再打开都不必重算。对早先只写过胜率/目差的棋谱再跑一次，即可补上首选与变化图。',
+      '用本地 KataGo 引擎对指定手数区间补算分析（供无分析数据的棋谱）。默认使用插件自带的 engine 目录（开箱即用，无需配置）；也可用配置 engineDir / kataGoPath 指向自己的引擎，kataGoModel 指定权重。输出与 go_review_moves 同构的候选列表。补算出的逐手胜率/目差与 AI 首选/变化图会写回 WV[]/DM[]/LZ[] 属性（analysisWritten 字段报告写回了多少手与写到哪个文件）——**不覆盖源棋谱**：写入目标是同目录的 `<源名>-sensei.sgf` 副本，此后读这份副本（面板与工具都优先读它）就不必重算。对早先只有胜率/目差的棋谱再跑一次，即可补上首选与变化图。',
     parameters: {
       type: 'object',
       properties: {
@@ -834,7 +910,7 @@ function goEngineAnalyze(ctx, cfg, cache, policy) {
         ...value,
         analysisWritten: written,
         note: value.note + (written.moves > 0
-          ? ` 已把逐手胜率/目差与 AI 首选/变化图写回棋谱（${written.moves} 手），下次打开无需重算。`
+          ? ` 已把逐手胜率/目差与 AI 首选/变化图写回 ${written.path}（${written.moves} 手），下次打开无需重算；源棋谱保持原样。`
           : ''),
       }
     },
@@ -1064,11 +1140,13 @@ export async function autoComputeIfNeeded(ctx, cfg, game, opts = {}) {
  * 只在**本次真的跑了引擎**之后调用（缓存命中或本来就有分析的棋谱都不写）：
  * 读盘 → 改属性 → 写盘必须发生在明确的分析动作里，不能由只读路径顺手做掉。
  *
+ * **写到哪**：源棋谱同目录的 `<源名>-sensei.sgf`（见 src/derived.js），源文件不动。
+ *
  * @param {object} ctx Cordis 上下文（需 fs）
  * @param {object} exec 工具执行上下文（写盘要带 exec.signal）
  * @param {object} sandboxPolicy 本会话的沙箱策略（写盘必须携带，见文件顶部说明）
- * @param {object} game readGameFile 的返回值（含 _meta.text 原文）
- * @returns {Promise<{moves: number, missing: number} | undefined>} 没有可写内容时 undefined
+ * @param {object} game readGameFile 的返回值（含 _meta.text 原文与 _meta.sourcePath）
+ * @returns {Promise<{moves: number, missing: number, path: string} | undefined>} 没有可写内容时 undefined
  */
 async function writeAnalysisBack(ctx, exec, sandboxPolicy, game) {
   const text = game?._meta?.text
@@ -1077,10 +1155,16 @@ async function writeAnalysisBack(ctx, exec, sandboxPolicy, game) {
   if (entries.length === 0) return undefined
   const injected = injectAnalysis(text, entries)
   if (injected.written.length === 0) return undefined
-  const target = await resolveRegularFile(ctx, exec, game._meta.path, sandboxPolicy)
+  // 写回**副本**：源棋谱（野狐导出/别人给的谱）永远保持原样，分析数据与讲解
+  // 都只落在同目录的 `-sensei.sgf` 里。副本已存在时读的就是它（resolveWorkingFile），
+  // 所以这里的注入是在"上一版副本"基础上增量进行，不会抹掉先前写回的讲解。
+  const target = await derivedTargetFor(ctx, exec, game._meta.sourcePath ?? game._meta.path, sandboxPolicy)
   await ctx.fs.writeText(target, injected.text, undefined, exec.signal, sandboxPolicy)
   game._meta.text = injected.text
-  return { moves: injected.written.length, missing: injected.missing.length }
+  game._meta.path = target.displayPath
+  game._meta.derived = target.displayPath !== game._meta.sourcePath
+  ctx.emit('fs/observed', target, { kind: 'present' }, exec)
+  return { moves: injected.written.length, missing: injected.missing.length, path: target.displayPath }
 }
 
 /** 补算结果缓存的上限（条目数；每条是一份棋谱的逐手分析）。 */

@@ -431,8 +431,9 @@ test('go_position_context: 超出手数报错', async () => {
   )
 })
 
-test('go_write_review: 写回 C[] 且幂等追加', async () => {
+test('go_write_review: 讲解写进 -sensei 副本，源棋谱不动（幂等追加）', async () => {
   const tool = ctx.registered.get('go_write_review')
+  const sourceBefore = readFileSync(gameSgfInWorkspace, 'utf8')
   const result = await call(tool, WORKSPACE, {
     path: 'game.sgf',
     entries: [
@@ -444,20 +445,26 @@ test('go_write_review: 写回 C[] 且幂等追加', async () => {
   assert.deepEqual(result.written, [4, 6])
   assert.deepEqual(result.missing, [99])
   assert.ok(result.bytes > 0)
+  // 复盘产物一律落在同目录的 `-sensei` 副本里，源棋谱逐字节保持原样
+  assert.equal(result.path, join(WORKSPACE, 'game-sensei.sgf'))
+  assert.equal(result.sourcePath, gameSgfInWorkspace)
+  assert.equal(result.derived, true)
+  assert.equal(readFileSync(gameSgfInWorkspace, 'utf8'), sourceBefore, '源棋谱不得被改写')
 
-  const text = readFileSync(gameSgfInWorkspace, 'utf8')
+  const text = readFileSync(result.path, 'utf8')
   assert.ok(text.includes('C[白棋 胜率: 22.0%'), '原有注释保留')
   assert.ok(text.includes('白 78 手：这里被吃一大块，是败因。'))
 
-  // 再次写回同一手：追加而非覆盖
+  // 再次写回同一手：追加而非覆盖（第二次读的已经是副本，累加在同一份副本上）
   const again = await call(tool, WORKSPACE, {
     path: 'game.sgf',
     entries: [{ moveNumber: 4, comment: '补充：可先提子再出头。' }],
   })
   assert.deepEqual(again.written, [4])
-  const text2 = readFileSync(gameSgfInWorkspace, 'utf8')
+  const text2 = readFileSync(again.path, 'utf8')
   assert.ok(text2.includes('补充：可先提子再出头。'))
   assert.ok(text2.includes('白 78 手：这里被吃一大块，是败因。'))
+  assert.equal(readFileSync(gameSgfInWorkspace, 'utf8'), sourceBefore, '源棋谱始终不动')
 })
 
 test('go_write_review: 空 entries 与超长注释校验', async () => {
@@ -470,18 +477,41 @@ test('go_write_review: 空 entries 与超长注释校验', async () => {
 })
 
 test('go_export_report: 骨架报告与全文报告', async () => {
+  // 用一个还没有 `-sensei` 副本的棋谱：报告默认跟在"这次读的工作文件"旁边
+  const fresh = join(WORKSPACE, 'report-game.sgf')
+  copyFileSync(fixture('synthetic-analysis.sgf'), fresh)
   const tool = ctx.registered.get('go_export_report')
-  const skeleton = await call(tool, WORKSPACE, { path: 'game.sgf' })
-  assert.equal(skeleton.outPath, join(WORKSPACE, 'game.review.md'))
+  const skeleton = await call(tool, WORKSPACE, { path: 'report-game.sgf' })
+  assert.equal(skeleton.outPath, join(WORKSPACE, 'report-game.review.md'))
   assert.equal(skeleton.generated, true)
   const md = readFileSync(skeleton.outPath, 'utf8')
   assert.ok(md.includes('围棋复盘报告'))
   assert.ok(md.includes('| 4 | 白 | D16 | 大恶手 | 27.5% |'))
 
-  const full = await call(tool, WORKSPACE, { path: 'game.sgf', content: '# 自定义报告', outPath: 'custom.md' })
+  const full = await call(tool, WORKSPACE, { path: 'report-game.sgf', content: '# 自定义报告', outPath: 'custom.md' })
   assert.equal(full.generated, false)
   assert.equal(full.outPath, join(WORKSPACE, 'custom.md'))
   assert.equal(readFileSync(full.outPath, 'utf8'), '# 自定义报告')
+})
+
+test('读取与报告都跟着 -sensei 副本走（源棋谱只读）', async () => {
+  // 同目录成对的文件：源 2 手、副本 3 手 —— 读出来几手就证明读的是哪一个
+  const src = join(WORKSPACE, 'pair.sgf')
+  const copy = join(WORKSPACE, 'pair-sensei.sgf')
+  writeFileSync(src, '(;GM[1]FF[4]SZ[19]KM[7.5]PB[甲]PW[乙];B[pd];W[dp])', 'utf8')
+  writeFileSync(copy, '(;GM[1]FF[4]SZ[19]KM[7.5]PB[甲]PW[乙];B[pd];W[dp];B[qp])', 'utf8')
+
+  const parsed = await call(ctx.registered.get('go_parse_sgf'), WORKSPACE, { path: 'pair.sgf' })
+  assert.equal(parsed.path, copy, '源路径应解析到复盘副本')
+  assert.equal(parsed.moveCount, 3, '读到的是副本的内容')
+  assert.equal(readFileSync(src, 'utf8').includes('qp'), false, '源棋谱仍是 2 手')
+
+  const report = await call(ctx.registered.get('go_export_report'), WORKSPACE, { path: 'pair.sgf' })
+  assert.equal(basename(report.outPath), 'pair-sensei.review.md')
+
+  // 直接给副本路径时不再叠加后缀（幂等）
+  const direct = await call(ctx.registered.get('go_parse_sgf'), WORKSPACE, { path: 'pair-sensei.sgf' })
+  assert.equal(direct.path, copy)
 })
 
 // ---------------------------------------------------------------------------
@@ -588,7 +618,8 @@ test('LZ 解析: 行棋方胜率通道与 C[] 注释通道一致（真实棋谱�
 test('go_write_review: 带变化图的真实棋谱应能写回全部主线手数', async () => {
   const target = join(WORKSPACE, 'variation.sgf')
   copyFileSync(fixture('real-analysis.sgf'), target)
-  const game = parseGame(readFileSync(target, 'utf8'))
+  const sourceBefore = readFileSync(target, 'utf8')
+  const game = parseGame(sourceBefore)
   const last = game.moves.length
   const result = await call(ctx.registered.get('go_write_review'), WORKSPACE, {
     path: 'variation.sgf',
@@ -599,12 +630,34 @@ test('go_write_review: 带变化图的真实棋谱应能写回全部主线手数
   })
   assert.deepEqual(result.written, [21, last])
   assert.deepEqual(result.missing, [])
+  assert.equal(result.path, join(WORKSPACE, 'variation-sensei.sgf'))
   // 写回后棋谱仍完整：手数与变化图不变，原有分析注释保留
-  const back = parseGame(readFileSync(target, 'utf8'))
+  const back = parseGame(readFileSync(result.path, 'utf8'))
   assert.equal(back.moves.length, last)
   assert.equal(back.stats.variations, game.stats.variations)
   assert.ok(back.moves[20].analysis.comment.includes('胜率'))
   assert.ok(back.moves[20].analysis.comment.includes('分叉之后的第 21 手'))
+  assert.equal(readFileSync(target, 'utf8'), sourceBefore, '源棋谱不得被改写')
+})
+
+test('副本损坏（空文件）时退回源棋谱，不让整盘棋读不出来', async () => {
+  const src = join(WORKSPACE, 'broken.sgf')
+  const copy = join(WORKSPACE, 'broken-sensei.sgf')
+  writeFileSync(src, '(;GM[1]FF[4]SZ[19]KM[7.5]PB[甲]PW[乙];B[pd];W[dp])', 'utf8')
+  writeFileSync(copy, '', 'utf8') // 半截写入/被别的程序清空
+
+  const parsed = await call(ctx.registered.get('go_parse_sgf'), WORKSPACE, { path: 'broken.sgf' })
+  assert.equal(parsed.path, src, '坏副本应被跳过，读源棋谱')
+  assert.equal(parsed.moveCount, 2)
+
+  // 写回仍然落在副本上 —— 等于用源内容把坏副本重建一遍（自愈）
+  const wrote = await call(ctx.registered.get('go_write_review'), WORKSPACE, {
+    path: 'broken.sgf',
+    entries: [{ moveNumber: 1, comment: '坏副本自愈回归。' }],
+  })
+  assert.equal(wrote.path, copy)
+  assert.ok(readFileSync(copy, 'utf8').includes('坏副本自愈回归。'))
+  assert.ok(!readFileSync(src, 'utf8').includes('坏副本自愈回归。'), '源棋谱仍不动')
 })
 
 test('Config: 导出 Schema 且默认值齐全', () => {
@@ -624,11 +677,12 @@ test('真实带分析棋谱全链路（解析→复盘→写回→报告）', as
     entries: [{ moveNumber: 1, comment: '复盘讲解：开局守角，方向正确。' }],
   })
   assert.deepEqual(writeResult.written, [1])
-  const finalText = readFileSync(join(WORKSPACE, 'real.sgf'), 'utf8')
+  assert.equal(writeResult.path, join(WORKSPACE, 'real-sensei.sgf'), '讲解写进副本')
+  const finalText = readFileSync(writeResult.path, 'utf8')
   assert.ok(finalText.includes('复盘讲解：开局守角，方向正确。'))
   const report = await call(ctx.registered.get('go_export_report'), WORKSPACE, { path: 'real.sgf' })
   assert.ok(existsSync(report.outPath))
-  assert.equal(basename(report.outPath), 'real.review.md')
+  assert.equal(basename(report.outPath), 'real-sensei.review.md', '报告跟着工作文件（副本）走')
 })
 
 // ---------------------------------------------------------------------------
@@ -706,6 +760,7 @@ test('go_engine_analyze: 补算结果写回棋谱，AI 首选与变化图进文�
 
   const target = join(WORKSPACE, 'engine-writeback.sgf')
   writeFileSync(target, '(;GM[1]FF[4]SZ[19]KM[7.5]PB[甲]PW[乙];B[pd];W[dp];B[qp];W[dd])', 'utf8')
+  const sourceBefore = readFileSync(target, 'utf8')
   const stdout = [
     '{"id":"go-sensei","turnNumber":1,"moveInfos":[{"move":"D16","order":0,"visits":100,"winrate":0.55,"scoreMean":1.5,"prior":0.3,"pv":["D16","Q4"]}]}',
     '{"id":"go-sensei","turnNumber":2,"moveInfos":[{"move":"Q16","order":0,"visits":100,"winrate":0.52,"scoreMean":2,"prior":0.2,"pv":["Q16","D4"]}]}',
@@ -727,7 +782,10 @@ test('go_engine_analyze: 补算结果写回棋谱，AI 首选与变化图进文�
   try {
     const value = await callJson(engineCtx.registered.get('go_engine_analyze'), WORKSPACE, { path: target, from: 1, to: 2 })
     assert.ok(value.analysisWritten.moves >= 2, `应有写回：${JSON.stringify(value.analysisWritten)}`)
-    const text = readFileSync(target, 'utf8')
+    const outPath = value.analysisWritten.path
+    assert.equal(outPath, join(WORKSPACE, 'engine-writeback-sensei.sgf'), '写回目标是 -sensei 副本')
+    assert.equal(readFileSync(target, 'utf8'), sourceBefore, '源棋谱必须逐字节保持原样')
+    const text = readFileSync(outPath, 'utf8')
     assert.ok(text.includes('WV['), text)
     assert.ok(text.includes('DM['), text)
     assert.ok(text.includes('LZ['), `补算结果必须带上 LZ（首选/变化图）：${text}`)

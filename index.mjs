@@ -10,6 +10,7 @@ import { registerGoTools, autoComputeIfNeeded } from './src/tools.js'
 import { ReviewCache } from './src/cache.js'
 import { RANKS, reviewGame, inferLevel } from './src/review.js'
 import { parseGame, decodeBuffer, coordLabel } from './src/sgf.js'
+import { senseiPathFor } from './src/derived.js'
 
 export const name = 'go-sensei'
 // 硬依赖：tools 注册工具、systemPrompt 挂人设段、fs 读写棋谱。
@@ -72,7 +73,7 @@ function buildPersona(cfg) {
 5. 工具纪律：先 go_parse_sgf 了解棋谱，再 go_review_moves 找问题手，逐手讲解后调用 go_write_review 写回 SGF 注释，需要落盘报告时用 go_export_report；同一局重复复盘优先复用工具返回的缓存结果（cached=true 时不再重复获取全量数据）；单局讲解预算约 ${cfg.tokenBudget} tokens，用"先问后讲"与数据裁剪控制消耗。`
 }
 
-const TOOL_GUIDANCE = `围棋复盘工具（DeepGo Sensei）：go_parse_sgf 读棋谱，go_review_moves 找问题手，go_position_context 取某手前后局面与 AI 候选，go_write_review 把讲解写回 SGF 的 C[] 注释，go_export_report 落盘 Markdown 报告，go_engine_info 查看/说明当前使用的 KataGo 引擎与权重。补算引擎默认用插件自带的 engine 目录（开箱即用），也可用配置 engineDir / kataGoPath / kataGoModel 换成用户自己的引擎与权重。路径参数支持绝对路径或相对当前会话工作区的相对路径。`
+const TOOL_GUIDANCE = `围棋复盘工具（DeepGo Sensei）：go_parse_sgf 读棋谱，go_review_moves 找问题手，go_position_context 取某手前后局面与 AI 候选，go_write_review 把讲解写回 SGF 的 C[] 注释，go_export_report 落盘 Markdown 报告，go_engine_info 查看/说明当前使用的 KataGo 引擎与权重。**源棋谱只读**：讲解与分析数据（胜率/目差/AI 首选与变化图）都写进同目录的 \`<源名>-sensei.sgf\` 副本，源文件永不修改；读取同一盘棋时若副本已存在（工具与面板都一样）就直接读副本，因为那才是上一次复盘的成果。补算引擎默认用插件自带的 engine 目录（开箱即用），也可用配置 engineDir / kataGoPath / kataGoModel 换成用户自己的引擎与权重。路径参数支持绝对路径或相对当前会话工作区的相对路径。`
 
 /** 面板一次最多返回的问题手数（数据裁剪 + 渲染上限一起生效）。 */
 const MAX_PANEL_CANDIDATES = 20
@@ -398,9 +399,31 @@ function registerPanelRoute(ctx, cfg) {
           for (const root of roots) {
             if (target.displayPath.startsWith(root)) { rememberRoot(root); break }
           }
-          const bytes = await ctx.fs.readBytes(target, undefined, 64 * 1024 * 1024)
-          const { text } = decodeBuffer(bytes)
-          const game = parseGame(text)
+          // 复盘产物（分析数据 + 讲解）都写在 `-sensei` 副本里，源棋谱只读。
+          // 面板按同一条规则取"工作文件"：副本存在就用副本 —— 否则用户在对话里
+          // 复盘过的棋谱，在面板里会显示成"没有分析数据"（既缺首选/变化图，
+          // 也会因为判定为无分析而现场重算几十秒）。
+          const sourceTarget = target
+          const sourcePath = sourceTarget.displayPath
+          const derivedPath = senseiPathFor(sourcePath)
+          if (derivedPath !== sourcePath) {
+            const derivedTarget = await ctx.fs.resolve(derivedPath, { cwd: baseDir ?? undefined })
+            const derivedInfo = await ctx.fs.stat(derivedTarget, undefined)
+            if (derivedInfo?.type === 'file') target = derivedTarget
+          }
+          let bytes = await ctx.fs.readBytes(target, undefined, 64 * 1024 * 1024)
+          let { text } = decodeBuffer(bytes)
+          let game
+          try {
+            game = parseGame(text)
+          } catch (error) {
+            // 副本坏了（空文件/半截写入）不能让面板打不开棋谱：退回源棋谱。
+            if (target === sourceTarget) throw error
+            target = sourceTarget
+            bytes = await ctx.fs.readBytes(target, undefined, 64 * 1024 * 1024)
+            ;({ text } = decodeBuffer(bytes))
+            game = parseGame(text)
+          }
           // 与 go_review_moves 共用同一条管线：无分析数据且已配置引擎时自动补算。
           // 早期这里直接调 reviewGame，绕过了工具的自动补算 —— 同一份棋谱在对话里
           // 复盘能出问题手、面板却显示「未发现问题手」。同一业务逻辑只保留一份。
@@ -417,6 +440,7 @@ function registerPanelRoute(ctx, cfg) {
             ok: true,
             data: {
               path: target.displayPath,
+              ...(sourcePath !== target.displayPath ? { sourcePath } : {}),
               mode: review.mode,
               level,
               moveCount: game.moves.length,
