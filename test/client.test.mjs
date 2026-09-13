@@ -615,6 +615,25 @@ function markerCounts(tree) {
   }
 }
 
+/** 盘上的变化图（Lizzieyzy 的 ghost stone）：一颗棋子 + 正中序号。
+ *  返回绘制顺序的 [{key, cx, cy, black, alpha, number, numberFill}]。 */
+function ghostStones(tree) {
+  const nodes = walk(tree)
+  const circles = nodes.filter((n) => n.type === 'circle' && /^pv\d+$/.test(String(n.props.key || '')))
+  return circles.map((n) => {
+    const label = nodes.find((k) => k.props.key === 'pvt' + String(n.props.key).slice(2))
+    return {
+      key: n.props.key,
+      cx: n.props.cx,
+      cy: n.props.cy,
+      black: n.props.fill === '#141519',
+      alpha: n.props.fillOpacity,
+      number: label === undefined ? null : label.children.join(''),
+      numberFill: label === undefined ? null : label.props.fill,
+    }
+  })
+}
+
 /** 5 手的小局面：最后一手提掉中间的白子，用来验证"棋盘要按规则画"。 */
 const CAPTURE_BOARD = {
   size: 19,
@@ -682,7 +701,7 @@ test('client: 棋盘渲染对畸形候选数据不抛错（首选标签解析不
   assert.ok(!nodes.some((n) => n.type === 'circle' && n.props.stroke === '#0000ff'), '也不画首选蓝圈')
 })
 
-test('client: 变化图落在实战已占的点上时不画蓝点（免得像把子叠在子上）', () => {
+test('client: 变化图落在实战已占的点上时不画（免得像把子叠在子上）', () => {
   const { plugin, react } = loadClient()
   const { renderBoard } = plugin.__internals
   const board = {
@@ -696,9 +715,41 @@ test('client: 变化图落在实战已占的点上时不画蓝点（免得像把
     board, upto: 1, problem: null, hintLabel: '',
     pv: [{ x: 4, y: 4 }, { x: 2, y: 2 }, { x: 5, y: 5 }], onPick: null,
   })
-  const dots = walk(tree).filter((n) => n.type === 'circle' && n.props.fill === '#1668ff')
-  assert.equal(dots.length, 1, '只画落在空点上的那一手')
-  assert.equal(dots[0].props.cx, 8 + 5 * (84 / 8), '留下的是 pv[2]（序号 3）')
+  const ghosts = ghostStones(tree)
+  assert.equal(ghosts.length, 1, '只画落在空点上的那一手')
+  assert.equal(ghosts[0].cx, 8 + 5 * (84 / 8), '留下的是 pv[2]')
+  // 序号不重排：被跳过的仍是变化第 2 手，画出来的是第 3 手；
+  // 轮转也不受影响（第 1 手黑 → 第 2 手白被跳过 → 第 3 手仍是黑）
+  assert.equal(ghosts[0].number, '3')
+  assert.equal(ghosts[0].black, true)
+})
+
+test('client: 变化图按轮转分黑白，跳过已占点也不打乱序号与轮转', () => {
+  const { plugin } = loadClient()
+  const { pvGhostStones } = plugin.__internals
+  assert.equal(typeof pvGhostStones, 'function')
+  const size = 9
+  const empty = new Array(size * size).fill(0)
+  // 首选（第 1 手）＋后续三手
+  const pv = [{ x: 4, y: 4 }, { x: 5, y: 5 }, { x: 6, y: 6 }, { x: 2, y: 2 }]
+  // 第 1 手是黑 → 第 2 手白、第 3 手黑、第 4 手白（Lizzieyzy Branch.java 的轮转口径）
+  assert.deepEqual(pvGhostStones(pv, empty, size, 'B'), [
+    { x: 5, y: 5, black: false, number: 2 },
+    { x: 6, y: 6, black: true, number: 3 },
+    { x: 2, y: 2, black: false, number: 4 },
+  ])
+  // 第 1 手是白（或颜色未知时按黑先）→ 整体反相
+  assert.deepEqual(pvGhostStones(pv, empty, size, 'W').map((s) => s.black), [true, false, true])
+  assert.deepEqual(pvGhostStones(pv, empty, size, null).map((s) => s.black), [false, true, false])
+  // 已占点跳过：跳掉的是白 2，后面画的仍是黑 3（不重排序号、不串色）
+  const grid = empty.slice()
+  grid[5 * size + 5] = 1
+  assert.deepEqual(pvGhostStones(pv, grid, size, 'B'), [
+    { x: 6, y: 6, black: true, number: 3 },
+    { x: 2, y: 2, black: false, number: 4 },
+  ])
+  // 只有首选一点（没有后续）时什么都不画
+  assert.deepEqual(pvGhostStones([{ x: 4, y: 4 }], empty, size, 'B'), [])
 })
 
 test('client: 面板如实显示补算状态（补了多少手 / 失败原因）', async () => {
@@ -984,10 +1035,16 @@ test('client: 棋盘可收起；点问题手自动展开并跳到那一手（含
   assert.ok(Math.abs(bestRing.props.cx - 78) < 0.01 && Math.abs(bestRing.props.cy - 22) < 0.01,
     `蓝圈应在 Q16（实际 ${bestRing.props.cx},${bestRing.props.cy}）`)
   assert.ok(nodes.some((n) => n.type === 'rect' && n.props.fill === '#ffc800'), '首选点胜率用橙底信息条')
-  // 蓝点＝首选之后的后续几手（D4、R6），不是第 2、3 个候选点
-  const pvDots = walk(tree).filter((n) => /^pv\d+$/.test(String(n.props.key || '')))
-  assert.deepEqual(pvDots.map((n) => n.props.cx), [8 + 3 * (84 / 18), 8 + 16 * (84 / 18)],
-    '变化图应画在 D4、R6（实际 ' + pvDots.map((n) => n.props.key).join(',') + '）')
+  // 变化图＝首选之后的后续几手（D4、R6），不是第 2、3 个候选点。
+  // 画法照 Lizzieyzy 的 ghost stone：一颗半透明棋子 + 正中序号（黑棋白字、白棋黑字）
+  const ghosts = ghostStones(tree)
+  assert.deepEqual(ghosts.map((n) => n.cx), [8 + 3 * (84 / 18), 8 + 16 * (84 / 18)],
+    '变化图应画在 D4、R6（实际 ' + ghosts.map((n) => n.key).join(',') + '）')
+  assert.deepEqual(ghosts.map((n) => n.number), ['2', '3'], '序号是变化里的第 2、3 手')
+  // 第 3 手是黑 E16 → 变化第 2 手（D4）是白、第 3 手（R6）是黑
+  assert.deepEqual(ghosts.map((n) => n.black), [false, true])
+  assert.deepEqual(ghosts.map((n) => n.numberFill), ['#111111', '#ffffff'], '数字反色')
+  assert.deepEqual(ghosts.map((n) => n.alpha), [0.55, 0.55], '半透明：底下的实战棋子还看得见')
   assert.ok(!nodes.some((n) => n.props.cx === 8 + 2 * (84 / 18) && n.props.cy === 8 + 9 * (84 / 18)),
     '第 2 个候选点 C10 不该上盘')
   const text = texts(nodes).join('|')
@@ -1357,15 +1414,18 @@ test('client: 讲解点（不是问题手）也标出 AI 首选与变化图', as
   const hint = inBoard.find((n) => n.type === 'rect' && n.props.fill === '#ffc800')
   assert.ok(hint, '首选点旁应有橙底信息条')
 
-  // 蓝点 ＝ **首选之后的后续几手**（变化线 D4 → R6 → C10），不是第 2、3 个候选点
+  // 变化图 ＝ **首选之后的后续几手**（变化线 D4 → R6 → C10），不是第 2、3 个候选点；
+  // 每手都是一颗 ghost stone（半透明棋子 + 变化序号）
   const step = 84 / 18
-  const dots = inBoard.filter((n) => /^pv\d+$/.test(String(n.props.key || '')))
-  assert.equal(dots.length, 3, `盘上应只有变化线的 3 个蓝点（实际 ${dots.map((n) => n.props.key).join(',')}）`)
-  assert.deepEqual(dots.map((n) => n.props.cx), [8 + 3 * step, 8 + 16 * step, 8 + 2 * step], 'D4 → R6 → C10')
-  assert.deepEqual(dots.map((n) => n.props.cy), [8 + 15 * step, 8 + 13 * step, 8 + 9 * step])
-  assert.deepEqual(
-    inBoard.filter((n) => /^pvt\d+$/.test(String(n.props.key || ''))).map((n) => n.children.join('')),
-    ['2', '3', '4'], '序号从 2 起：变化里的第 2、3、4 手')
+  const ghosts = ghostStones(tree)
+  assert.equal(ghosts.length, 3, `盘上应只有变化线的 3 手（实际 ${ghosts.map((n) => n.key).join(',')}）`)
+  assert.deepEqual(ghosts.map((n) => n.cx), [8 + 3 * step, 8 + 16 * step, 8 + 2 * step], 'D4 → R6 → C10')
+  assert.deepEqual(ghosts.map((n) => n.cy), [8 + 15 * step, 8 + 13 * step, 8 + 9 * step])
+  assert.deepEqual(ghosts.map((n) => n.number), ['2', '3', '4'],
+    '序号从 2 起：变化里的第 2、3、4 手（第 1 手＝首选，另有青圆蓝圈）')
+  // 第 3 手是黑 D16 → 变化第 2 手白、第 3 手黑、第 4 手白
+  assert.deepEqual(ghosts.map((n) => n.black), [false, true, false], '按轮转分黑白')
+  assert.deepEqual(ghosts.map((n) => n.numberFill), ['#111111', '#ffffff', '#111111'], '数字反色')
   // 候选点不上盘：第 2 个候选 R14 在 (16,5)、第 3 个 C6 在 (2,13)，盘上都不该有点
   assert.ok(!inBoard.some((n) => n.props.cx === 8 + 16 * step && n.props.cy === 8 + 5 * step),
     '第 2 个候选点不该画到盘上')

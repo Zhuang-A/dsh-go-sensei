@@ -173,7 +173,12 @@ window.__ModuleLoader__.load({
     var BEST_FILL = 'rgba(0, 255, 255, 0.5)' // theme best-move-color [0,255,255,240]
     var BEST_RING = '#0000ff' // Color.BLUE（showBlueRing）
     var BEST_INFO_BG = '#ffc800' // Color.ORANGE
-    var PV_BLUE = '#1668ff'
+    // 变化图后续几手 = Lizzieyzy 的 ghost stone：一颗按轮转取色的棋子 + 正中序号。
+    // 唯有一处与那边不同 —— 棋子取半透明。Lizzie 的盘面只画变化本身，而我们的
+    // 棋盘底下还有**真实局面**：画成不透明的子，学生就分不清哪几手是真下的了。
+    var GHOST_BLACK = '#141519'
+    var GHOST_WHITE = '#f7f8fa'
+    var GHOST_ALPHA = 0.55
     var MARK_COLORS = {
       blunder: '#9b1996', // (155,25,150) 最严重一档
       mistake: '#d01013', // (208,16,19)
@@ -392,37 +397,46 @@ window.__ModuleLoader__.load({
         }
       }
 
-      // 变化图（PV）：首选点 = 青色实心圆 + 蓝圈；后续几手 = 蓝点 + 序号。
+      // 变化图（PV）：首选一点 = 青色实心圆 + 蓝圈（旁边还有橙底胜率条）；首选
+      // **之后**的后续几手按 Lizzieyzy 的 ghost stone 画 —— 半透明棋子（按轮转
+      // 分黑白）+ 棋子正中的变化序号（首选＝1，所以后续从 2 起）。
       //
       // 位置有讲究：AI 标注要画在**讲解小方点 / 最后一手圆点 / 问题手色点之前**。
       // 自 2026-09-13 起每一手（含讲解点）都会画首选点，青色半透明圆盘常常正落在
       // 刚下的那一手上 —— 画在后面会把用户最关心的那几个小记号（"这手有讲解"
-      // "最后一手"）压上一层青色。记号小而实、圆盘大而淡，让小的在上面才对。
+      // "最后一手"）压上一层青色。记号小而实、变化棋大而淡，让小的在上面才对。
+      //
+      // 最后一手先算出来：变化的第一手是"第 upto 手改下哪里"，所以由**刚落下的
+      // 那一手**同色的人来下（候选本来就是这一手的替代着法），后续逐手轮转 ——
+      // 与 Lizzieyzy 的 Branch.java（blackToPlay 交替）同一套口径。
+      var lastIndex = Math.max(0, Math.min(opts.upto, moves.length)) - 1
+      var last = lastIndex >= 0 ? moves[lastIndex] : null
       var pv = opts.showHint === false || !Array.isArray(opts.pv) ? [] : opts.pv
-      pv.forEach(function (p, index) {
-        if (p === null || p === undefined) return
-        if (index === 0) {
-          kids.push(React.createElement('circle', {
-            key: 'best', cx: pos(p.x), cy: pos(p.y), r: radius + 0.2, fill: BEST_FILL,
-            pointerEvents: 'none',
-          }))
-          kids.push(React.createElement('circle', {
-            key: 'bestring', cx: pos(p.x), cy: pos(p.y), r: radius + 0.6, fill: 'none',
-            stroke: BEST_RING, strokeWidth: 0.45, pointerEvents: 'none',
-          }))
-        } else if (grid[p.y * size + p.x] === 0) {
-          // 变化图的手如果落在实战已占的点上（那条变化与当前局面无关），不画——
-          // 画上去会像是把子叠在子上，反而误导
-          kids.push(React.createElement('circle', {
-            key: 'pv' + index, cx: pos(p.x), cy: pos(p.y), r: radius * 0.58, fill: PV_BLUE,
-            pointerEvents: 'none',
-          }))
-          kids.push(React.createElement('text', {
-            key: 'pvt' + index, x: pos(p.x), y: pos(p.y) + 0.85, fontSize: 2.3, fill: '#ffffff',
-            textAnchor: 'middle', pointerEvents: 'none',
-          }, String(index + 1)))
-        }
+      pvGhostStones(pv, grid, size, last === null ? null : last.c).forEach(function (s) {
+        kids.push(React.createElement('circle', {
+          key: 'pv' + (s.number - 1), cx: pos(s.x), cy: pos(s.y), r: radius,
+          fill: s.black ? GHOST_BLACK : GHOST_WHITE, fillOpacity: GHOST_ALPHA,
+          stroke: s.black ? 'none' : '#111111',
+          strokeWidth: s.black ? 0 : Math.max(0.12, radius / 16),
+          pointerEvents: 'none',
+        }))
+        // 数字反色（黑棋上白字、白棋上黑字），Lizzieyzy drawBranch 同款
+        kids.push(React.createElement('text', {
+          key: 'pvt' + (s.number - 1), x: pos(s.x), y: pos(s.y) + radius * 0.45,
+          fontSize: radius * 1.15, fill: s.black ? '#ffffff' : '#111111',
+          textAnchor: 'middle', pointerEvents: 'none',
+        }, String(s.number)))
       })
+      if (pv.length > 0 && pv[0] !== null && pv[0] !== undefined) {
+        kids.push(React.createElement('circle', {
+          key: 'best', cx: pos(pv[0].x), cy: pos(pv[0].y), r: radius + 0.2, fill: BEST_FILL,
+          pointerEvents: 'none',
+        }))
+        kids.push(React.createElement('circle', {
+          key: 'bestring', cx: pos(pv[0].x), cy: pos(pv[0].y), r: radius + 0.6, fill: 'none',
+          stroke: BEST_RING, strokeWidth: 0.45, pointerEvents: 'none',
+        }))
+      }
 
       // 已写回的讲解：有讲解的手在棋子左上角点一个小方点（与 Lizzieyzy 的
       // 注释节点标记同一语义），学生一眼看出"哪几手有老师的话"。
@@ -441,9 +455,8 @@ window.__ModuleLoader__.load({
         }))
       }
 
-      // 最后一手：反色小实心圆点，半径 0.22 格宽（Lizzieyzy 的最后一手指示）
-      var lastIndex = Math.max(0, Math.min(opts.upto, moves.length)) - 1
-      var last = lastIndex >= 0 ? moves[lastIndex] : null
+      // 最后一手：反色小实心圆点，半径 0.22 格宽（Lizzieyzy 的最后一手指示）。
+      // lastIndex / last 在上面（画变化图之前）已经算好，顺带给变化定先手颜色。
       if (last !== null && last.x >= 0) {
         kids.push(React.createElement('circle', {
           key: 'last', cx: pos(last.x), cy: pos(last.y), r: step * LAST_MOVE_R,
@@ -471,8 +484,6 @@ window.__ModuleLoader__.load({
           strokeWidth: 0.7, pointerEvents: 'none',
         }))
       }
-
-      // 变化图（PV）与首选点在棋子之后、各类小记号之前画（见上面的说明）
 
       // 首选点的胜率：橙底黑字（Lizzieyzy drawStringForOrder 的信息条样式）。
       // pv[0] 可能解析失败（候选标签不是坐标，比如 'pass' 或空字符串）——
@@ -612,7 +623,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 首选之后最多画几手变化图（数据侧由 pvDepth 截断，这里再兜一道）。 */
-    var MAX_PV_DOTS = 5
+    var MAX_PV_MOVES = 5
 
     /**
      * 盘上要画的 AI 线：`[首选点, 变化第 2 手, 第 3 手…]`。
@@ -634,10 +645,49 @@ window.__ModuleLoader__.load({
       if (head === null) return []
       var out = [head]
       var tokens = String(best.line == null ? '' : best.line).split(/\s+/)
-      for (var i = 1; i < tokens.length && out.length <= MAX_PV_DOTS; i++) {
+      for (var i = 1; i < tokens.length && out.length <= MAX_PV_MOVES; i++) {
         if (tokens[i] === '') continue
         var pt = parsePointLabel(tokens[i], size)
         if (pt !== null) out.push(pt)
+      }
+      return out
+    }
+
+    /**
+     * 变化图后续几手 → 盘上的「幽灵棋」：每手的坐标、黑白与变化序号。
+     *
+     * 画法照抄 Lizzieyzy 的 drawBranch（BoardRenderer.java:1420 起 / Branch.java）：
+     * 后续每一手都画成**一颗棋子**、按轮转分黑白，棋子正中写它在这条变化里的序号
+     * —— 首选＝1（面板上另有青圆蓝圈标记），所以后续从 2 起，数字反色（黑棋上白字、
+     * 白棋上黑字）。原先的小蓝点看不出"这一手是谁下的"，学生读到"黑棋挡、白棋扳"
+     * 时对不上盘面。
+     *
+     * 两处刻意的取舍：
+     *   ① 落点已被实战棋子占住的整颗不画 —— 画上去像把子叠在子上（Lizzieyzy 在
+     *      removeDeadChainInVariation=false 时同样跳过实战有子的点）；序号不重排，
+     *      跳过就是跳过，与那边逐点取数的效果一致。
+     *   ② 颜色只按轮转推，不重放提子：一条四五手的变化里互相提子的情形罕见，
+     *      真遇上也只是多画一颗子，不值得为此把整条变化摆一遍（Lizzieyzy 那边是
+     *      真摆了盘，所以还多一层"被提的变化棋不画"的规则）。
+     *
+     * @param {Array<{x: number, y: number}>} pv [首选点, 后续…]（已解析成坐标）
+     * @param {number[]} grid 当前显示局面的网格（0 空 / 1 黑 / 2 白）
+     * @param {number} size 棋盘路数
+     * @param {string|null} firstColor 变化第一手（首选）的颜色 'B'/'W'；未知按黑先
+     * @returns {Array<{x: number, y: number, black: boolean, number: number}>}
+     */
+    function pvGhostStones(pv, grid, size, firstColor) {
+      if (!Array.isArray(pv) || pv.length < 2) return []
+      var out = []
+      var black = firstColor !== 'W'
+      for (var i = 1; i < pv.length; i++) {
+        // 换手：第 1 手（首选）已由 firstColor 那方下过，第 i 手逐手轮转。
+        // 必须放在 continue 之前 —— 跳过一子也要照常换手，不然颜色会串。
+        black = !black
+        var p = pv[i]
+        if (p === null || p === undefined) continue
+        if (grid[p.y * size + p.x] !== 0) continue
+        out.push({ x: p.x, y: p.y, black: black, number: i + 1 })
       }
       return out
     }
@@ -828,7 +878,7 @@ window.__ModuleLoader__.load({
       { key: 'showNote', kind: 'square', color: '#7c8cff', label: '有讲解',
         hint: '棋谱写回注释的手（左上角小方点），只标已经下到的' },
       { key: 'showHint', kind: 'ring', color: BEST_RING, label: 'AI 首选 / 变化图',
-        hint: '每一手（含讲解点）改下哪里：青圆蓝圈＝首选，橙底数字＝它的胜率，蓝点带序号＝首选之后的后续几手' },
+        hint: '每一手（含讲解点）改下哪里：青圆蓝圈＝首选，橙底数字＝它的胜率，之后每手一颗半透明棋子、正中是它在这条变化里的序号（2、3…，黑棋白字）' },
     ]
 
     function markerKeyRow() {
@@ -1130,7 +1180,7 @@ window.__ModuleLoader__.load({
             }),
             React.createElement('div', { className: 'dgs-note' },
               problem !== null
-                ? '○ 实战这一手是问题手　◌ AI 首选（青圆蓝圈）　蓝点＝变化图后续'
+                ? '○ 实战这一手是问题手　◌ AI 首选（青圆蓝圈）　半透明棋子＝变化图后续几手'
                 : aiNoteText(aiList) !== ''
                   // 不是问题手但有 AI 候选（讲解点最常落在这里）：把首选与后续念出来
                   ? aiNoteText(aiList) + (aiLineText(aiList) === '' ? '' : '　后续：' + aiLineText(aiList))
@@ -2095,6 +2145,7 @@ window.__ModuleLoader__.load({
       playStone: playStone,
       boardAt: boardAt,
       starPoints: starPoints,
+      pvGhostStones: pvGhostStones,
       baseName: baseName,
       filePathOfAddress: filePathOfAddress,
       sameFile: sameFile,
