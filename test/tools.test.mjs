@@ -193,8 +193,9 @@ after(() => {
   rmSync(WORKSPACE, { recursive: true, force: true })
 })
 
-test('apply: 无引擎时注册 6 个工具（含 go_engine_info）+ 2 个提示词段', () => {
+test('apply: 无引擎时注册 7 个工具（含 go_engine_info）+ 2 个提示词段', () => {
   assert.deepEqual([...ctx.registered.keys()].sort(), [
+    'go_draw_diagram',
     'go_engine_info',
     'go_export_report',
     'go_parse_sgf',
@@ -206,6 +207,10 @@ test('apply: 无引擎时注册 6 个工具（含 go_engine_info）+ 2 个提示
   const persona = ctx.sections.find((s) => s.name === 'go-sensei:persona')
   assert.ok(persona.text.includes('围棋老师'))
   assert.ok(persona.text.includes('50000')) // token 预算注入
+  // 追问必须配图（用户 2026-09-14 的要求）：人设与工具说明都要点出 go_draw_diagram
+  assert.ok(persona.text.includes('go_draw_diagram'), '人设要写明配图纪律')
+  const guidance = ctx.sections.find((s) => s.name === 'tool:go-sensei')
+  assert.ok(guidance.text.includes('go_draw_diagram'), '工具说明要介绍配图工具')
 })
 
 test('apply: engineDir 指向自带引擎目录的等价形态 → 注册补算工具并认出最大权重', async () => {

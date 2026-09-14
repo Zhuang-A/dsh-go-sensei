@@ -71,9 +71,6 @@ window.__ModuleLoader__.load({
       '  margin-top: 8px; padding-top: 6px; }',
       '[data-dgs] .dgs-boardhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }',
       '[data-dgs] .dgs-boardhead .dgs-sub { flex: 1; min-width: 0; }',
-      '[data-dgs] .dgs-split { display: flex; gap: 12px; align-items: flex-start; margin-top: 6px; }',
-      '[data-dgs] .dgs-col-board { flex: 0 0 auto; width: 300px; max-width: 46%; }',
-      '[data-dgs] .dgs-col-list { flex: 1; min-width: 0; }',
       '[data-dgs] .dgs-board { display: block; width: 100%; height: auto; border-radius: 6px; }',
       '[data-dgs] .dgs-ctl { display: flex; align-items: center; gap: 4px; margin-top: 6px; flex-wrap: wrap; }',
       // 按钮文字不许折行（窄面板里「恶点」会被挤成竖排两行）；挤不下时让滑块换到下一行。
@@ -109,6 +106,17 @@ window.__ModuleLoader__.load({
       '[data-dgs] .dgs-comment-tag { font-size: 10px; margin-bottom: 2px;',
       '  color: var(--dsw-alias-label-secondary, #9aa4b2); }',
       '[data-dgs] .dgs-hasnote { color: var(--dsw-alias-brand-primary, #6b8afd); }',
+      // ── 胜率 / 目差曲线（三处视图共用，可折叠）──────────────────────────
+      '[data-dgs] .dgs-curves { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }',
+      '[data-dgs] .dgs-curve { display: flex; flex-direction: column; }',
+      '[data-dgs] .dgs-curvehead { display: inline-flex; align-items: center; gap: 8px;',
+      '  align-self: flex-start; padding: 2px 8px; white-space: nowrap; }',
+      '[data-dgs] .dgs-curvehead .dgs-val { color: var(--dsw-alias-label-secondary, #9aa4b2); }',
+      '[data-dgs] .dgs-chart { display: block; width: 100%; max-width: 560px; height: auto; margin-top: 4px;',
+      '  border-radius: 6px; background: var(--dsw-alias-bg-layer-2, #2a2b31); }',
+      '[data-dgs] .dgs-chart-hit { cursor: pointer; }',
+      '[data-dgs] .dgs-chart-hint { font-size: 10px; margin-top: 2px;',
+      '  color: var(--dsw-alias-label-secondary, #9aa4b2); }',
       // ── 右侧栏文档预览（.sgf 在原生右侧栏里打开时的棋盘）────────────────
       '[data-dgs].dgs-doc { border: none; background: transparent; margin: 0; padding: 8px 10px;',
       '  max-width: none; border-radius: 0; }',
@@ -800,13 +808,16 @@ window.__ModuleLoader__.load({
       // 面板自己展开/收起的状态也要共享：主区域一次只渲染一个面板，切到整页棋盘
       // 再切回来时 dock 是重新挂载的——不共享的话用户每次回来都要再点一次「展开」。
       open: false,
-      boardOpen: false,
       follow: true,
       // 盘上标注的开关（三处视图共享）：问题手色点 / 讲解小方点 / AI 首选与变化图。
       // 三个都默认开——它们是讲解的主体；关掉是为了让盘面干净地看棋形。
       showProblem: true,
       showNote: true,
       showHint: true,
+      // 两条曲线（胜率 / 目差，统一黑方视角）的展开态：三处视图同步，
+      // 缺省展开（曲线本身就是这次新增的主角，收起只是"想让面板短一点"时的选择）。
+      curveWinrate: true,
+      curveScore: true,
       subs: [],
     }
 
@@ -900,6 +911,230 @@ window.__ModuleLoader__.load({
           )
         }),
       )
+    }
+
+    // -----------------------------------------------------------------------
+    // 胜率 / 目差曲线（三处视图共用）
+    //
+    // 数据来自宿主：payload.curve = { winrate: number|null[], score: number|null[] }，
+    // 下标 i 对应「第 i+1 手之后的局面」，**统一黑方视角**（正胜率/正目差 = 黑好）。
+    // 口径换算只做一次、只做在宿主（棋谱里的 WV 是白方视角、DM 是黑方视角、
+    // LZ 是落子者视角），浏览器这边只负责画。
+    // -----------------------------------------------------------------------
+
+    /** 曲线图视口（无量纲单位；宽度交给 CSS 收窄，高度按比例缩放，不会变形）。 */
+    var CURVE_W = 480
+    var CURVE_H = 96
+    var CURVE_PAD = { left: 34, right: 8, top: 10, bottom: 16 }
+    var CURVE_COLOR = { winrate: '#6b8afd', score: '#d29922' }
+
+    /** 纵轴定义：胜率固定 0~100%；目差关于 0 对称（取整到 10 目一档）。 */
+    function curveDomain(kind, values) {
+      if (kind === 'winrate') {
+        return { min: 0, max: 100, axis: [100, 50, 0], format: function (v) { return String(Math.round(v)) } }
+      }
+      var maxAbs = 5
+      for (var i = 0; i < values.length; i++) {
+        var v = values[i]
+        if (typeof v === 'number' && Number.isFinite(v)) maxAbs = Math.max(maxAbs, Math.abs(v))
+      }
+      maxAbs = Math.max(10, Math.ceil(maxAbs / 10) * 10)
+      return {
+        min: -maxAbs, max: maxAbs, axis: [maxAbs, 0, -maxAbs],
+        format: function (v) { return (v > 0 ? '+' : '') + String(Math.round(v)) },
+      }
+    }
+
+    /** 一个数值的显示文本（曲线表头用）。 */
+    function curveValueText(kind, v) {
+      if (typeof v !== 'number' || !Number.isFinite(v)) return '—'
+      if (kind === 'winrate') return v.toFixed(1) + '%'
+      return (v > 0 ? '+' : '') + v.toFixed(1) + ' 目'
+    }
+
+    /**
+     * 画一张曲线图（SVG）。横轴＝手数，纵轴＝黑方视角的胜率／目差；
+     * 问题手在曲线上以面色点标出；点图上任意位置跳到那一手。
+     *
+     * @param {object} opts { kind, values, cur, marks, onSeek }
+     * @returns {object} React 元素
+     */
+    function renderCurve(opts) {
+      var kind = opts.kind === 'score' ? 'score' : 'winrate'
+      var values = Array.isArray(opts.values) ? opts.values : []
+      var total = values.length
+      var cur = Math.max(0, Math.min(Math.trunc(opts.cur) || 0, total))
+      var domain = curveDomain(kind, values)
+      var x0 = CURVE_PAD.left
+      var x1 = CURVE_W - CURVE_PAD.right
+      var y0 = CURVE_PAD.top
+      var y1 = CURVE_H - CURVE_PAD.bottom
+      var span = domain.max - domain.min
+      var finite = function (v) { return typeof v === 'number' && Number.isFinite(v) }
+      var xAt = function (i) { return total <= 1 ? (x0 + x1) / 2 : x0 + (x1 - x0) * (i / (total - 1)) }
+      var yAt = function (v) { return y1 - ((v - domain.min) / span) * (y1 - y0) }
+      var kids = []
+
+      kids.push(React.createElement('rect', {
+        key: 'bg', x: 0, y: 0, width: CURVE_W, height: CURVE_H, rx: 6, fill: 'transparent',
+      }))
+      // 横向刻度线 + 纵轴数值（中间那条虚一点：胜率 50% / 目差 0 是分界）
+      domain.axis.forEach(function (v, i) {
+        var y = yAt(v)
+        var lineProps = {
+          key: 'grid' + i, x1: x0, y1: y, x2: x1, y2: y,
+          stroke: 'rgba(255,255,255,.16)',
+          strokeWidth: i === 1 ? 0.7 : 0.45,
+        }
+        if (i === 1) lineProps.strokeDasharray = '3 3'
+        kids.push(React.createElement('line', lineProps))
+        kids.push(React.createElement('text', {
+          key: 'glab' + i, x: x0 - 4, y: y + 2.6, fontSize: 7.5, fill: '#9aa4b2', textAnchor: 'end',
+        }, domain.format(v)))
+      })
+
+      // 折线：缺口（该手没有数据）处断开，而不是把 null 连成一条假的直线
+      var segments = []
+      var seg = []
+      for (var i = 0; i < total; i++) {
+        if (finite(values[i])) {
+          seg.push(xAt(i).toFixed(1) + ',' + yAt(values[i]).toFixed(1))
+        } else if (seg.length > 0) {
+          segments.push(seg)
+          seg = []
+        }
+      }
+      if (seg.length > 0) segments.push(seg)
+      segments.forEach(function (points, index) {
+        if (points.length === 1) {
+          var parts = points[0].split(',')
+          kids.push(React.createElement('circle', {
+            key: 'pt' + index, cx: Number(parts[0]), cy: Number(parts[1]), r: 1.2, fill: CURVE_COLOR[kind],
+          }))
+          return
+        }
+        kids.push(React.createElement('polyline', {
+          key: 'line' + index, points: points.join(' '), fill: 'none', stroke: CURVE_COLOR[kind],
+          strokeWidth: 1.3, strokeLinejoin: 'round', strokeLinecap: 'round',
+        }))
+      })
+
+      // 问题手：在曲线上点一个小面色点（与盘上色点同一套严重度配色）
+      var marks = Array.isArray(opts.marks) ? opts.marks : []
+      marks.forEach(function (m, index) {
+        var at = (Math.trunc(m.n) || 0) - 1
+        if (at < 0 || at >= total || !finite(values[at])) return
+        kids.push(React.createElement('circle', {
+          key: 'mark' + index, cx: xAt(at), cy: yAt(values[at]), r: 2,
+          fill: m.color, stroke: '#12131a', strokeWidth: 0.5,
+        }))
+      })
+
+      // 当前手：竖直虚线 + 圆点（三处视图跟着共享的 upto 走）
+      if (cur >= 1 && cur <= total) {
+        var cx = xAt(cur - 1)
+        kids.push(React.createElement('line', {
+          key: 'cursor', x1: cx, y1: y0, x2: cx, y2: y1,
+          stroke: '#e8eaf0', strokeWidth: 0.7, strokeDasharray: '2 2',
+        }))
+        if (finite(values[cur - 1])) {
+          kids.push(React.createElement('circle', {
+            key: 'cursordot', cx: cx, cy: yAt(values[cur - 1]), r: 2.6,
+            fill: '#e8eaf0', stroke: CURVE_COLOR[kind], strokeWidth: 1.2,
+          }))
+        }
+      }
+
+      // 横轴刻度：第 1 手 / 中间 / 末手（数量少时自动去重）
+      var ticks = []
+      var addTick = function (n) {
+        if (!(n >= 1 && n <= total)) return
+        for (var k = 0; k < ticks.length; k++) if (ticks[k].n === n) return
+        ticks.push({ n: n, x: xAt(n - 1) })
+      }
+      addTick(1)
+      addTick(Math.ceil(total / 2))
+      addTick(total)
+      ticks.forEach(function (t, index) {
+        kids.push(React.createElement('text', {
+          key: 'tick' + index, x: t.x, y: CURVE_H - 4, fontSize: 7.5, fill: '#9aa4b2', textAnchor: 'middle',
+        }, String(t.n)))
+      })
+
+      // 点击定位：与棋盘「点交叉点」同一种手感
+      if (typeof opts.onSeek === 'function' && total > 1) {
+        kids.push(React.createElement('rect', {
+          key: 'hit', className: 'dgs-chart-hit', x: x0, y: y0, width: x1 - x0, height: y1 - y0,
+          fill: 'transparent',
+          onClick: function (event) {
+            try {
+              var box = event.currentTarget.getBoundingClientRect()
+              var px = ((event.clientX - box.left) / (box.width || 1)) * CURVE_W
+              var n = Math.round(((px - x0) / (x1 - x0)) * (total - 1)) + 1
+              opts.onSeek(Math.max(1, Math.min(total, n)))
+            } catch (error) {
+              /* 点击失败绝不影响面板 */
+            }
+          },
+        }))
+      }
+
+      return React.createElement('svg', {
+        className: 'dgs-chart', viewBox: '0 0 ' + CURVE_W + ' ' + CURVE_H,
+        xmlns: 'http://www.w3.org/2000/svg', 'data-dgs-curve': kind,
+      }, kids)
+    }
+
+    /** 一条曲线（表头可折叠 + 图）。没有可用数据时返回 null。 */
+    function curveBlock(kind, title, values, cur, marks, onSeek) {
+      if (!Array.isArray(values) || values.length === 0) return null
+      var hasData = false
+      for (var i = 0; i < values.length; i++) {
+        if (typeof values[i] === 'number' && Number.isFinite(values[i])) { hasData = true; break }
+      }
+      if (!hasData) return null
+      var openKey = kind === 'winrate' ? 'curveWinrate' : 'curveScore'
+      var open = senseiStore[openKey] !== false
+      var at = Math.max(0, Math.min(Math.trunc(cur) || 0, values.length))
+      var head = React.createElement('button', {
+        key: 'head',
+        className: 'dgs-curvehead',
+        title: open ? '收起这张曲线' : '展开（横轴＝手数，纵轴＝黑方视角）',
+        onClick: function () {
+          var patch = {}
+          patch[openKey] = !open
+          senseiPatch(patch)
+        },
+      },
+        React.createElement('span', null, title + (open ? ' ▾' : ' ▸')),
+        React.createElement('span', { className: 'dgs-val' },
+          '第 ' + at + ' 手 ' + curveValueText(kind, at >= 1 ? values[at - 1] : null)),
+      )
+      return React.createElement('div', { key: kind, className: 'dgs-curve' }, head,
+        open
+          ? renderCurve({ kind: kind, values: values, cur: at, marks: marks, onSeek: onSeek })
+          : null,
+        open ? React.createElement('div', { className: 'dgs-chart-hint' }, '点图上任意位置可跳到那一手') : null)
+    }
+
+    /**
+     * 两条曲线（胜率 + 目差）。宿主没给 curve 数据（老版本/纯棋理）时返回 null。
+     * @param {object} data /go-sensei/review 的 data
+     * @param {number} cur 当前手数
+     * @param {function} onSeek 点图定位回调 (moveNumber) -> void
+     */
+    function curvesView(data, cur, onSeek) {
+      if (!data || !data.curve) return null
+      var marks = (Array.isArray(data.candidates) ? data.candidates : []).map(function (c) {
+        return { n: c.moveNumber, color: markColor(c.labelKey, c.label) }
+      })
+      var kids = []
+      var winrate = curveBlock('winrate', '胜率曲线（黑方）', data.curve.winrate, cur, marks, onSeek)
+      var score = curveBlock('score', '目差曲线（正＝黑领先）', data.curve.score, cur, marks, onSeek)
+      if (winrate !== null) kids.push(winrate)
+      if (score !== null) kids.push(score)
+      if (kids.length === 0) return null
+      return React.createElement('div', { className: 'dgs-curves' }, kids)
     }
 
     /** 左侧栏的「Sensei 棋盘」图标：外壳给 size/active，配色随主题走。 */
@@ -1160,6 +1395,7 @@ window.__ModuleLoader__.load({
       })
 
       return React.createElement('div', { className: 'dgs-page', 'data-dgs': '' }, head, ctl,
+        curvesView(data, cur, function (n) { senseiPatch({ upto: n }) }),
         copied === '' ? null : React.createElement('div', { className: 'dgs-ok' }, copied),
         React.createElement('div', { className: 'dgs-page-body' },
           React.createElement('div', { className: 'dgs-page-board' },
@@ -1180,7 +1416,18 @@ window.__ModuleLoader__.load({
             }),
             React.createElement('div', { className: 'dgs-note' },
               problem !== null
-                ? '○ 实战这一手是问题手　◌ AI 首选（青圆蓝圈）　半透明棋子＝变化图后续几手'
+                // 停在一处问题手上：把"实战下在哪、AI 想下哪、之后怎么走"一次念全
+                // （与下方面板同一句话；两边措辞漂移过，学生看着会以为说的是两件事）
+                ? React.createElement('span', null,
+                    React.createElement('span', { className: 'dgs-prob' },
+                      '○ 实战 ' + String(problem.moveNumber) + ' 手 ' + String(problem.coordLabel || '')),
+                    hint && hint.label
+                      ? React.createElement('span', null,
+                          '　',
+                          React.createElement('span', { className: 'dgs-rec' }, '◌ AI 首选 ' + String(hint.label)),
+                          hint.winratePct == null ? '' : '（胜率 ' + String(hint.winratePct) + '%）',
+                          aiLineText(aiList) === '' ? '' : '　后续：' + aiLineText(aiList))
+                      : '　◌ AI 首选（青圆蓝圈）　半透明棋子＝变化图后续几手')
                 : aiNoteText(aiList) !== ''
                   // 不是问题手但有 AI 候选（讲解点最常落在这里）：把首选与后续念出来
                   ? aiNoteText(aiList) + (aiLineText(aiList) === '' ? '' : '　后续：' + aiLineText(aiList))
@@ -1235,11 +1482,8 @@ window.__ModuleLoader__.load({
       var openState = React.useState(senseiStore.open)
       var open = openState[0]
       var setOpen = openState[1]
-      // 内置棋盘：收起态只留一行表头；展开后才有棋盘本体与控制条
-      var boardOpenState = React.useState(senseiStore.boardOpen)
-      var boardOpen = boardOpenState[0]
-      var setBoardOpen = boardOpenState[1]
-      // 棋盘显示到第几手（0 = 开局）；载入棋谱后默认停在最严重的问题手
+      // 曲线/棋盘显示到第几手（0 = 开局）；载入棋谱后默认停在最严重的问题手。
+      // 这个手数是**共享状态**：面板里点一行，左侧栏整页的棋盘与曲线一起跟过去。
       var uptoState = React.useState(senseiStore.upto)
       var upto = uptoState[0]
       var setUpto = uptoState[1]
@@ -1302,9 +1546,6 @@ window.__ModuleLoader__.load({
               var list = body.data && Array.isArray(body.data.candidates) ? body.data.candidates : []
               var worst = list.length > 0 && typeof list[0].moveNumber === 'number' ? list[0].moveNumber : 0
               setUpto(worst > 0 ? Math.min(worst, total) : total)
-              // 读取成功就把棋盘展开：不然用户读完了还只看到一行表头，
-              // 得再点一下才知道盘上有东西（"棋盘不显示问题手"的观感有一半来自这里）
-              setBoardOpen(true)
             } else {
               setData(null)
               setErr(body && body.error ? String(body.error) : '读取失败')
@@ -1330,18 +1571,12 @@ window.__ModuleLoader__.load({
         setNotice('已插入输入框，回车即可发送')
       }
 
-      /** 当前棋盘显示到第几手（对手数上限做了夹取）。 */
-      function currentUpto() {
-        var total = data && data.board && Array.isArray(data.board.moves) ? data.board.moves.length : 0
-        return Math.max(0, Math.min(upto, total))
-      }
-
       /**
        * 跟随讲解：轮询 Host 记下的「正在讲解的局面」指针。
        *
        * 为什么是轮询而不是推送：讲解发生在服务端的工具调用里，棋盘在浏览器；
        * 两者之间没有现成的会话通道。这条指针只读内存、不读盘，3 秒一次的
-       * 代价可以忽略，而且只在"面板展开 + 棋盘展开 + 跟随开启"时才轮询。
+       * 代价可以忽略，而且只在"面板展开 + 跟随开启"时才轮询。
        */
       function pollFocus() {
         fetch('/go-sensei/focus')
@@ -1370,7 +1605,7 @@ window.__ModuleLoader__.load({
           })
       }
 
-      /** 把指针落到棋盘上：同一盘棋就跳手数，另一盘棋就自动载入。 */
+      /** 把指针落到面板上：同一盘棋就跳手数（曲线与整页棋盘一起跟过去），另一盘棋就自动载入。 */
       function applyFocus(f) {
         var sameGame = data && data.path ? sameFile(data.path, f.path || f.name || '') : false
         if (!sameGame) {
@@ -1380,8 +1615,6 @@ window.__ModuleLoader__.load({
           if (Date.now() - last < 20000) return
           focusPointer.tried[key] = Date.now()
           setPath(String(f.path || ''))
-          // 跟随把一盘棋带进来时顺手把棋盘展开：否则用户只看到表头，还是得再点一下
-          setBoardOpen(true)
           loadTarget(f.path, f.cwd)
           return
         }
@@ -1389,64 +1622,49 @@ window.__ModuleLoader__.load({
       }
 
       React.useEffect(function () {
+        // 棋盘已移到左侧栏整页，本面板只负责"读取 + 插入追问 + 显示曲线"：
+        // 只要展开且开着跟随就轮询 —— 否则 Sensei 讲的棋永远带不进来。
         if (!open || !follow) return undefined
-        // 已有棋谱但棋盘收着时不轮询（省请求）；**还没载入棋谱时必须轮询**，
-        // 否则「跟随讲解」永远等不到 Sensei 正在讲的那盘棋（实测踩过这个死角）。
-        if (data !== null && !boardOpen) return undefined
         var timer = setInterval(pollFocus, 3000)
         pollFocus()
-        return function () { clearInterval(timer) }      }, [open, boardOpen, follow, data])
-
-      /** 点棋盘交叉点 → 就这个点插入追问。 */
-      function askPoint(x, y) {
-        if (!data || !data.board) return
-        var label = boardLabel(x, y, data.board.size)
-        var cur = currentUpto()
-        insert('追问：' + (cur > 0 ? '第 ' + cur + ' 手之后的局面，' : '开局（第 0 手），')
-          + '如果下在 ' + label
-          + ' 会怎样？请讲讲这一手的价值与后续变化。'
-          + (data.path ? '（棋谱：' + data.path + '）' : ''))
-      }
+        return function () { clearInterval(timer) }
+      }, [open, follow, data])
 
       /**
-       * 面板 → 共享状态：把当前这盘棋、这一手、这些开关发布给整页棋盘。
+       * 面板 → 共享状态：把当前这盘棋、这一手、开关与曲线展开态发布给整页棋盘。
        * 放在 effect 里（而不是渲染期）是必须的：渲染期改别人的状态，React 会报
        * "Cannot update a component while rendering a different component"。
        */
       React.useEffect(function () {
         senseiPatch({
           data: data, path: path, upto: upto,
-          open: open, boardOpen: boardOpen, follow: follow,
+          open: open, follow: follow,
         })
-      }, [data, path, upto, open, boardOpen, follow])
+      }, [data, path, upto, open, follow])
 
       /** 共享状态 → 面板：整页棋盘那边翻手/开关时跟着走（比较后再 set，避免打转）。 */
       React.useEffect(function () {
         return senseiSubscribe(function () {
           if (senseiStore.open !== open) setOpen(senseiStore.open)
           if (senseiStore.upto !== upto) setUpto(senseiStore.upto)
-          if (senseiStore.boardOpen !== boardOpen) setBoardOpen(senseiStore.boardOpen)
           if (senseiStore.follow !== follow) setFollow(senseiStore.follow)
         })
-      }, [open, upto, boardOpen, follow])
+      }, [open, upto, follow])
 
       /**
-       * 点问题手一行：棋盘跳到那一手（并自动展开棋盘），同时把追问语插进输入框。
-       * 讲解场景里这两件事本来就该一起发生——看到问题手，也想立刻看到盘面。
+       * 点问题手一行：把手数同步到共享状态（左侧栏整页的棋盘与曲线立刻跳过去），
+       * 同时把追问语插进输入框。讲解场景里这两件事本来就该一起发生。
        */
       function pickCandidate(candidate) {
-        if (data && data.board) {
-          setBoardOpen(true)
-          if (typeof candidate.moveNumber === 'number' && candidate.moveNumber > 0) {
-            setUpto(candidate.moveNumber)
-          }
+        if (typeof candidate.moveNumber === 'number' && candidate.moveNumber > 0) {
+          setUpto(candidate.moveNumber)
         }
         insert(followUpText(candidate, data ? data.path : ''))
       }
 
       var head = React.createElement('div', { className: 'dgs-head' },
         React.createElement('span', { className: 'dgs-title' }, 'DeepGo Sensei'),
-        React.createElement('span', { className: 'dgs-sub' }, '点位复盘 · 点击问题手即插入追问'),
+        React.createElement('span', { className: 'dgs-sub' }, '读取棋谱 · 点问题手插入追问 · 棋盘在左侧栏'),
         React.createElement('span', { className: 'dgs-spacer' }),
         React.createElement('button', { onClick: function () { setOpen(!open) } }, open ? '收起' : '展开'),
       )
@@ -1468,75 +1686,24 @@ window.__ModuleLoader__.load({
       if (err) kids.push(React.createElement('div', { className: 'dgs-err', key: 'e' }, err))
       if (hint) kids.push(React.createElement('div', { className: 'dgs-sub', key: 'h' }, hint))
 
-      // 棋盘状态先算出来：表头在**没载入棋谱时也要在**，否则用户没有开启「跟随讲解」
-      // 的入口——而那正是"Sensei 讲到哪一盘，棋盘自动带出来"的唯一开关（实测踩过）。
+      // 当前手数与问题手位置：只用来做表头文字、列表高亮与曲线上的定位。
+      // **棋盘不在这里**（用户 2026-09-14：下方面板只保留"输入 SGF 路径读取问题手"，
+      // 棋盘与曲线交给左侧栏「Sensei 棋盘」整页 —— 那边位置大、看得全，而这里
+      // 是唯一能拿到 inputActions（真正插入追问语）的地方，各司其职）。
       var list = data && Array.isArray(data.candidates) ? data.candidates : []
       var board = data && data.board && Array.isArray(data.board.moves) ? data.board : null
       var total = board === null ? 0 : board.moves.length
       var cur = Math.max(0, Math.min(upto, total))
       var curMove = board !== null && cur > 0 ? board.moves[cur - 1] : null
-      // 当前手就是问题手吗？（问题手的 moveNumber 指"第 N 手"，即走完 N 手后的局面）
-      var problem = null
-      if (board !== null) {
-        for (var pi = 0; pi < list.length; pi++) {
-          if (list[pi].moveNumber === cur) { problem = list[pi]; break }
-        }
-      }
-      // AI 首选与变化图：问题手候选优先，其次用宿主给的逐手候选（讲解点也能标）；
-      // 画的是首选**之后的后续几手**（变化线），不是第 2、3 个候选点。
-      var aiList = aiCandidatesAt(data, problem, cur)
-      var hint = aiList.length > 0 ? aiList[0] : null
-      var pvPoints = board === null ? [] : aiLinePoints(aiList, board.size)
-      var problemPoint = problem !== null && curMove !== null && curMove.x >= 0
-        ? { x: curMove.x, y: curMove.y, key: problem.labelKey, label: problem.label }
-        : null
-      // 所有问题手的位置：不跳到那一手也要在盘上看得见（小色点，颜色＝严重度）
-      var problemMarks = []
-      if (board !== null) {
-        for (var mi = 0; mi < list.length; mi++) {
-          var cand = list[mi]
-          var mv = typeof cand.moveNumber === 'number' ? board.moves[cand.moveNumber - 1] : null
-          if (mv !== undefined && mv !== null && mv.x >= 0) {
-            problemMarks.push({ n: cand.moveNumber, x: mv.x, y: mv.y, color: markColor(cand.labelKey, cand.label) })
-          }
-        }
-      }
-      // 「上一个 / 下一个恶点」的目标手数（升序；到头绕回另一端，方便把每个恶点过一遍）
-      var problemMoves = []
-      for (var qi = 0; qi < list.length; qi++) {
-        if (typeof list[qi].moveNumber === 'number' && list[qi].moveNumber > 0) problemMoves.push(list[qi].moveNumber)
-      }
-      problemMoves.sort(function (a, b) { return a - b })
-      // 有讲解的手（已写回棋谱的 C[] 注释）：跳转按钮与盘上小方点都用它
-      var noteMoves = commentedMoves(data)
-      var nextNote = nextInList(noteMoves, cur, 1)
-      var prevNote = nextInList(noteMoves, cur, -1)
-      var nextProblem = null
-      var prevProblem = null
-      if (problemMoves.length > 0) {
-        for (var ni = 0; ni < problemMoves.length; ni++) {
-          if (problemMoves[ni] > cur) { nextProblem = problemMoves[ni]; break }
-        }
-        if (nextProblem === null) nextProblem = problemMoves[0]
-        for (var pj = problemMoves.length - 1; pj >= 0; pj--) {
-          if (problemMoves[pj] < cur) { prevProblem = problemMoves[pj]; break }
-        }
-        if (prevProblem === null) prevProblem = problemMoves[problemMoves.length - 1]
-      }
 
-      // ── 棋盘表头（收起态只留这一行；未载入棋谱时说明状态并给出开启跟随的入口）──
-      kids.push(React.createElement('div', { className: 'dgs-boardwrap', key: 'boardhead' },
+      // ── 状态行：棋谱状态 + 跟随开关（未载入棋谱时也要在，跟随是唯一的自动入口）──
+      kids.push(React.createElement('div', { className: 'dgs-boardwrap', key: 'status' },
         React.createElement('div', { className: 'dgs-boardhead' },
-          React.createElement('button', {
-            className: 'dgs-boardtoggle',
-            title: boardOpen ? '收起棋盘' : '展开棋盘（点问题手也会自动展开并跳到那一手）',
-            onClick: function () { setBoardOpen(!boardOpen) },
-          }, boardOpen ? '棋盘 ▾' : '棋盘 ▸'),
           React.createElement('span', { className: 'dgs-sub' },
             board === null ? '未载入棋谱' : boardStatusText(board, cur, curMove)),
           React.createElement('button', {
             className: 'dgs-follow',
-            title: '开启后：Sensei 在对话里讲到哪一盘、第几手，棋盘自动跟过去',
+            title: '开启后：Sensei 在对话里讲到哪一盘、第几手，这里自动读进来并同步给整页棋盘',
             onClick: function () { setFollow(!follow) },
           }, follow ? '跟随讲解 ✓' : '跟随讲解 ✕'),
         ),
@@ -1546,10 +1713,10 @@ window.__ModuleLoader__.load({
         kids.push(React.createElement('div', { className: 'dgs-err', key: 'follownote' }, followNote))
       }
 
-      if (boardOpen && board === null) {
+      if (board === null && data === null) {
         kids.push(React.createElement('div', { className: 'dgs-sub', key: 'noboard' },
           follow
-            ? '跟随讲解已开：Sensei 在对话里读到哪盘棋，棋盘会自动载入并跳到正在讲的那一手。也可以在上面填路径点「读取问题手」。'
+            ? '跟随讲解已开：Sensei 在对话里读到哪盘棋，这里会自动读进来。也可以在上面填路径点「读取问题手」。'
             : '还没有棋谱：填路径后点「读取问题手」，或把「跟随讲解」打开，等 Sensei 讲到一盘棋时自动载入。'))
       }
 
@@ -1569,6 +1736,11 @@ window.__ModuleLoader__.load({
           + ' · ' + String(data.moveCount || 0) + ' 手 / ' + String(data.variations || 0) + ' 变化图'
           + ' · ' + list.length + ' 个问题手' + autoText))
 
+        // 曲线与棋盘都在左侧栏「Sensei 棋盘」整页里看；这里也给两条曲线，
+        // 因为"这盘棋大势怎么走的"是一眼就该看到的东西（点图可定位到那一手）。
+        var curves = curvesView(data, cur, function (n) { setUpto(n) })
+        if (curves !== null) kids.push(React.createElement('div', { key: 'curves' }, curves))
+
         var listEl = list.length === 0
           ? React.createElement('div', { className: 'dgs-sub', key: 'none' },
               data.mode === 'analysis'
@@ -1582,7 +1754,7 @@ window.__ModuleLoader__.load({
                 return React.createElement('button', {
                   className: 'dgs-item',
                   key: String(candidate.moveNumber) + '-' + index,
-                  title: '点击：棋盘跳到这一手，并把追问语插入输入框',
+                  title: '点击：整页棋盘跳到这一手，并把追问语插入输入框',
                   onClick: function () { pickCandidate(candidate) },
                 },
                   React.createElement('div', { className: 'dgs-l1' },
@@ -1604,96 +1776,7 @@ window.__ModuleLoader__.load({
                 )
               }),
             )
-        if (boardOpen && board !== null) {
-          var boardCol = React.createElement('div', { className: 'dgs-col-board' },
-            renderBoard({
-              board: board,
-              upto: cur,
-              problem: problemPoint,
-              marks: problemMarks,
-              pv: pvPoints,
-              noteMoves: noteMoves, showProblem: senseiStore.showProblem, showNote: senseiStore.showNote, showHint: senseiStore.showHint,
-              hintLabel: hint && hint.label ? hint.label : '',
-              onPick: askPoint,
-            }),
-            React.createElement('div', { className: 'dgs-ctl' },
-              React.createElement('button', { onClick: function () { setUpto(0) }, title: '回到开局' }, '⏮'),
-              React.createElement('button', { onClick: function () { setUpto(Math.max(0, cur - 1)) }, title: '上一手' }, '◀'),
-              React.createElement('button', { onClick: function () { setUpto(Math.min(total, cur + 1)) }, title: '下一手' }, '▶'),
-              React.createElement('button', { onClick: function () { setUpto(total) }, title: '跳到末手' }, '⏭'),
-              // 恶点跳转：复盘时最常用的两个动作（在盘上从头到尾把问题手过一遍）
-              React.createElement('button', {
-                className: 'dgs-jump',
-                disabled: prevProblem === null,
-                title: prevProblem === null ? '这盘棋没有发现明显问题手' : '跳到上一个恶点（第 ' + prevProblem + ' 手；到头绕回最后一个）',
-                onClick: function () { if (prevProblem !== null) setUpto(prevProblem) },
-              }, '◀恶点'),
-              React.createElement('button', {
-                className: 'dgs-jump',
-                disabled: nextProblem === null,
-                title: nextProblem === null ? '这盘棋没有发现明显问题手' : '跳到下一个恶点（第 ' + nextProblem + ' 手；到头绕回第一个）',
-                onClick: function () { if (nextProblem !== null) setUpto(nextProblem) },
-              }, '恶点▶'),
-              React.createElement('button', {
-                className: 'dgs-jump',
-                disabled: prevNote === null,
-                title: prevNote === null ? '这盘棋还没有写回讲解' : '跳到上一处讲解（第 ' + prevNote + ' 手）',
-                onClick: function () { if (prevNote !== null) setUpto(prevNote) },
-              }, '◀讲解'),
-              React.createElement('button', {
-                className: 'dgs-jump',
-                disabled: nextNote === null,
-                title: nextNote === null ? '这盘棋还没有写回讲解' : '跳到下一处讲解（第 ' + nextNote + ' 手）',
-                onClick: function () { if (nextNote !== null) setUpto(nextNote) },
-              }, '讲解▶'),
-              React.createElement('input', {
-                type: 'range', min: 0, max: total, value: cur,
-                title: '拖动快速定位',
-                onChange: function (event) { setUpto(Number(event.target.value)) },
-              }),
-            ),
-            React.createElement('div', { className: 'dgs-note' },
-              problem !== null
-                ? React.createElement('span', null,
-                    React.createElement('span', { className: 'dgs-prob' },
-                      '○ 实战 ' + String(problem.moveNumber) + ' 手 ' + String(problem.coordLabel || '')),
-                    hint && hint.label
-                      ? React.createElement('span', null,
-                          '　',
-                          React.createElement('span', { className: 'dgs-rec' }, '◌ AI 首选 ' + String(hint.label)),
-                          hint.winratePct == null ? '' : '（胜率 ' + String(hint.winratePct) + '%）',
-                          // 变化图＝首选之后的后续几手（不再是"第 2、3 个候选"）
-                          aiLineText(aiList) === '' ? '' : '　后续：' + aiLineText(aiList))
-                      : null)
-                : aiNoteText(aiList) !== ''
-                  // 讲解点（未必是问题手）：同样把 AI 首选与后续变化念出来
-                  ? React.createElement('span', null,
-                      React.createElement('span', { className: 'dgs-rec' }, aiNoteText(aiList)),
-                      aiLineText(aiList) === '' ? '' : '　后续：' + aiLineText(aiList),
-                      commentOf(data, cur) !== '' ? '　本手有讲解（见下方）' : '')
-                  : problemMarks.length > 0
-                  // 没停在问题手上时，说明盘上那些小色点是什么（否则用户不知道能看什么）
-                  ? React.createElement('span', null,
-                      React.createElement('span', { className: 'dgs-prob' }, '● 盘上色点＝问题手'),
-                      '（共 ' + problemMarks.length + ' 处，紫＞红＞橙）　点列表任意一行跳到那一手')
-                  : '点棋盘交叉点可就该点提问；「▸」把棋盘收起来',
-            ),
-            markerKeyRow(),
-            // 已写回棋谱的讲解：翻到哪一手就读到哪一手；这一手没有就指明去哪找
-            (function () {
-              var box = commentBox(commentOf(data, cur))
-              if (box !== null) return box
-              if (noteMoves.length === 0) return null
-              return React.createElement('div', { className: 'dgs-note dgs-notehint' },
-                '这一手没有讲解。本局共 ' + noteMoves.length + ' 处（第 '
-                + noteMoves.slice(0, 8).join('、') + (noteMoves.length > 8 ? '…' : '') + ' 手），用「讲解▶」跳过去。')
-            })(),
-          )
-          kids.push(React.createElement('div', { className: 'dgs-split', key: 'split' }, boardCol,
-            React.createElement('div', { className: 'dgs-col-list' }, listEl)))
-        } else {
-          kids.push(listEl)
-        }
+        kids.push(listEl)
       }
 
       return React.createElement('div', { 'data-dgs': '' }, head,
@@ -2022,6 +2105,9 @@ window.__ModuleLoader__.load({
             onChange: function (event) { setUpto(Number(event.target.value)) },
           }))
         inner.push(ctl)
+        // 胜率 / 目差曲线（可折叠）：右侧栏比对话面板宽，曲线看得更清楚
+        var docCurves = curvesView(data, cur, function (n) { setUpto(n) })
+        if (docCurves !== null) inner.push(docCurves)
         kids.push(React.createElement('div', { className: 'dgs-doc-inner', key: 'inner' }, inner))
         // AI 首选与变化图：问题手要说，讲解点（未必是问题手）同样要说
         var aiText = aiNoteText(aiList)
@@ -2150,6 +2236,11 @@ window.__ModuleLoader__.load({
       filePathOfAddress: filePathOfAddress,
       sameFile: sameFile,
       renderBoard: renderBoard,
+      // 曲线图（三处视图共用）：单测直接渲染它，验证缺口断开、纵轴口径与点击定位
+      renderCurve: renderCurve,
+      curveDomain: curveDomain,
+      curveValueText: curveValueText,
+      curvesView: curvesView,
       focusPointer: focusPointer,
       // 两份 UI 的共享状态：单测直接摆好它再渲染整页棋盘
       //（React 桩把 useEffect 实现成空操作，所以发布/订阅在测试里不参与）

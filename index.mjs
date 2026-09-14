@@ -9,8 +9,9 @@ import { basename } from 'node:path'
 import { registerGoTools, autoComputeIfNeeded } from './src/tools.js'
 import { ReviewCache } from './src/cache.js'
 import { RANKS, reviewGame, inferLevel, aiCandidatesByMove } from './src/review.js'
-import { parseGame, decodeBuffer, coordLabel } from './src/sgf.js'
+import { parseGame, decodeBuffer, coordLabel, winrateForColor, scoreForColor } from './src/sgf.js'
 import { senseiPathFor } from './src/derived.js'
+import { buildGrid, parseSequence, parseMarks, renderBoardSvg } from './src/diagram.js'
 
 export const name = 'go-sensei'
 // 硬依赖：tools 注册工具、systemPrompt 挂人设段、fs 读写棋谱。
@@ -70,10 +71,16 @@ function buildPersona(cfg) {
 2. 讲解语言：用口语化的棋理讲解（如"这里就像把家门让给了对方"）；胜率与目差只是佐证——先讲棋理，再引用数值；绝不虚构分析数据或变化图。
 3. 水平自适应：按学生棋力调整术语密度（配置 level=auto 时依据棋谱双方段位自行判断）：18K~10K 用生活化比喻并解释基础概念（气、眼、断点、出头）；9K~1D 用常规术语；2D 以上可用职业级术语与全局构思。
 4. 变化图：以"第 N 手改下 X 会怎样"为单元，一次只展开一条主变，每手一句话讲清意图，不逐手复述整条 PV。
-5. 工具纪律：先 go_parse_sgf 了解棋谱，再 go_review_moves 找问题手，逐手讲解后调用 go_write_review 写回 SGF 注释，需要落盘报告时用 go_export_report；同一局重复复盘优先复用工具返回的缓存结果（cached=true 时不再重复获取全量数据）；单局讲解预算约 ${cfg.tokenBudget} tokens，用"先问后讲"与数据裁剪控制消耗。`
+5. 配图讲解：回答追问（尤其"第 N 手改下 X 会怎样""这里连没连上"）时，**必须**用 go_draw_diagram 生成配图，并在回答正文里用 Markdown 图片语法 \`![一句话说明](工具返回的 URL)\` 嵌入。图上的约定：变化着法按 1-9、A-Z 逐手编号（起始颜色由工具按局面自动定），关键棋子用 triangle（三角形）、square、circle、label（字母）标出；一张图只讲一个变化，图下配一句话说明。**绝不用文字描述代替配图，也绝不编造图片 URL**——URL 只能来自 go_draw_diagram 的返回值。
+6. 工具纪律：先 go_parse_sgf 了解棋谱，再 go_review_moves 找问题手，逐手讲解后调用 go_write_review 写回 SGF 注释，需要落盘报告时用 go_export_report；同一局重复复盘优先复用工具返回的缓存结果（cached=true 时不再重复获取全量数据）；单局讲解预算约 ${cfg.tokenBudget} tokens，用"先问后讲"与数据裁剪控制消耗。`
 }
 
-const TOOL_GUIDANCE = `围棋复盘工具（DeepGo Sensei）：go_parse_sgf 读棋谱，go_review_moves 找问题手，go_position_context 取某手前后局面与 AI 候选，go_write_review 把讲解写回 SGF 的 C[] 注释，go_export_report 落盘 Markdown 报告，go_engine_info 查看/说明当前使用的 KataGo 引擎与权重。**源棋谱只读**：讲解与分析数据（胜率/目差/AI 首选与变化图）都写进同目录的 \`<源名>-sensei.sgf\` 副本，源文件永不修改；读取同一盘棋时若副本已存在（工具与面板都一样）就直接读副本，因为那才是上一次复盘的成果。补算引擎默认用插件自带的 engine 目录（开箱即用），也可用配置 engineDir / kataGoPath / kataGoModel 换成用户自己的引擎与权重。路径参数支持绝对路径或相对当前会话工作区的相对路径。`
+const TOOL_GUIDANCE = `围棋复盘工具（DeepGo Sensei）：go_parse_sgf 读棋谱，go_review_moves 找问题手，go_position_context 取某手前后局面与 AI 候选，go_draw_diagram 画讲解配图（变化图编号 1-9/A-Z + 三角形等重点棋子标注，返回可在对话里直接用 Markdown 图片语法嵌入的 URL），go_write_review 把讲解写回 SGF 的 C[] 注释，go_export_report 落盘 Markdown 报告，go_engine_info 查看/说明当前使用的 KataGo 引擎与权重。**源棋谱只读**：讲解与分析数据（胜率/目差/AI 首选与变化图）都写进同目录的 \`<源名>-sensei.sgf\` 副本，源文件永不修改；读取同一盘棋时若副本已存在（工具与面板都一样）就直接读副本，因为那才是上一次复盘的成果。补算引擎默认用插件自带的 engine 目录（开箱即用），也可用配置 engineDir / kataGoPath / kataGoModel 换成用户自己的引擎与权重。路径参数支持绝对路径或相对当前会话工作区的相对路径。`
+
+/** 配图 URL 的基地址（形如 http://127.0.0.1:3080）；由 webServer 挂载时填充。 */
+function createDiagramBase() {
+  return { base: '' }
+}
 
 /** 面板一次最多返回的问题手数（数据裁剪 + 渲染上限一起生效）。 */
 const MAX_PANEL_CANDIDATES = 20
@@ -235,6 +242,45 @@ const MAX_PANEL_COMMENTS = 200
 const MAX_PANEL_COMMENT_CHARS = 600
 
 /**
+ * 逐手曲线：胜率与目差，**统一为黑棋视角**（用户 2026-09-14 的要求）。
+ *
+ * 为什么在宿主换算而不是把原始 WV/DM/LZ 推给浏览器：棋谱里的三套数据口径
+ * 各不相同（WV 白方视角、DM 黑方视角、LZ 落子者视角、注释里的"胜率"又是
+ * 落子者视角），浏览器侧再做换算就是第二份实现，迟早与前缀口径漂移。
+ * 这里用 sgf.js 的 winrateForColor / scoreForColor 一次算清：
+ *   · 正胜率 = 黑好，正目差 = 黑领先。
+ *
+ * 下标 i 对应「第 i+1 手之后的局面」（分析属性记的正是落子后的盘面）；
+ * 该手没有数据时为 null，曲线在缺口处断开。
+ *
+ * @param {object} game parseGame 的返回值
+ * @returns {{ winrate: Array<number|null>, score: Array<number|null> }}
+ */
+function compactCurve(game) {
+  const moves = (game.moves ?? []).slice(0, MAX_PANEL_CURVE_MOVES)
+  const winrate = []
+  const score = []
+  for (const move of moves) {
+    const w = winrateForColor(move, 'B')
+    const s = scoreForColor(move, 'B')
+    winrate.push(w === undefined ? null : round1(w * 100))
+    score.push(s === undefined ? null : round1(s))
+  }
+  return { winrate, score }
+}
+
+/** 曲线最多带回多少手（正常一局 ≤ 400 手，防御性上限）。 */
+const MAX_PANEL_CURVE_MOVES = 400
+
+/** 四舍五入到 1 位小数；非有限值返回 null（面板侧 null 表示缺口）。 */
+function round1(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return null
+  const r = Math.round(n * 10) / 10
+  return Object.is(r, -0) ? 0 : r
+}
+
+/**
  * 工具调用 -> 「正在讲解的局面」的语义类别。
  * 面板棋盘靠它跟随讲解：模型讲到哪一手，棋盘就跳到哪一手。
  */
@@ -244,6 +290,7 @@ const FOCUS_KINDS = {
   go_position_context: 'context',
   go_engine_analyze: 'engine',
   go_write_review: 'write',
+  go_draw_diagram: 'diagram',
 }
 
 /**
@@ -256,7 +303,7 @@ const FOCUS_KINDS = {
  * @returns {number|undefined}
  */
 function focusMoveNumber(kind, args) {
-  if (kind === 'context') {
+  if (kind === 'context' || kind === 'diagram') {
     const n = Math.trunc(Number(args?.moveNumber))
     return Number.isFinite(n) && n > 0 ? n : undefined
   }
@@ -282,8 +329,9 @@ function focusMoveNumber(kind, args) {
  *
  * @param {object} ctx Cordis 上下文
  * @param {object} cfg 已校验的插件配置
+ * @param {{ base: string }} diagram 配图基地址（由本函数在挂载时填充，供 go_draw_diagram 使用）
  */
-function registerPanelRoute(ctx, cfg) {
+function registerPanelRoute(ctx, cfg, diagram) {
   /**
    * 已知工作区根（最近成功的在前）。
    *
@@ -337,11 +385,26 @@ function registerPanelRoute(ctx, cfg) {
   }
 
   const mount = (webCtx) => {
+    /**
+     * 配图的基地址：优先用**请求自带的 Host 头**（用户可能从 localhost / 局域网 IP /
+     * 别的端口访问，写死 127.0.0.1 会让图片 404），拿不到才退回服务自己报的 host:port。
+     * 面板每 3 秒轮询一次 /go-sensei/focus，所以正常使用下 Host 头很快就有值。
+     */
+    const server = webCtx?.webServer
+    if (server !== undefined && typeof server.port === 'number' && server.port > 0) {
+      const host = server.host === '0.0.0.0' ? '127.0.0.1' : String(server.host ?? '127.0.0.1')
+      diagram.base = `http://${host}:${server.port}`
+    }
+    const rememberHost = (req) => {
+      const host = req?.headers?.host
+      if (typeof host === 'string' && host !== '') diagram.base = `http://${host}`
+    }
     // 面板启动时读取已知工作区根（相对路径的解析候选）
     webCtx.webServer.register({
       kind: 'exact',
       path: '/go-sensei/roots',
       handler: (req, res) => {
+        rememberHost(req)
         res.statusCode = 200
         res.setHeader('content-type', 'application/json; charset=utf-8')
         res.setHeader('cache-control', 'no-store')
@@ -353,10 +416,87 @@ function registerPanelRoute(ctx, cfg) {
       kind: 'exact',
       path: '/go-sensei/focus',
       handler: (req, res) => {
+        rememberHost(req)
         res.statusCode = 200
         res.setHeader('content-type', 'application/json; charset=utf-8')
         res.setHeader('cache-control', 'no-store')
         res.end(JSON.stringify({ ok: true, focus: focus.value }))
+      },
+    })
+    // 讲解配图：把「局面 + 变化图 + 重点棋子标注」画成一张 SVG 图片直接回给浏览器，
+    // 于是对话正文里一个 `![](/go-sensei/diagram?…)` 就能显示出来（图片源是绝对 URL 时
+    // 聊天区按原样渲染 <img>）。参数即全部输入，无状态 —— 重启后旧链接照样能打开。
+    webCtx.webServer.register({
+      kind: 'exact',
+      path: '/go-sensei/diagram',
+      handler: async (req, res) => {
+        rememberHost(req)
+        const fail = (status, message) => {
+          res.statusCode = status
+          res.setHeader('content-type', 'text/plain; charset=utf-8')
+          res.end(message)
+        }
+        try {
+          const url = new URL(req.url ?? '/', 'http://localhost')
+          const requested = (url.searchParams.get('path') ?? '').trim()
+          if (requested === '') {
+            fail(400, '缺少 path 参数')
+            return
+          }
+          const sourceTarget = await ctx.fs.resolve(requested, {})
+          let target = sourceTarget
+          // 复盘副本优先（分析数据在它里面）；副本不存在就用调用者给的源棋谱。
+          const derivedPath = senseiPathFor(sourceTarget.displayPath)
+          if (derivedPath !== sourceTarget.displayPath) {
+            const derivedTarget = await ctx.fs.resolve(derivedPath, {})
+            const derivedInfo = await ctx.fs.stat(derivedTarget, undefined)
+            if (derivedInfo?.type === 'file') target = derivedTarget
+          }
+          const info = await ctx.fs.stat(target, undefined)
+          if (info?.type !== 'file') {
+            fail(404, `找不到棋谱：${requested}`)
+            return
+          }
+          const bytes = await ctx.fs.readBytes(target, undefined, 64 * 1024 * 1024)
+          const { text } = decodeBuffer(bytes)
+          const game = parseGame(text)
+          const size = game.info?.size ?? 19
+          const board = compactBoard(game)
+          const total = board.moves.length
+          const rawMove = url.searchParams.get('move')
+          const parsed = rawMove === null || rawMove.trim() === '' ? total : Math.trunc(Number(rawMove))
+          const move = Math.max(0, Math.min(Number.isFinite(parsed) ? parsed : total, total))
+          const grid = buildGrid(board, move)
+          // 第 move 手之后的盘面：轮到的是那一手的对手（move=0 时黑先）
+          const firstColor = move === 0 ? 'B' : board.moves[move - 1].c === 'B' ? 'W' : 'B'
+          const sequence = parseSequence(
+            (url.searchParams.get('seq') ?? '').split(',').filter((t) => t.trim() !== ''),
+            size,
+            firstColor,
+          )
+          const marks = parseMarks(
+            (url.searchParams.get('marks') ?? '').split(',').filter((t) => t.trim() !== ''),
+            size,
+          )
+          const rawWidth = Math.trunc(Number(url.searchParams.get('w')))
+          const lastMove = move > 0 && board.moves[move - 1].x >= 0 ? board.moves[move - 1] : null
+          const svg = renderBoardSvg({
+            size,
+            grid,
+            numbered: sequence.points,
+            marks: marks.marks,
+            lastMove,
+            caption: (url.searchParams.get('cap') ?? '').slice(0, 120),
+            width: Number.isFinite(rawWidth) && rawWidth >= 120 ? Math.min(rawWidth, 1600) : 640,
+          })
+          res.statusCode = 200
+          res.setHeader('content-type', 'image/svg+xml; charset=utf-8')
+          // 参数即全部输入，但内容可能随棋谱变化（重新复盘后注释/分析都变），故不缓存。
+          res.setHeader('cache-control', 'no-store')
+          res.end(svg)
+        } catch (error) {
+          fail(500, String(error?.message ?? error))
+        }
       },
     })
     webCtx.webServer.register({
@@ -486,6 +626,8 @@ function registerPanelRoute(ctx, cfg) {
               variations: game.stats.variations,
               candidates: review.candidates.map(compactForPanel),
               board: compactBoard(game),
+              // 逐手胜率 / 目差曲线（统一黑棋视角）：三处视图据此画可折叠曲线图
+              curve: compactCurve(game),
               // 逐手「AI 首选与变化图」：问题手列表之外的**讲解点**也要能在盘上标出来
               ai: compactAi(game, cfg),
               // 已写回棋谱的讲解：面板/整页/右侧栏都靠它显示"这一手怎么讲的"
@@ -592,6 +734,9 @@ export function apply(ctx, config = {}) {
     text: TOOL_GUIDANCE,
   })
 
-  registerGoTools(ctx, cfg, new ReviewCache())
-  registerPanelRoute(ctx, cfg)
+  // 配图的基地址：webServer 挂载时（registerPanelRoute）填进来，
+  // go_draw_diagram 在**执行时**读取它 —— 注册顺序与挂载时机因此不敏感。
+  const diagram = createDiagramBase()
+  registerGoTools(ctx, cfg, new ReviewCache(), { diagram })
+  registerPanelRoute(ctx, cfg, diagram)
 }

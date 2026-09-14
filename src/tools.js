@@ -18,6 +18,7 @@ import { reviewGame, inferLevel, RANKS } from './review.js'
 import { ReviewCache, gameFingerprint } from './cache.js'
 import { resolveEngine, describeEngine } from './engine-resolve.js'
 import { senseiPathFor } from './derived.js'
+import { parsePointLabel, parseSequence, parseMarks } from './diagram.js'
 
 /** 工具返回值的裁剪上限，防止异常棋谱撑爆上下文。 */
 const MAX_MOVE_LIST = 400
@@ -695,6 +696,154 @@ function goExportReport(ctx, cfg, cache, policy) {
 }
 
 /**
+ * 把「局面 + 变化图 + 重点棋子标注」画成一张配图，返回可直接嵌进回答的 Markdown 图片行。
+ *
+ * 形态选择：图片由宿主自注册的 `/go-sensei/diagram` 路由渲染成 SVG（参数即全部输入，
+ * 无状态），工具只负责拼 URL。这样对话正文里一个 `![](http://…/go-sensei/diagram?…)`
+ * 就能显示出盘面 —— 走的是聊天区对**绝对 http(s) 图片地址**的原生渲染，不碰任何内部接口。
+ *
+ * 为什么必须在回答里用返回的 markdown 字段：URL 由 Host 的 host:port 决定
+ * （用户可能用 localhost / 局域网 IP 打开界面），模型自己拼一定会拼错。
+ */
+function goDrawDiagram(ctx, cfg, cache, policy, diagram) {
+  return {
+    name: 'go_draw_diagram',
+    description:
+      '为讲解生成一张棋盘配图（SVG），返回可在回答正文里直接使用的 Markdown 图片行 `![说明](URL)`。'
+      + '用途：回答"第 N 手改下 X 会怎样""这里连没连上"这类追问时，用图说明变化与要点。'
+      + '变化图着法按 1-9、A-Z 逐手编号（起始颜色按局面自动推断，也可写成 "B:Q16" 显式指定）；'
+      + '重点棋子用 triangle（三角形）/ square / circle / cross / label（字母或数字）标出。'
+      + '**回答里必须原样粘贴返回的 markdown 行**，URL 不要改写或另编。',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'SGF 文件路径（绝对路径，或相对当前会话工作区）' },
+        moveNumber: {
+          type: 'number',
+          description: '基准局面：第 N 手之后的盘面（省略＝末手；0＝开局）。想看"第 N 手改下哪"就填 N-1 或 N，取决于你要画的局面。',
+        },
+        sequence: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '变化图着法序列，逐手按 1-9、A-Z 编号。每项形如 "Q16"（按轮转自动定色）或 "B:Q16"（显式指定颜色，同时改变后续轮转）。',
+        },
+        marks: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '重点棋子标注，每项形如 "triangle:Q16"、"square:D4"、"circle:C10"、"cross:R6"、"label:Q16:A"（末尾可带一个字母/数字）。',
+        },
+        caption: { type: 'string', description: '图注（画在棋盘下方，一句话，如"黑 1 断后白无应手"）' },
+        width: { type: 'number', description: '图片像素宽度（默认 640，范围 120~1600）' },
+      },
+      required: ['path'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          url: { type: 'string' },
+          markdown: { type: 'string' },
+          moveNumber: { type: 'integer' },
+          size: { type: 'integer' },
+          caption: { type: 'string' },
+          numbered: { type: 'array', items: { type: 'string' } },
+          marks: { type: 'array', items: { type: 'string' } },
+          skipped: { type: 'array', items: { type: 'string' } },
+          note: { type: 'string' },
+        },
+        required: ['url', 'markdown', 'moveNumber', 'size', 'caption', 'numbered', 'marks', 'skipped'],
+      },
+      render: (args, value) => {
+        const lines = [
+          `🖼 配图已生成：第 ${value.moveNumber} 手之后的局面（${value.size} 路）`
+          + (value.numbered.length > 0 ? `，变化图 ${value.numbered.length} 手` : '')
+          + (value.marks.length > 0 ? `，标注 ${value.marks.length} 处` : ''),
+        ]
+        if (value.numbered.length > 0) lines.push(`变化：${value.numbered.join(' → ')}`)
+        if (value.marks.length > 0) lines.push(`标注：${value.marks.join('；')}`)
+        if (value.skipped.length > 0) lines.push(`⚠ 已忽略无法解析的项：${value.skipped.join('、')}`)
+        lines.push('把下面这一行**原样**放进回答正文（Markdown 图片语法），图片就会显示：', value.markdown)
+        if (value.note !== undefined) lines.push(value.note)
+        return textBlock(lines)
+      },
+    },
+    async execute(args, exec) {
+      const base = typeof diagram?.base === 'string' ? diagram.base : ''
+      if (base === '') {
+        throw new Error(
+          '当前进程没有挂载 Web 服务器（webServer），无法生成能在对话里显示的配图；'
+          + '请改用文字说明，或确认 dsh web 面板已启用后重试。',
+        )
+      }
+      const game = await readGameFile(ctx, exec, args.path, policy(exec))
+      const size = game.info?.size ?? 19
+      const total = game.moves.length
+      const rawMove = args.moveNumber
+      const parsed = rawMove === undefined || rawMove === null ? total : Math.trunc(Number(rawMove))
+      const move = Math.max(0, Math.min(Number.isFinite(parsed) ? parsed : total, total))
+
+      // 变化图起始颜色：第 move 手之后的盘面轮到那一手的对手（move=0 时黑先）。
+      // 与 /go-sensei/diagram 路由同一口径 —— 两边算错一处，图上颜色就会反。
+      const firstColor = move === 0 ? 'B' : game.moves[move - 1]?.color === 'B' ? 'W' : 'B'
+      const sequence = parseSequence(args.sequence, size, firstColor)
+      const marks = parseMarks(args.marks, size)
+      const caption = typeof args.caption === 'string' ? args.caption.trim().slice(0, 120) : ''
+
+      const tokens = []
+      for (const p of sequence.points) {
+        tokens.push(`${p.color === 'B' ? 'B' : 'W'}:${coordLabelOf(p, size)}`)
+      }
+      const markTokens = []
+      for (const m of marks.marks) {
+        markTokens.push(`${m.shape}:${coordLabelOf(m, size)}${m.text !== undefined ? `:${m.text}` : ''}`)
+      }
+
+      const params = new URLSearchParams()
+      // 用**实际读取的工作文件**（可能是 `-sensei` 副本）：分析数据与局面都在它里面，
+      // 路由那边再套一次派生命名是幂等的。
+      params.set('path', displayPathOf(game))
+      params.set('move', String(move))
+      if (tokens.length > 0) params.set('seq', tokens.join(','))
+      if (markTokens.length > 0) params.set('marks', markTokens.join(','))
+      if (caption !== '') params.set('cap', caption)
+      if (args.width !== undefined && Number.isFinite(Number(args.width))) {
+        params.set('w', String(Math.trunc(Number(args.width))))
+      }
+      const url = `${base}/go-sensei/diagram?${params.toString()}`
+      const alt = (caption === '' ? `第 ${move} 手之后的局面` : caption).replace(/[[\]\n\r]/g, ' ').trim()
+      const markdown = `![${alt}](${url})`
+
+      const skipped = [...sequence.skipped, ...marks.skipped]
+      const numbered = sequence.points.map((p, i) =>
+        `${i + 1}. ${coordLabelOf(p, size)} ${p.color === 'B' ? '黑' : '白'}`)
+      const markTexts = marks.marks.map((m) =>
+        `${m.shape} ${coordLabelOf(m, size)}${m.text !== undefined ? `（${m.text}）` : ''}`)
+
+      return {
+        url,
+        markdown,
+        moveNumber: move,
+        size,
+        caption,
+        numbered,
+        marks: markTexts,
+        skipped,
+        ...(total === 0 ? { note: '这盘棋没有着手，配图是空盘。' } : {}),
+      }
+    },
+  }
+}
+
+/** 列标（跳过 I，与 sgf.js 的 coordLabel / client.js 的 boardLabel 同一套）。 */
+const COORD_LETTERS = 'ABCDEFGHJKLMNOPQRST'
+
+/** 盘面坐标 (x, y) -> 人类标签（如 (15,3) -> 'Q16'）：配图 URL 的 seq / marks 参数用的就是它。 */
+function coordLabelOf(p, size) {
+  return `${COORD_LETTERS.charAt(p.x)}${size - p.y}`
+}
+
+/**
  * 从每手的 C[] 注释里挑出**人写的讲解**，剔除引擎自动写入的分析行。
  *
  * 同一手节点的 C[] 通常同时含两类内容：引擎分析（"黑棋 胜率: …"、"领先: …"、
@@ -996,16 +1145,18 @@ function goEngineInfo(ctx, cfg) {
  * @param {object} cfg 已校验的插件配置
  * @param {ReviewCache} [cache]
  */
-export function registerGoTools(ctx, cfg, cache = new ReviewCache()) {
+export function registerGoTools(ctx, cfg, cache = new ReviewCache(), opts = {}) {
   // 每次执行解析一次沙箱策略：既用于路径解析基准，也随写入携带给沙箱后端。
   const policy = compileSandboxPolicy(ctx)
   const engine = resolveEngine(cfg)
+  // 配图基地址（webServer 挂载时填充）：go_draw_diagram 执行时读取，缺失时如实报错。
+  const diagram = opts.diagram
   // go_engine_info 始终注册：引擎不可用时它正是解释"为什么没有补算/怎么配"的地方。
-  const tools = [goParseSgf, goReviewMoves, goPositionContext, goWriteReview, goExportReport, goEngineInfo]
+  const tools = [goParseSgf, goReviewMoves, goPositionContext, goDrawDiagram, goWriteReview, goExportReport, goEngineInfo]
   // 引擎可用（配置指定，或随包自带的 engine/ 目录）才注册补算工具，与提示语一致。
   if (engine.available) tools.push(goEngineAnalyze)
   for (const factory of tools) {
-    const def = factory(ctx, cfg, cache, policy)
+    const def = factory(ctx, cfg, cache, policy, diagram)
     // 顶层统一收紧 lossless JSON：所有返回值（含 go_parse_sgf 的 info 等
     // 可能含 undefined 的字段）过一遍 compact，防止运行时整体拒收。
     const execute = def.execute
