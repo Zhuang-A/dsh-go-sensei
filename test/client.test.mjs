@@ -3,8 +3,9 @@
 // 客户端 half 已从「自绘 DOM 浮动面板」改为「注册进 composer dock 的插槽组件」，
 // 因此这里不再断言 DOM 结构，而是断言：
 //   1. 装载协议：ModuleLoader id 与 package.json name 一致，且不声明硬注入；
-//   2. 面板注册到 conversation.composer.dock，展开后渲染问题手列表；
-//   3. 点某一行调用 inputActions.setDraft（真插入输入框，而非剪贴板）；
+//   2. 面板注册到 conversation.composer.dock，展开后只报状态与两条曲线（问题手列表
+//      与棋盘都在左侧栏整页，右侧栏 .sgf 预览另给一份）；
+//   3. 追问语由整页 / 右侧栏点一行（或点交叉点）复制到剪贴板；
 //   4. 服务端 /go-sensei/review 路由：正常返回、相对路径、缺参/缺失/目录拒绝。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -485,31 +486,29 @@ test('client: 手动读取会「认掉」当前指针，旧讲解不再抢走用
   assert.equal(plugin.__internals.focusPointer.seq, 4, '手动读取后应把已见过的指针认成已应用')
 })
 
-test('client: 点问题手一行 → inputActions.setDraft（真插入，非剪贴板）', async () => {
-  const { registered, react } = loadClient()
-  const drafts = []
-  const actions = {
-    setDraft: (text) => drafts.push(text),
-    addAttachments: () => false,
-    removeAttachment() {},
-    pruneAttachments() {},
-    submit() {},
-  }
+test('client: 下方面板不再有问题手列表；整页点一行复制追问语', async () => {
+  const loaded = loadClient({ withClipboard: true })
+  const { registered, react, clipboardWrites, plugin } = loaded
+  const { senseiPatch } = plugin.__internals
 
   const gamePath = fixture('real-analysis.sgf')
   const candidates = [
-    { moveNumber: 21, color: 'B', coord: 'ff', coordLabel: 'F14', label: '大恶手', winrateLoss: 98.8, scoreLoss: 46.2, pv: [{ label: 'F16', winratePct: 98.9 }] },
-    { moveNumber: 23, color: 'B', coord: 'fe', coordLabel: 'F15', label: '大恶手', winrateLoss: 81.3, scoreLoss: 22.1, pv: [{ label: 'F16', winratePct: 99.6 }] },
+    { moveNumber: 21, color: 'B', coord: 'ff', coordLabel: 'F14', label: '大恶手', labelKey: 'blunder', winrateLoss: 98.8, scoreLoss: 46.2, pv: [{ label: 'F16', winratePct: 98.9 }] },
+    { moveNumber: 23, color: 'B', coord: 'fe', coordLabel: 'F15', label: '大恶手', labelKey: 'blunder', winrateLoss: 81.3, scoreLoss: 22.1, pv: [{ label: 'F16', winratePct: 99.6 }] },
   ]
-  globalThis.fetch = async () => ({
-    ok: true,
-    json: async () => ({
-      ok: true,
-      data: { path: gamePath, mode: 'analysis', level: '18K', moveCount: 106, variations: 2, candidates },
-    }),
-  })
+  const board = {
+    size: 19,
+    moves: [{ c: 'B', x: 3, y: 3 }, { c: 'W', x: 15, y: 15 }, { c: 'B', x: 4, y: 4 }, { c: 'W', x: 15, y: 3 }],
+    setup: { black: [], white: [] },
+  }
+  const data = {
+    path: gamePath, mode: 'analysis', level: '18K', moveCount: 106, variations: 2, candidates, board,
+    curve: { winrate: [50, 48, 45, 40], score: [1, 0, -2, -4] },
+  }
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ ok: true, data }) })
 
-  const props = { inputActions: actions, useSession: () => ({ header: { cwd: 'C:/dsh/WeiQi' } }) }
+  // ① 下方面板：展开 → 填路径 → 读取。只剩状态与两条曲线，一行行的问题手没了
+  const props = { inputActions: { setDraft() {} }, useSession: () => ({ header: { cwd: 'C:/dsh/WeiQi' } }) }
   react.reset()
   let tree = registered[0].component(props)
   walk(tree).find((n) => n.type === 'button' && texts([n]).includes('展开')).props.onClick()
@@ -523,22 +522,37 @@ test('client: 点问题手一行 → inputActions.setDraft（真插入，非剪�
   react.reset()
   tree = registered[0].component(props)
 
-  const nodes = walk(tree)
-  const items = nodes.filter((n) => n.type === 'button' && n.props.className === 'dgs-item')
-  assert.equal(items.length, 2, `应渲染 2 个问题手行，实际 ${items.length}`)
-  const itemText = items.map((n) => texts(walk(n)).join(' ')).join(' || ')
-  assert.ok(itemText.includes('第 21 手') && itemText.includes('F14') && itemText.includes('大恶手'), itemText)
-  assert.ok(itemText.includes('98.8'), '应显示胜率差')
+  const panelNodes = walk(tree)
+  assert.equal(panelNodes.filter((n) => n.type === 'button' && n.props.className === 'dgs-item').length, 0,
+    '下方面板不该再有问题手列表（用户 2026-09-14）')
+  const panelText = texts(panelNodes).join('|')
+  assert.ok(panelText.includes('2 个问题手'), '问题手数目仍要报一声：' + panelText)
+  assert.deepEqual(
+    panelNodes.filter((n) => n.type === 'svg' && n.props['data-dgs-curve'] !== undefined)
+      .map((n) => n.props['data-dgs-curve']),
+    ['winrate', 'score'],
+    '两条曲线仍留在面板里',
+  )
 
-  items[0].props.onClick()
-  assert.equal(drafts.length, 1, 'setDraft 应被调用一次')
-  assert.ok(drafts[0].includes('第 21 手'), drafts[0])
-  assert.ok(drafts[0].includes('F14'))
+  // ② 追问语改由左侧栏整页给出（面板不再往输入框插话）：点一行 → 剪贴板
+  senseiPatch({ data, upto: 21 })
+  react.reset()
+  const page = boardPageOf(loaded)
+  const rows = walk(page({})).filter((n) => n.type === 'button' && n.props.className === 'dgs-page-item')
+  assert.equal(rows.length, 2, `整页应渲染 2 个问题手行，实际 ${rows.length}`)
+  const row = rows.find((n) => texts(walk(n)).join(' ').includes('第 21 手'))
+  assert.ok(row, '整页问题手列表里应有第 21 手')
+  row.props.onClick()
+  await new Promise((r) => setTimeout(r, 10))
+
+  assert.equal(clipboardWrites.length, 1, '点一行应把追问语复制到剪贴板')
+  const text = clipboardWrites[0]
+  assert.ok(text.includes('第 21 手') && text.includes('F14'), text)
   // 追问语里要带上「画一张变化图」：配图靠模型主动调 go_draw_diagram，
   // 在提问处写明比只写进人设可靠（人设会被长对话稀释）
-  assert.ok(drafts[0].includes('画一张变化图'), drafts[0])
-  assert.ok(drafts[0].includes('F16'), '含 AI 推荐')
-  assert.ok(drafts[0].includes(gamePath), '含棋谱路径')
+  assert.ok(text.includes('画一张变化图'), text)
+  assert.ok(text.includes('F16'), '含 AI 推荐')
+  assert.ok(text.includes(gamePath), '含棋谱路径')
 })
 
 // ---------------------------------------------------------------------------
@@ -946,7 +960,8 @@ const CAPTURE_BOARD = {
  * 渲染「左侧栏整页棋盘」。
  *
  * 2026-09-14 起棋盘**只**在整页（sidebar.panellist 对应的 main）与右侧栏文档里：
- * 下方面板（composer dock）只保留"SGF 路径 → 读取问题手 → 插入追问"，
+ * 下方面板（composer dock）只保留"SGF 路径 → 读取问题手 → 状态 + 两条曲线"
+ * （问题手列表也在整页的右列，面板不重复摆一份），
  * 所以盘面相关的用例统一走这里，用 __internals.senseiPatch 直接摆好共享状态。
  */
 function boardPageOf(loaded) {
@@ -1523,7 +1538,7 @@ test('路由: 没有 sessions 服务时 session 参数被忽略（不抛错）',
 })
 
 test('client: 右侧栏正文渲染棋盘与问题手（拿 resourceAddress 当棋谱路径）', async () => {
-  const { registered, react, docInjected } = loadClient({ withDocuments: true, withEffects: true, withClipboard: true })
+  const { registered, react, docInjected, plugin } = loadClient({ withDocuments: true, withEffects: true, withClipboard: true })
   assert.deepEqual(docInjected, ['sidebar.right.tab.document'])
   const bodyReg = registered.filter((r) => r.options.name === 'sidebar.right.tab.document')
   assert.equal(bodyReg.length, 1)
@@ -1580,6 +1595,19 @@ test('client: 右侧栏正文渲染棋盘与问题手（拿 resourceAddress 当�
   assert.ok(nodes.some((n) => n.type === 'circle' && n.props.stroke === '#0000ff'), 'AI 首选蓝圈')
   const items = nodes.filter((n) => n.type === 'button' && n.props.className === 'dgs-item')
   assert.equal(items.length, 1)
+
+  // 图例 + 手数小结 + 讲解合成底部一块，讲解因此有一整行高度
+  // （用户 2026-09-14：同样的「讲解留足位置」也要用到右侧栏）
+  const foot = nodes.find((n) => String(n.props.className || '') === 'dgs-doc-foot')
+  assert.ok(foot, '右侧栏应有底部块 .dgs-doc-foot')
+  const footText = texts(walk(foot)).join('|')
+  assert.ok(footText.includes('6 手 · 1 个问题手'), footText)
+  assert.ok(footText.includes('这一手还没有写回讲解'), footText)
+  const css = plugin.__internals.CSS
+  assert.ok(css.includes('.dgs-doc-foot .dgs-comment { min-height: 118px'),
+    '右侧栏的讲解框要有保底高度')
+  assert.ok(css.includes('max-width: min(480px, max(280px, 100vh - 560px))'),
+    '右侧栏棋盘宽度也要守高度算式，好给讲解留位置')
 })
 
 // ---------------------------------------------------------------------------
@@ -1735,7 +1763,7 @@ test('client: 讲解点（不是问题手）也标出 AI 首选与变化图', ()
   senseiPatch({ data: null, upto: 0 })
 })
 
-test('client: 整页显示当前手的讲解注释，面板列表标出「有讲解」', async () => {
+test('client: 整页显示当前手的讲解注释；面板只报数目、不再列问题手', async () => {
   const loaded = loadClient()
   const { senseiPatch } = loaded.plugin.__internals
   const page = boardPageOf(loaded)
@@ -1769,7 +1797,7 @@ test('client: 整页显示当前手的讲解注释，面板列表标出「有讲
   assert.ok(texts(nodes).join('|').includes('第 3/6 手'), texts(nodes).join('|'))
   senseiPatch({ data: null, upto: 0 })
 
-  // ② 下方面板：列表里标出哪几手有讲解（棋盘与注释框都不在这里）
+  // ② 下方面板：只报数目与当前手，不再列问题手（棋盘与注释框也都不在这里）
   const gamePath = fixture('real-analysis.sgf')
   const props = { inputActions: { setDraft() {} } }
   const { registered, react } = loaded
@@ -1789,8 +1817,11 @@ test('client: 整页显示当前手的讲解注释，面板列表标出「有讲
   await new Promise((r) => setTimeout(r, 30))
   react.reset()
   tree = registered[0].component(props)
-  const all = texts(walk(tree)).join('|')
-  assert.ok(all.includes('有讲解'), `问题手列表里应标出哪几手有讲解：${all}`)
+  const panelNodes = walk(tree)
+  const all = texts(panelNodes).join('|')
+  assert.equal(panelNodes.filter((n) => n.type === 'button' && n.props.className === 'dgs-item').length, 0,
+    `下方面板不该再有问题手列表：${all}`)
+  assert.ok(all.includes('1 个问题手'), `数目还要报一声：${all}`)
   assert.ok(all.includes('第 3/6 手'), all)
 })
 

@@ -143,10 +143,17 @@ window.__ModuleLoader__.load({
       '[data-dgs] .dgs-doc-head { display: flex; align-items: center; gap: 8px; }',
       '[data-dgs] .dgs-doc-head .dgs-spacer { flex: 1; }',
       '[data-dgs] .dgs-doc-status { font-size: 12px; margin: 6px 0 2px; }',
-      // 棋盘与控件同宽同中：两侧各自居中会让控件看起来"偏了"
-      '[data-dgs] .dgs-doc-inner { width: 100%; max-width: 480px; margin: 0 auto; }',
+      // 棋盘与控件同宽同中：两侧各自居中会让控件看起来"偏了"。
+      // 宽度同样守高度算式：右侧栏没有整页那么宽，但曲线、状态行、图例与讲解都在这
+      // 一列里，开销比整页更大（约 560px），所以减得更多 —— 900px 高的窗口下棋盘
+      // 收到 ~340px，讲解框才留在屏幕里。
+      '[data-dgs] .dgs-doc-inner { width: 100%; max-width: min(480px, max(280px, 100vh - 560px)); margin: 0 auto; }',
       '[data-dgs] .dgs-doc-board { width: 100%; margin: 0 auto; }',
       '[data-dgs] .dgs-doc-list { max-height: none; }',
+      // 图例 + 手数小结 + 讲解自成一块：右侧栏很窄，讲解至少要有一整行高度，
+      // 不能夹在图例和列表之间被压成一条缝（与整页 .dgs-page-foot 同一套做法）
+      '[data-dgs] .dgs-doc-foot { margin-top: 8px; }',
+      '[data-dgs] .dgs-doc-foot .dgs-comment { min-height: 118px; max-height: 260px; }',
     ].join('\n')
 
     /** 注入样式（幂等；只插一次，避免重复注册时堆积）。 */
@@ -1600,11 +1607,6 @@ window.__ModuleLoader__.load({
         focusPointer.seq = focusPointer.seen
       }
 
-      function insert(text) {
-        actions.setDraft(text)
-        setNotice('已插入输入框，回车即可发送')
-      }
-
       /**
        * 跟随讲解：轮询 Host 记下的「正在讲解的局面」指针。
        *
@@ -1685,20 +1687,9 @@ window.__ModuleLoader__.load({
         })
       }, [open, upto, follow])
 
-      /**
-       * 点问题手一行：把手数同步到共享状态（左侧栏整页的棋盘与曲线立刻跳过去），
-       * 同时把追问语插进输入框。讲解场景里这两件事本来就该一起发生。
-       */
-      function pickCandidate(candidate) {
-        if (typeof candidate.moveNumber === 'number' && candidate.moveNumber > 0) {
-          setUpto(candidate.moveNumber)
-        }
-        insert(followUpText(candidate, data ? data.path : ''))
-      }
-
       var head = React.createElement('div', { className: 'dgs-head' },
         React.createElement('span', { className: 'dgs-title' }, 'DeepGo Sensei'),
-        React.createElement('span', { className: 'dgs-sub' }, '读取棋谱 · 点问题手插入追问 · 棋盘在左侧栏'),
+        React.createElement('span', { className: 'dgs-sub' }, '读取棋谱 · 曲线在这 · 棋盘与问题手在左侧栏'),
         React.createElement('span', { className: 'dgs-spacer' }),
         React.createElement('button', { onClick: function () { setOpen(!open) } }, open ? '收起' : '展开'),
       )
@@ -1720,10 +1711,10 @@ window.__ModuleLoader__.load({
       if (err) kids.push(React.createElement('div', { className: 'dgs-err', key: 'e' }, err))
       if (hint) kids.push(React.createElement('div', { className: 'dgs-sub', key: 'h' }, hint))
 
-      // 当前手数与问题手位置：只用来做表头文字、列表高亮与曲线上的定位。
-      // **棋盘不在这里**（用户 2026-09-14：下方面板只保留"输入 SGF 路径读取问题手"，
-      // 棋盘与曲线交给左侧栏「Sensei 棋盘」整页 —— 那边位置大、看得全，而这里
-      // 是唯一能拿到 inputActions（真正插入追问语）的地方，各司其职）。
+      // 当前手数与问题手位置：只用来做表头文字与曲线上的定位。
+      // **棋盘与问题手列表都不在这里**（用户 2026-09-14：下方面板只保留「输入 SGF
+      // 路径读取棋谱」+ 状态 + 两条曲线）——棋盘和列表交给左侧栏「Sensei 棋盘」整页，
+      // 那边位置大、列表能一路看下去；面板是输入框旁边的一块，塞列表只会把曲线挤没。
       var list = data && Array.isArray(data.candidates) ? data.candidates : []
       var board = data && data.board && Array.isArray(data.board.moves) ? data.board : null
       var total = board === null ? 0 : board.moves.length
@@ -1775,42 +1766,18 @@ window.__ModuleLoader__.load({
         var curves = curvesView(data, cur, function (n) { setUpto(n) })
         if (curves !== null) kids.push(React.createElement('div', { key: 'curves' }, curves))
 
-        var listEl = list.length === 0
-          ? React.createElement('div', { className: 'dgs-sub', key: 'none' },
-              data.mode === 'analysis'
-                ? '未发现明显问题手'
-                : auto !== null && auto.failed !== undefined
-                  ? '棋谱没有可用的分析数据，补算也没成功（原因见上一行）'
-                  : '棋谱没有可用的分析数据：这一档只能讲棋理，不报胜率与候选点')
-          : React.createElement('div', { className: 'dgs-list', key: 'list' },
-              list.map(function (candidate, index) {
-                var top = candidate.pv && candidate.pv[0] ? candidate.pv[0] : null
-                return React.createElement('button', {
-                  className: 'dgs-item',
-                  key: String(candidate.moveNumber) + '-' + index,
-                  title: '点击：整页棋盘跳到这一手，并把追问语插入输入框',
-                  onClick: function () { pickCandidate(candidate) },
-                },
-                  React.createElement('div', { className: 'dgs-l1' },
-                    React.createElement('span', { className: 'dgs-mv' }, '第 ' + candidate.moveNumber + ' 手'),
-                    React.createElement('span', null, candidate.color === 'B' ? '黑' : '白'),
-                    React.createElement('span', { className: 'dgs-coord' }, candidate.coordLabel || candidate.coord || ''),
-                    React.createElement('span', {
-                      className: 'dgs-badge',
-                      style: { color: severityColor(candidate.label) },
-                    }, candidate.label || ''),
-                  ),
-                  React.createElement('div', { className: 'dgs-l2' },
-                    '−' + (candidate.winrateLoss == null ? '?' : candidate.winrateLoss) + '% 胜率'
-                    + (candidate.scoreLoss == null ? '' : ' / ' + candidate.scoreLoss + ' 目')
-                    + (top && top.label ? ' · AI 首选：' + top.label : ''),
-                    commentOf(data, candidate.moveNumber) !== ''
-                      ? React.createElement('span', { className: 'dgs-hasnote' }, ' · 有讲解')
-                      : null),
-                )
-              }),
-            )
-        kids.push(listEl)
+        var listEl = null
+        if (list.length === 0) {
+          // 列表去掉了，但"为什么一个点都没有"还是要说清楚：补算失败与纯棋理
+          // 长得一模一样，用户只会看到 0 个问题手。
+          listEl = React.createElement('div', { className: 'dgs-sub', key: 'none' },
+            data.mode === 'analysis'
+              ? '未发现明显问题手'
+              : auto !== null && auto.failed !== undefined
+                ? '棋谱没有可用的分析数据，补算也没成功（原因见上一行）'
+                : '棋谱没有可用的分析数据：这一档只能讲棋理，不报胜率与候选点')
+        }
+        if (listEl !== null) kids.push(listEl)
       }
 
       return React.createElement('div', { 'data-dgs': '' }, head,
@@ -2157,15 +2124,19 @@ window.__ModuleLoader__.load({
                   (problem !== null ? '　' : '') + aiText
                   + (aiLineText(aiList) === '' ? '' : '　后续：' + aiLineText(aiList)))))
         }
-        // 盘上标注的图例 + 开关（与 dock / 整页共用同一条）
-        kids.push(React.createElement('div', { key: 'markkey' }, markerKeyRow()))
-        kids.push(React.createElement('div', { className: 'dgs-sub', key: 'm' },
-          String(data.moveCount || 0) + ' 手 · ' + list.length + ' 个问题手'
-          + (data.autoEngine ? ' · 引擎补算 ' + String(data.autoEngine.moves ?? '') + ' 手'
-            + (data.autoEngine.cached === true ? '（本次复用，未重算）' : '') : '')))
-        // 已写回棋谱的讲解
+        // 盘上标注的图例 + 手数小结 + 已写回棋谱的讲解：合成底部一块，
+        // 讲解因此总有一整行高度（右侧栏窄，单独摆一条很容易被当成行间小字漏掉）。
         var noteBox = commentBox(commentOf(data, cur))
-        if (noteBox !== null) kids.push(noteBox)
+        kids.push(React.createElement('div', { className: 'dgs-doc-foot', key: 'foot' },
+          React.createElement('div', { className: 'dgs-foothead' },
+            markerKeyRow(),
+            React.createElement('div', { className: 'dgs-sub' },
+              String(data.moveCount || 0) + ' 手 · ' + list.length + ' 个问题手'
+              + (data.autoEngine ? ' · 引擎补算 ' + String(data.autoEngine.moves ?? '') + ' 手'
+                + (data.autoEngine.cached === true ? '（本次复用，未重算）' : '') : ''))),
+          noteBox !== null ? noteBox : React.createElement('div', { className: 'dgs-sub' },
+            '这一手还没有写回讲解：点列表里的问题手，或让 Sensei 讲完再写回棋谱。'),
+        ))
         kids.push(React.createElement('div', { className: 'dgs-list dgs-doc-list', key: 'list' },
           list.map(function (candidate, index) {
             var top = candidate.pv && candidate.pv[0] ? candidate.pv[0] : null
