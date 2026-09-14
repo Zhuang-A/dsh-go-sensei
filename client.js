@@ -143,12 +143,14 @@ window.__ModuleLoader__.load({
       '[data-dgs] .dgs-doc-head { display: flex; align-items: center; gap: 8px; }',
       '[data-dgs] .dgs-doc-head .dgs-spacer { flex: 1; }',
       '[data-dgs] .dgs-doc-status { font-size: 12px; margin: 6px 0 2px; }',
-      // 棋盘与控件同宽同中：两侧各自居中会让控件看起来"偏了"。
-      // 宽度同样守高度算式：右侧栏没有整页那么宽，但曲线、状态行、图例与讲解都在这
-      // 一列里，开销比整页更大（约 560px），所以减得更多 —— 900px 高的窗口下棋盘
-      // 收到 ~340px，讲解框才留在屏幕里。
-      '[data-dgs] .dgs-doc-inner { width: 100%; max-width: min(480px, max(280px, 100vh - 560px)); margin: 0 auto; }',
+      // 右侧栏文档预览＝左列「棋盘 + 控件条」、右列「两条曲线」，与整页同一套分工。
+      // 别再拿 100vh 猜侧栏高度（侧栏高度≠窗口高度，实测会把棋盘压到 280px 下限，
+      // 曲线还照样压在棋盘下方）。改成 flex 折行：够宽就并排，侧栏拖窄了自动回单列。
+      '[data-dgs] .dgs-doc-inner { display: flex; flex-wrap: wrap; justify-content: center;',
+      '  align-items: flex-start; gap: 10px 12px; width: 100%; }',
+      '[data-dgs] .dgs-doc-main { flex: 2 1 320px; max-width: 480px; min-width: 0; }',
       '[data-dgs] .dgs-doc-board { width: 100%; margin: 0 auto; }',
+      '[data-dgs] .dgs-doc-inner .dgs-curves { flex: 1 1 260px; max-width: 380px; min-width: 0; margin-top: 0; }',
       '[data-dgs] .dgs-doc-list { max-height: none; }',
       // 图例 + 手数小结 + 讲解自成一块：右侧栏很窄，讲解至少要有一整行高度，
       // 不能夹在图例和列表之间被压成一条缝（与整页 .dgs-page-foot 同一套做法）
@@ -156,11 +158,22 @@ window.__ModuleLoader__.load({
       '[data-dgs] .dgs-doc-foot .dgs-comment { min-height: 118px; max-height: 260px; }',
     ].join('\n')
 
-    /** 注入样式（幂等；只插一次，避免重复注册时堆积）。 */
+    /**
+     * 注入样式（幂等；只插一次，避免重复注册时堆积）。
+     *
+     * 已存在时**必须比对并覆盖**：客户端插件改动走热重载，模块会重新执行，
+     * 但上一次插进 <head> 的 <style> 不会消失 —— 只判「存在就 return」的话，
+     * 纯 CSS 改动（不改 DOM 结构的那种）在热重载后永远不生效，表现为
+     * 「代码明明改了、界面一点没变」（2026-09-14 实测踩到）。
+     */
     function ensureStyles() {
       try {
-        if (document.getElementById(STYLE_ID) !== null) return
-        var style = document.createElement('style')
+        var style = document.getElementById(STYLE_ID)
+        if (style !== null) {
+          if (style.textContent !== CSS) style.textContent = CSS
+          return
+        }
+        style = document.createElement('style')
         style.id = STYLE_ID
         style.textContent = CSS
         document.head.appendChild(style)
@@ -2057,9 +2070,9 @@ window.__ModuleLoader__.load({
         kids.push(React.createElement('div', { className: 'dgs-doc-status', key: 's' },
           boardStatusText(board, cur, curMove),
           data.mode === 'analysis' ? ' · AI 分析' : ' · 纯棋理'))
-        // 棋盘与控件放进同一个居中容器：右侧栏比面板宽，两边各自居中会让
-        // 控件与棋盘对不齐（用户报的「控件有偏移」）
-        var inner = [
+        // 左列＝棋盘 + 控件条（同宽同中：两边各自居中会让控件与棋盘对不齐，
+        // 用户报过「控件有偏移」）。曲线是右列，见下面的 .dgs-doc-inner 组装。
+        var main = [
           React.createElement('div', { className: 'dgs-doc-board', key: 'bd' },
             renderBoard({
               board: board,
@@ -2105,9 +2118,11 @@ window.__ModuleLoader__.load({
             type: 'range', min: 0, max: total, value: cur,
             onChange: function (event) { setUpto(Number(event.target.value)) },
           }))
-        inner.push(ctl)
-        // 胜率 / 目差曲线（可折叠）：右侧栏比对话面板宽，曲线看得更清楚
+        main.push(ctl)
+        // 胜率 / 目差曲线（可折叠）＝右列：右侧栏够宽就与棋盘并排，
+        // 拖窄了自动折回棋盘下方（用户 2026-09-14 选的方案 A）
         var docCurves = curvesView(data, cur, function (n) { setUpto(n) })
+        var inner = [React.createElement('div', { className: 'dgs-doc-main', key: 'main' }, main)]
         if (docCurves !== null) inner.push(docCurves)
         kids.push(React.createElement('div', { className: 'dgs-doc-inner', key: 'inner' }, inner))
         // AI 首选与变化图：问题手要说，讲解点（未必是问题手）同样要说

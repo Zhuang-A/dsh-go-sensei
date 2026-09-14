@@ -81,7 +81,7 @@ function texts(nodes) {
 }
 
 /** 装载 client.js，返回 entry 与测试用的桩对象。 */
-function loadClient({ withReact = true, withDocuments = false, withEffects = false, withInject = false, withClipboard = false } = {}) {
+function loadClient({ withReact = true, withDocuments = false, withEffects = false, withInject = false, withClipboard = false, withStyle = null } = {}) {
   const react = makeReactStub({ withEffects })
   const registered = []
   const injected = []
@@ -121,7 +121,15 @@ function loadClient({ withReact = true, withDocuments = false, withEffects = fal
   const navigatorStub = withClipboard
     ? { clipboard: { writeText: (text) => { clipboardWrites.push(text); return Promise.resolve() } } }
     : undefined
-  fn(globalThis.window, undefined, navigatorStub)
+  // 热重载场景：上一次插进 <head> 的 <style> 还在（内容可能已经过期）。
+  // 不传 withStyle 时 document 是 undefined，走「非浏览器环境」的静默分支。
+  const styleEl = withStyle === null ? null : { id: 'dsh-go-sensei-style', textContent: withStyle }
+  const documentStub = styleEl === null ? undefined : {
+    getElementById: (id) => (id === styleEl.id ? styleEl : null),
+    createElement: () => ({ id: '', textContent: '' }),
+    head: { appendChild: () => {} },
+  }
+  fn(globalThis.window, documentStub, navigatorStub)
   const entry = loaded[0]
   const plugin = entry.factory(requireStub)
   plugin.apply(ctx)
@@ -131,7 +139,7 @@ function loadClient({ withReact = true, withDocuments = false, withEffects = fal
     const scopedGet = (name) => (name === 'documentPreviews' ? documentPreviews : get(name))
     return pendingInject({ get: scopedGet, effect: (fn) => fn() })
   }
-  return { entry, plugin, registered, injected, react, documents, docInjected, injectDeps, runInject, clipboardWrites }
+  return { entry, plugin, registered, injected, react, documents, docInjected, injectDeps, runInject, clipboardWrites, styleEl }
 }
 
 // ---------------------------------------------------------------------------
@@ -1606,8 +1614,25 @@ test('client: 右侧栏正文渲染棋盘与问题手（拿 resourceAddress 当�
   const css = plugin.__internals.CSS
   assert.ok(css.includes('.dgs-doc-foot .dgs-comment { min-height: 118px'),
     '右侧栏的讲解框要有保底高度')
-  assert.ok(css.includes('max-width: min(480px, max(280px, 100vh - 560px))'),
-    '右侧栏棋盘宽度也要守高度算式，好给讲解留位置')
+  // 方案 A（用户 2026-09-14）：左列棋盘+控件条、右列曲线；
+  // 侧栏高度≠窗口高度，不能再拿 100vh 猜（实测把棋盘压到 280px 下限）
+  assert.ok(css.includes('.dgs-doc-inner { display: flex; flex-wrap: wrap'),
+    '右侧栏要能把曲线摆到棋盘旁边（拖窄时自动折回单列）')
+  assert.ok(css.includes('.dgs-doc-inner .dgs-curves { flex: 1 1 260px'),
+    '曲线是右列，不再压在棋盘下方')
+  assert.ok(!css.includes('100vh - 560px'), '侧栏高度不能拿窗口高度猜')
+})
+
+// ---------------------------------------------------------------------------
+// 样式注入：热重载不会刷新页面，上一次的 <style> 还在 —— 必须覆盖它
+// ---------------------------------------------------------------------------
+
+test('client: 热重载时旧的 <style> 会被刷新成当前 CSS', () => {
+  const stale = '[data-dgs] .dgs-doc-inner { max-width: min(480px, max(280px, 100vh - 560px)); }'
+  const loaded = loadClient({ withStyle: stale })
+  assert.ok(loaded.styleEl, '测试桩应提供 style 元素')
+  assert.equal(loaded.styleEl.textContent, loaded.plugin.__internals.CSS, '旧样式要被覆盖成当前 CSS')
+  assert.ok(!loaded.styleEl.textContent.includes('100vh - 560px'), '旧规则不能残留')
 })
 
 // ---------------------------------------------------------------------------
@@ -1876,6 +1901,15 @@ test('client: 右侧栏：控件与棋盘同容器（不偏移）、点交叉点
     '右侧栏也要有两条曲线',
   )
   const svg = walk(tree).find((n) => n.type === 'svg' && n.props['data-dgs-board'] !== undefined)
+
+  // ①b 曲线必须是「并列的右列」，而不是塞进棋盘那一列里
+  // （塞进去就又变成压在棋盘下方 —— 用户 2026-09-14 报过这点）
+  const mainCol = walk(inner).find((n) => String(n.props.className || '') === 'dgs-doc-main')
+  assert.ok(mainCol, '左列应是 .dgs-doc-main（棋盘 + 控件条）')
+  assert.ok(walk(mainCol).some((n) => n.props['data-dgs-board'] !== undefined), '左列放棋盘')
+  assert.ok(texts(walk(mainCol)).join('|').includes('⏮'), '左列放控件条')
+  assert.equal(walk(mainCol).filter((n) => n.props['data-dgs-curve'] !== undefined).length, 0,
+    '曲线不能在棋盘那一列里，否则又被压在棋盘下方')
 
   // ② 点棋盘交叉点 → 复制该点的追问语（右侧栏没有输入框）
   const hit = walk(svg).find((child) => child.props && child.props.fill === 'transparent')
