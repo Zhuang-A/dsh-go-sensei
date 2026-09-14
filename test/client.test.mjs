@@ -468,6 +468,9 @@ test('client: 点问题手一行 → inputActions.setDraft（真插入，非剪�
   assert.equal(drafts.length, 1, 'setDraft 应被调用一次')
   assert.ok(drafts[0].includes('第 21 手'), drafts[0])
   assert.ok(drafts[0].includes('F14'))
+  // 追问语里要带上「画一张变化图」：配图靠模型主动调 go_draw_diagram，
+  // 在提问处写明比只写进人设可靠（人设会被长对话稀释）
+  assert.ok(drafts[0].includes('画一张变化图'), drafts[0])
   assert.ok(drafts[0].includes('F16'), '含 AI 推荐')
   assert.ok(drafts[0].includes(gamePath), '含棋谱路径')
 })

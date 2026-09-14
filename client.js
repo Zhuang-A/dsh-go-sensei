@@ -553,12 +553,16 @@ window.__ModuleLoader__.load({
     /**
      * 点棋盘交叉点的追问语（三处视图共用同一句）。
      * 输入框下方面板把它插进输入框；整页与右侧栏没有输入框，改为复制到剪贴板。
+     *
+     * 末尾那句「请画一张变化图」是刻意的：用户 2026-09-14 要求追问的回答要配图，
+     * 而配图靠模型主动调 go_draw_diagram —— 在**提问的那一刻**把要求写进问题里，
+     * 比只写在人设里可靠得多（人设会被长对话稀释）。
      */
     function askPointText(data, upto, x, y) {
       if (!data || !data.board) return ''
       var label = boardLabel(x, y, data.board.size)
       return '追问：第 ' + upto + ' 手之后的局面，如果下在 ' + label
-        + ' 会怎样？请讲讲这一手的价值与后续变化。'
+        + ' 会怎样？请讲讲这一手的价值与后续变化，并画一张变化图（1、2、3…标出顺序）。'
         + (data.path ? '（棋谱：' + data.path + '）' : '')
     }
 
@@ -1154,14 +1158,15 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** 由服务端读取到的候选，拼出可直接发送的追问语。 */
+    /** 由服务端读取到的候选，拼出可直接发送的追问语（末句同样要求配图，见 askPointText）。 */
     function followUpText(candidate, path) {
       var where = candidate.coordLabel ? '（这手下在 ' + candidate.coordLabel + '）' : ''
       var suggest = candidate.pv && candidate.pv[0] && candidate.pv[0].label
         ? '，AI 推荐 ' + candidate.pv[0].label
         : ''
       return '追问：第 ' + candidate.moveNumber + ' 手' + where + suggest
-        + '，这手为什么不好？改下哪里会更好？请结合局面与候选变化讲解。'
+        + '，这手为什么不好？改下哪里会更好？请结合局面与候选变化讲解，'
+        + '并画一张变化图（1、2、3…标出顺序，关键棋子用三角形标出）。'
         + (path ? '（棋谱：' + path + '）' : '')
     }
 
