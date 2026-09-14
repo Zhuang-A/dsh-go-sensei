@@ -327,6 +327,72 @@ test('client: 胜率/目差曲线（黑方视角、缺口断开、可折叠、�
   senseiPatch({ data: null, upto: 0, curveWinrate: true, curveScore: true })
 })
 
+test('client: 整页排版——棋盘在左、曲线与列表在右、讲解整幅排在底部', () => {
+  // 用户 2026-09-14 给了目标排版：重点是棋盘和讲解都要有足够的位置。
+  // 这里锁住四块的位置关系，以及撑着这个排版的几条 CSS（讲解保底高度、棋盘受视口高度约束）。
+  const loaded = loadClient()
+  const { senseiPatch, CSS } = loaded.plugin.__internals
+  const page = boardPageOf(loaded)
+  const board = {
+    size: 19,
+    moves: [{ c: 'B', x: 3, y: 3 }, { c: 'W', x: 15, y: 15 }, { c: 'B', x: 4, y: 4 }],
+    setup: { black: [], white: [] },
+  }
+  const candidates = [{
+    moveNumber: 3, color: 'B', coord: 'dd', coordLabel: 'D16', label: '大恶手', labelKey: 'blunder',
+    winrateLoss: 25.5, scoreLoss: 12.3, pv: [{ label: 'Q16', winratePct: 51.2 }],
+  }]
+  senseiPatch({
+    data: {
+      path: 'x.sgf', mode: 'analysis', level: '18K', moveCount: 3, variations: 0, candidates, board,
+      curve: { winrate: [50, 55, 40], score: [1, 2, -3] },
+      comments: { 3: '这手太急了：右边还没收完就来断。' },
+    },
+    upto: 3, curveWinrate: true, curveScore: true,
+  })
+  loaded.react.reset()
+  const tree = page({})
+
+  const cls = (n) => String((n && n.props && n.props.className) || '')
+  const kids = (n) => ((n && Array.isArray(n.children)) ? n.children : []).filter((c) => c && typeof c === 'object')
+  const pick = (nodes, name) => nodes.find((n) => cls(n).split(' ').indexOf(name) >= 0)
+
+  // 页面分块：页头 / 主体 / 底部
+  const body = pick(kids(tree), 'dgs-page-body')
+  const foot = pick(kids(tree), 'dgs-page-foot')
+  assert.ok(body && foot, '主体与底部分成两块')
+  assert.deepEqual(kids(body).map(cls), ['dgs-page-board', 'dgs-page-side'], '左＝棋盘列、右＝曲线+问题手列')
+
+  // 左列：棋盘 + 控件条 + 状态行；讲解不再挤在这一列里
+  const boardCol = kids(body)[0]
+  assert.ok(kids(boardCol).some((n) => n.type === 'svg' && cls(n) === 'dgs-board'), '左列是棋盘')
+  assert.ok(pick(kids(boardCol), 'dgs-ctl'), '控件条贴着棋盘下沿')
+  assert.ok(pick(kids(boardCol), 'dgs-note'), '实战/AI 首选/后续状态行')
+  assert.ok(!pick(walk(boardCol), 'dgs-comment'), '讲解不能挤在棋盘那一列')
+
+  // 右列：两条曲线 + 问题手列表
+  const side = kids(body)[1]
+  assert.ok(pick(kids(side), 'dgs-curves'), '曲线在右列')
+  assert.ok(pick(kids(side), 'dgs-page-list'), '问题手列表在右列')
+  assert.deepEqual(
+    walk(side).filter((n) => n.type === 'svg' && n.props['data-dgs-curve'] !== undefined)
+      .map((n) => n.props['data-dgs-curve']),
+    ['winrate', 'score'],
+  )
+
+  // 底部整幅：图例 + 手数小结 + 讲解
+  assert.ok(pick(walk(foot), 'dgs-key'), '图例在底部')
+  assert.ok(texts(walk(foot)).join('|').includes('3 手 · 1 个问题手'), '底部写明手数与问题手数')
+  const comment = pick(walk(foot), 'dgs-comment')
+  assert.ok(comment && texts(walk(comment)).join('|').includes('这手太急了'), '讲解整幅排在底部')
+
+  // 撑着排版的 CSS：棋盘宽度受视口高度约束、讲解有保底高度、窄屏退回单列
+  assert.ok(/\.dgs-page-board \{[^}]*100vh - 340px/.test(CSS), '棋盘宽度要减掉讲解等固定开销')
+  assert.ok(CSS.includes('.dgs-page-foot .dgs-comment { min-height: 118px'), '讲解保底高度')
+  assert.ok(CSS.includes('@media (max-width: 860px)'), '窄屏退回单列')
+  senseiPatch({ data: null, upto: 0 })
+})
+
 test('client: 左侧栏图标按外壳给的 size 渲染', () => {  const { registered, react } = loadClient()
   const icon = registered.find((r) => r.options.name === 'sidebar.panellist').component
   react.reset()

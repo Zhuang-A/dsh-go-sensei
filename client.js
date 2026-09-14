@@ -88,10 +88,30 @@ window.__ModuleLoader__.load({
       '[data-dgs].dgs-page { border: none; border-radius: 0; background: transparent;',
       '  margin: 0; padding: 12px 16px; max-width: none; height: 100%; box-sizing: border-box; }',
       '[data-dgs] .dgs-page-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }',
-      '[data-dgs] .dgs-page-body { display: flex; gap: 16px; align-items: flex-start; margin-top: 10px; }',
-      '[data-dgs] .dgs-page-board { flex: 0 1 auto; width: min(520px, 44vw); min-width: 240px; }',
-      '[data-dgs] .dgs-page-list { flex: 1 1 320px; min-width: 0; max-height: 72vh; overflow-y: auto;',
+      // 左＝棋盘（主角，尽量给大：宽度同时受列宽与视口高度约束，别把讲解挤出屏幕）；
+      // 右＝曲线 + 问题手列表；图例与讲解单独占底部整幅宽度。
+      '[data-dgs] .dgs-page-body { display: flex; gap: 16px; align-items: flex-start; margin-top: 8px; }',
+      // 高度算式：视口高 - 棋盘以外的固定开销（页头/控件条/状态行/图例/讲解 118px ≈ 340px），
+      // 这样讲解一定留在屏幕里；窗口太矮时保底 300px 棋盘，宁可整体滚动也不把棋盘压成小图。
+      '[data-dgs] .dgs-page-board { flex: 0 1 auto; width: min(760px, max(340px, 100vh - 340px)); min-width: 300px; }',
+      '[data-dgs] .dgs-page-side { flex: 1 1 420px; min-width: 280px; max-width: 560px; display: flex;',
+      '  flex-direction: column; gap: 6px; min-height: 0; }',
+      '[data-dgs] .dgs-page-side .dgs-curves { margin-top: 0; }',
+      // 列表高度留出底部的讲解：曲线 + 列表合起来别高过棋盘那一列，讲解才不会掉出屏幕
+      '[data-dgs] .dgs-page-list { min-width: 0; max-height: min(34vh, 340px); overflow-y: auto;',
       '  display: flex; flex-direction: column; gap: 6px; }',
+      // 讲解给一块实打实的高度（够看五六行），太长时它自己滚，不跟棋盘抢空间
+      '[data-dgs] .dgs-page-foot { margin-top: 10px; }',
+      '[data-dgs] .dgs-foothead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }',
+      '[data-dgs] .dgs-foothead .dgs-key { margin-top: 0; }',
+      '[data-dgs] .dgs-page-foot .dgs-comment { min-height: 118px; max-height: 240px; }',
+      // 主区域被挤窄（左侧栏收窄、分屏）时退回单列：棋盘居中，曲线与列表排到它下面。
+      // 单列也守着高度算式，免得棋盘占满整屏把讲解顶到很远的地方。
+      '@media (max-width: 860px) {',
+      '  [data-dgs] .dgs-page-body { flex-wrap: wrap; }',
+      '  [data-dgs] .dgs-page-board { width: min(100%, max(340px, 100vh - 340px)); min-width: 0; margin: 0 auto; }',
+      '  [data-dgs] .dgs-page-side { flex: 1 1 100%; max-width: none; }',
+      '}',
       '[data-dgs] .dgs-page-item { width: 100%; text-align: left; padding: 7px 10px; }',
       '[data-dgs] .dgs-page-empty { margin-top: 16px; max-width: 620px; line-height: 1.8; }',
       '[data-dgs] .dgs-page-empty ul { margin: 6px 0 6px 18px; padding: 0; }',
@@ -1399,8 +1419,7 @@ window.__ModuleLoader__.load({
         )
       })
 
-      return React.createElement('div', { className: 'dgs-page', 'data-dgs': '' }, head, ctl,
-        curvesView(data, cur, function (n) { senseiPatch({ upto: n }) }),
+      return React.createElement('div', { className: 'dgs-page', 'data-dgs': '' }, head,
         copied === '' ? null : React.createElement('div', { className: 'dgs-ok' }, copied),
         React.createElement('div', { className: 'dgs-page-body' },
           React.createElement('div', { className: 'dgs-page-board' },
@@ -1419,6 +1438,8 @@ window.__ModuleLoader__.load({
                   function () { setCopied('复制失败：请手动选中') })
               },
             }),
+            // 控件条贴着棋盘下沿（打谱软件的习惯），不再占掉顶部一整行
+            ctl,
             React.createElement('div', { className: 'dgs-note' },
               problem !== null
                 // 停在一处问题手上：把"实战下在哪、AI 想下哪、之后怎么走"一次念全
@@ -1439,14 +1460,22 @@ window.__ModuleLoader__.load({
                   : problemMarks.length > 0
                     ? '● 盘上色点＝问题手（紫＞红＞橙）：点右边任意一行跳过去'
                     : '未发现明显问题手'),
-            markerKeyRow(),
-            // 已写回棋谱的讲解：翻到哪一手读到哪一手
-            commentBox(commentOf(data, cur)),
           ),
-          React.createElement('div', { className: 'dgs-page-list' },
-            list.length === 0
-              ? React.createElement('div', { className: 'dgs-sub' }, '这盘棋没有发现问题手')
-              : rows),
+          React.createElement('div', { className: 'dgs-page-side' },
+            curvesView(data, cur, function (n) { senseiPatch({ upto: n }) }),
+            React.createElement('div', { className: 'dgs-page-list' },
+              list.length === 0
+                ? React.createElement('div', { className: 'dgs-sub' }, '这盘棋没有发现问题手')
+                : rows),
+          )),
+        // 图例与讲解整幅排在页面底部：讲解是讲给学生看的内容，不能被挤成一条缝
+        React.createElement('div', { className: 'dgs-page-foot' },
+          React.createElement('div', { className: 'dgs-foothead' },
+            markerKeyRow(),
+            React.createElement('span', { className: 'dgs-sub' },
+              String(data.moveCount || 0) + ' 手 · ' + list.length + ' 个问题手')),
+          // 已写回棋谱的讲解：翻到哪一手读到哪一手
+          commentBox(commentOf(data, cur)),
         ))
     }
 
@@ -2251,6 +2280,9 @@ window.__ModuleLoader__.load({
       //（React 桩把 useEffect 实现成空操作，所以发布/订阅在测试里不参与）
       senseiStore: senseiStore,
       senseiPatch: senseiPatch,
+      // 整页排版（棋盘 / 曲线+列表 / 讲解 三块怎么摆）主要靠这些 CSS 规则，
+      // 单测直接断言几条关键规则，免得以后重构时把「给讲解留位置」悄悄删掉
+      CSS: CSS,
       PANEL_ID: PANEL_ID,
     }
     return module.exports
