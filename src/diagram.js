@@ -228,10 +228,40 @@ function esc(value) {
     .replace(/"/g, '&quot;')
 }
 
+/** 棋手名条的视口高度（只有拿到棋手名时才占用这一条）。 */
+const NAME_BAND = 6
+
+/**
+ * 把 SGF 的棋手信息格式化成黑/白两条标签。
+ *
+ * 用户 2026-09-15 的要求是「所有棋盘加上黑方白方的名字」：配图直接落在对话
+ * 正文里，周围没有任何界面说明谁执黑 —— 名字与段位一起写出来，学生才把
+ * "黑棋这手" 与具体的人对上。
+ *
+ * @param {{black?:string,white?:string,blackRank?:string,whiteRank?:string}} players
+ * @returns {{black: string, white: string}} 形如 '庄生梦1n4k（18级）'；都没有时为空串
+ */
+export function playerLabels(players) {
+  const p = players && typeof players === 'object' ? players : {}
+  const one = (name, rank) => {
+    const n = String(name == null ? '' : name).trim()
+    const r = String(rank == null ? '' : rank).trim()
+    if (n === '') return r
+    return r === '' ? n : `${n}（${r}）`
+  }
+  return { black: one(p.black, p.blackRank), white: one(p.white, p.whiteRank) }
+}
+
+/** 名字太长会把左右两条挤到一起：超过 14 字截断加省略号。 */
+function clipName(text) {
+  const s = String(text)
+  return s.length > 14 ? s.slice(0, 13) + '…' : s
+}
+
 /**
  * 画一张配图（SVG 字符串）。
  *
- * 视口 100 宽、100(+图注) 高；输出同时带 width/height 像素属性，
+ * 视口 100 宽、100(+棋手名条+图注) 高；输出同时带 width/height 像素属性，
  * 在对话里由 CSS 的 max-width 收窄，因此按比例缩放不变形。
  *
  * @param {object} spec
@@ -241,6 +271,7 @@ function esc(value) {
  * @param {Array<{x:number,y:number,shape:string,text?:string}>} [spec.marks] 重点棋子标注
  * @param {{x:number,y:number,color:string}|null} [spec.lastMove] 最后一手（反色小圆点）
  * @param {string} [spec.caption] 图注（画在图下方）
+ * @param {{black?:string,white?:string,blackRank?:string,whiteRank?:string}} [spec.players] 棋手（画在盘上沿的名条）
  * @param {number} [spec.width] 输出像素宽度，默认 640
  * @returns {string} 完整 SVG 文档
  */
@@ -249,8 +280,12 @@ export function renderBoardSvg(spec) {
   const grid = Array.isArray(spec.grid) ? spec.grid : emptyGrid(size)
   const caption = typeof spec.caption === 'string' ? spec.caption.trim() : ''
   const width = Math.max(120, Math.trunc(spec.width) || 640)
+  // 黑方白方的名字：画在棋盘上沿的窄条里（图注仍在盘下）。
+  const names = playerLabels(spec.players)
+  const hasNames = names.black !== '' || names.white !== ''
+  const nameH = hasNames ? NAME_BAND : 0
   const captionH = caption === '' ? 0 : 7
-  const viewH = VIEW + captionH
+  const viewH = nameH + VIEW + captionH
   const height = Math.round((width * viewH) / VIEW)
   const step = (VIEW - PAD * 2) / Math.max(1, size - 1)
   const pos = (i) => PAD + i * step
@@ -271,6 +306,22 @@ export function renderBoardSvg(spec) {
   // 背景铺满「棋盘 + 图注」整块：图注画在木纹之外，若背景是透明的，
   // 深色底（聊天区）上那行字就看不见了 —— 必须连图注条一起铺底。
   out.push(`<rect x="0" y="0" width="${VIEW}" height="${viewH}" rx="1.5" fill="url(#wood)"/>`)
+
+  // 名条：黑在左、白在右，各带一颗对应颜色的棋子点。名字与段位一起写，
+  // 只写姓名时学生仍不知道哪位是黑 —— 段位又正是讲棋时要参照的水平刻度。
+  if (hasNames) {
+    const dy = 4
+    if (names.black !== '') {
+      out.push('<circle cx="3.4" cy="2.9" r="1.15" fill="url(#bk)"/>')
+      out.push(`<text x="5.6" y="${dy}" font-size="3.4" fill="#1b1b1b" font-family="sans-serif">${esc('黑 ' + clipName(names.black))}</text>`)
+    }
+    if (names.white !== '') {
+      out.push(`<circle cx="${VIEW - 3.4}" cy="2.9" r="1.15" fill="url(#wh)" stroke="#111111" stroke-width="0.12"/>`)
+      out.push(`<text x="${VIEW - 5.6}" y="${dy}" font-size="3.4" fill="#1b1b1b" text-anchor="end" font-family="sans-serif">${esc('白 ' + clipName(names.white))}</text>`)
+    }
+  }
+  // 盘面整体下移一条名条的高度（图注仍留在盘下）
+  out.push(`<g transform="translate(0,${nameH})">`)
 
   for (let i = 0; i < size; i++) {
     const edge = i === 0 || i === size - 1
@@ -340,12 +391,19 @@ export function renderBoardSvg(spec) {
     }
   }
 
+  out.push('</g>')
+
   if (caption !== '') {
-    out.push(`<text x="${VIEW / 2}" y="${VIEW + 4.6}" font-size="3.6" fill="#3b2f1c" text-anchor="middle" font-family="sans-serif">${esc(caption)}</text>`)
+    out.push(`<text x="${VIEW / 2}" y="${nameH + VIEW + 4.6}" font-size="3.6" fill="#3b2f1c" text-anchor="middle" font-family="sans-serif">${esc(caption)}</text>`)
   }
 
+  const who = hasNames
+    ? [names.black === '' ? '' : `黑 ${names.black}`, names.white === '' ? '' : `白 ${names.white}`]
+        .filter((t) => t !== '').join(' 对 ')
+    : ''
+  const aria = who === '' ? (caption === '' ? '围棋局面配图' : caption) : `${who}${caption === '' ? '' : '：' + caption}`
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${VIEW} ${viewH}"`
-    + ` width="${width}" height="${height}" role="img" aria-label="${esc(caption === '' ? '围棋局面配图' : caption)}">`
+    + ` width="${width}" height="${height}" role="img" aria-label="${esc(aria)}">`
     + out.join('')
     + '</svg>'
 }

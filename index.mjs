@@ -487,6 +487,8 @@ function registerPanelRoute(ctx, cfg, diagram) {
             marks: marks.marks,
             lastMove,
             caption: (url.searchParams.get('cap') ?? '').slice(0, 120),
+            // 黑方白方的名字直接画在盘上沿：配图在对话正文里，四周没有别的说明
+            players: game.info?.players,
             width: Number.isFinite(rawWidth) && rawWidth >= 120 ? Math.min(rawWidth, 1600) : 640,
           })
           res.statusCode = 200

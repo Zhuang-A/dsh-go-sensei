@@ -13,6 +13,7 @@ import {
   parseMarks,
   renderBoardSvg,
   starPoints,
+  playerLabels,
   MARK_SHAPES,
 } from '../src/diagram.js'
 
@@ -131,4 +132,39 @@ test('diagram: 渲染出的 SVG 含图注、编号与三角标注，且做了 XM
     numbered: [{ x: 15, y: 3, color: 'B', label: '1' }],
   })
   assert.ok(!small.includes('stroke="#7dd3fc"'), '9 路盘上画不出 19 路的点')
+})
+
+test('diagram: 盘上沿写黑方白方的名字（棋谱没名字时不占名条）', () => {
+  const grid = buildGrid({ size: 19, moves: [], setup: { black: [], white: [] } }, 0)
+  const svg = renderBoardSvg({
+    size: 19,
+    grid,
+    players: { black: '庄生梦1n4k', white: '鍾易成1', blackRank: '18级', whiteRank: '17级' },
+    caption: '白 1 断',
+  })
+  assert.ok(svg.includes('viewBox="0 0 100 113"'), '名条 6 + 盘面 100 + 图注 7')
+  assert.ok(svg.includes('黑 庄生梦1n4k（18级）'), '黑方名字要写在盘上')
+  assert.ok(svg.includes('白 鍾易成1（17级）'), '白方名字要写在盘上')
+  assert.ok(svg.includes('<g transform="translate(0,6)">'), '盘面内容整体下移一条名条')
+  assert.ok(svg.includes('y="110.6"'), '图注仍排在名条 + 盘面之下')
+
+  // 没有棋手名时不占名条（老棋谱的渲染结果与从前一致）
+  const plain = renderBoardSvg({ size: 19, grid, caption: '变化图' })
+  assert.ok(plain.includes('viewBox="0 0 100 107"'))
+  assert.ok(plain.includes('<g transform="translate(0,0)">'))
+  assert.ok(!plain.includes('黑 '), '没名字就不该有名条文字')
+
+  // 名字里的 XML 字符要转义（棋手名是自由文本）
+  const risky = renderBoardSvg({
+    size: 9,
+    grid: buildGrid({ size: 9, moves: [], setup: {} }, 0),
+    players: { black: 'a<b>&"c' },
+  })
+  assert.ok(risky.includes('黑 a&lt;b&gt;&amp;&quot;c'))
+
+  // 名字/段位的组合写法
+  assert.deepEqual(playerLabels({ black: '甲', blackRank: '3段' }), { black: '甲（3段）', white: '' })
+  assert.deepEqual(playerLabels({ whiteRank: '9级' }), { black: '', white: '9级' })
+  assert.deepEqual(playerLabels({ black: '  甲  ', white: '乙' }), { black: '甲', white: '乙' })
+  assert.deepEqual(playerLabels(null), { black: '', white: '' })
 })

@@ -1030,6 +1030,53 @@ test('client: 棋盘渲染对畸形候选数据不抛错（首选标签解析不
   assert.ok(!nodes.some((n) => n.type === 'circle' && n.props.stroke === '#0000ff'), '也不画首选蓝圈')
 })
 
+test('client: 棋盘上沿写黑方白方的名字（棋谱没写名字时不占名条）', () => {
+  const { plugin, react } = loadClient()
+  const { renderBoard, playerNameText } = plugin.__internals
+  assert.equal(typeof playerNameText, 'function', '__internals 应暴露 playerNameText')
+
+  react.reset()
+  const tree = renderBoard({
+    board: CAPTURE_BOARD, upto: 5, problem: null, pv: [],
+    players: { black: '庄生梦1n4k', white: '鍾易成1', blackRank: '18级', whiteRank: '17级' },
+    onPick: null,
+  })
+  const nodes = walk(tree)
+  assert.equal(nodes.find((n) => n.type === 'svg').props.viewBox, '0 0 100 106', '视口加高一条名条')
+  const band = texts(nodes.filter((n) => n.type === 'text' && /^namet/.test(String(n.props.key))))
+  assert.deepEqual(band, ['黑 庄生梦1n4k（18级）', '白 鍾易成1（17级）'])
+  // 名条以下的内容整体下移一条名条；盘面坐标算法不动（cx 仍是老公式）
+  const group = nodes.find((n) => n.type === 'g' && n.props.key === 'board')
+  assert.equal(group.props.transform, 'translate(0,6)')
+  assert.equal(ghostStones(tree).length, 0, '没有变化图时不画 ghost stone')
+
+  react.reset()
+  const plain = renderBoard({ board: CAPTURE_BOARD, upto: 5, problem: null, pv: [], onPick: null })
+  const plainNodes = walk(plain)
+  assert.equal(plainNodes.find((n) => n.type === 'svg').props.viewBox, '0 0 100 100')
+  assert.ok(!plainNodes.some((n) => /^namet/.test(String(n.props.key))), '没名字就不占名条')
+
+  assert.equal(playerNameText('甲', '3段'), '甲（3段）')
+  assert.equal(playerNameText('甲', ''), '甲')
+  assert.equal(playerNameText('', '9级'), '9级')
+  assert.equal(playerNameText(undefined, undefined), '')
+})
+
+test('client: 姓名过长时截断，两条名条不会挤到一起', () => {
+  const { plugin, react } = loadClient()
+  const { renderBoard } = plugin.__internals
+  react.reset()
+  const tree = renderBoard({
+    board: CAPTURE_BOARD, upto: 0, problem: null, pv: [], onPick: null,
+    players: { black: '一二三四五六七八九十一二三四五六七八九十' },
+  })
+  const nodes = walk(tree)
+  const band = texts(nodes.filter((n) => n.type === 'text' && /^namet/.test(String(n.props.key))))
+  assert.equal(band.length, 1)
+  assert.equal(band[0].length, '黑 '.length + 14, '14 字以内（含省略号）')
+  assert.ok(band[0].endsWith('…'))
+})
+
 test('client: 变化图落在实战已占的点上时不画（免得像把子叠在子上）', () => {
   const { plugin, react } = loadClient()
   const { renderBoard } = plugin.__internals

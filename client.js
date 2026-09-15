@@ -208,6 +208,8 @@ window.__ModuleLoader__.load({
     var BOARD_VIEW = 100
     /** 边距：给坐标标注留出的空间（视口单位）。 */
     var BOARD_PAD = 8
+    /** 棋手名条的视口高度（只有拿到棋手名时才占这一条）。 */
+    var BOARD_NAME_H = 6
 
     // ── 与 Lizzieyzy 对齐的视觉约定 ────────────────────────────────────────
     // 参照其 FloatBoardRenderer.java：drawMoveRankMark（最后一手 = 反色小圆点，
@@ -246,6 +248,24 @@ window.__ModuleLoader__.load({
     function boardLabel(x, y, size) {
       var col = x >= 0 && x < BOARD_COLS.length ? BOARD_COLS.charAt(x) : String(x)
       return col + String(size - y)
+    }
+
+    /**
+     * 棋手名 -> 名条上的文字：'名字（段位）'；只有段位时写段位，都没有时为空串。
+     * 与宿主 half 的 diagram.js playerLabels 同一口径（那边画配图，这边画面板，
+     * 两边不能各写各的，否则同一盘棋在两处的写法会不一样）。
+     */
+    function playerNameText(name, rank) {
+      var n = String(name == null ? '' : name).replace(/^\s+|\s+$/g, '')
+      var r = String(rank == null ? '' : rank).replace(/^\s+|\s+$/g, '')
+      if (n === '') return r
+      return r === '' ? n : n + '（' + r + '）'
+    }
+
+    /** 太长会把左右两条挤到一起：超过 14 字截断加省略号。 */
+    function clipPlayerName(text) {
+      var s = String(text)
+      return s.length > 14 ? s.slice(0, 13) + '…' : s
     }
 
     /**
@@ -382,6 +402,8 @@ window.__ModuleLoader__.load({
      * @param {object|null} opts.problem 当前手的问题手标记（{x, y, key, label}）或 null
      * @param {Array<object|null>} [opts.pv] 变化图前几手的坐标（第 0 项 = AI 首选）
      * @param {string} [opts.hintLabel] 首选点旁的信息文本（胜率等）
+     * @param {{black?:string,white?:string,blackRank?:string,whiteRank?:string}} [opts.players] 棋手
+     *        ——名字与段位画在棋盘上沿（用户 2026-09-15：所有棋盘都要有黑方白方的名字）
      * @param {function} [opts.onPick] 点击交叉点回调 (x, y)
      * @returns {object} React 元素
      */
@@ -393,10 +415,39 @@ window.__ModuleLoader__.load({
       var pos = function (i) { return BOARD_PAD + i * step }
       var radius = step * 0.46
       var kids = []
-
+      // 名条（黑在左、白在右，各带一颗对应颜色的棋子点）。棋谱没写棋手名时
+      // 整条不出现：留一条空木头反而像是画错了。
+      var players = opts.players && typeof opts.players === 'object' ? opts.players : {}
+      var blackName = clipPlayerName(playerNameText(players.black, players.blackRank))
+      var whiteName = clipPlayerName(playerNameText(players.white, players.whiteRank))
+      var hasNames = blackName !== '' || whiteName !== ''
+      var nameBand = hasNames ? BOARD_NAME_H : 0
+      // 视口高度 = 名条 + 棋盘；横向仍是 100，坐标体系不动（盘面内容整体下移一条）。
+      var boardViewH = BOARD_VIEW + nameBand
       kids.push(React.createElement('rect', {
-        key: 'bg', x: 0, y: 0, width: BOARD_VIEW, height: BOARD_VIEW, rx: 1.5, fill: 'url(#dgs-wood)',
+        key: 'bg', x: 0, y: 0, width: BOARD_VIEW, height: boardViewH, rx: 1.5, fill: 'url(#dgs-wood)',
       }))
+      if (blackName !== '') {
+        kids.push(React.createElement('circle', {
+          key: 'namdotb', cx: 3.4, cy: 2.9, r: 1.15, fill: 'url(#dgs-black)', pointerEvents: 'none',
+        }))
+        kids.push(React.createElement('text', {
+          key: 'nametb', x: 5.6, y: 4, fontSize: 3.4, fill: '#1b1b1b', pointerEvents: 'none',
+        }, '黑 ' + blackName))
+      }
+      if (whiteName !== '') {
+        kids.push(React.createElement('circle', {
+          key: 'namdotw', cx: BOARD_VIEW - 3.4, cy: 2.9, r: 1.15, fill: 'url(#dgs-white)',
+          stroke: '#111111', strokeWidth: 0.12, pointerEvents: 'none',
+        }))
+        kids.push(React.createElement('text', {
+          key: 'nametw', x: BOARD_VIEW - 5.6, y: 4, fontSize: 3.4, fill: '#1b1b1b',
+          textAnchor: 'end', pointerEvents: 'none',
+        }, '白 ' + whiteName))
+      }
+      // 名条画在视口级（不随盘面下移）；从这里往后推的都是盘面内容，
+      // 收尾时整体装进一个 translate 组里 —— 见函数末尾的 contentFrom。
+      var contentFrom = kids.length
       var i
       // 网格：纯黑 + 外框加粗（Lizzieyzy drawGoban 的 borderStroke/normalStroke 之分）
       for (i = 0; i < size; i++) {
@@ -559,7 +610,9 @@ window.__ModuleLoader__.load({
             try {
               var box = event.currentTarget.getBoundingClientRect()
               var px = (event.clientX - box.left) / (box.width || 1) * BOARD_VIEW
-              var py = (event.clientY - box.top) / (box.height || 1) * BOARD_VIEW
+              // 纵向要按**整个视口**（名条 + 棋盘）换算，再减掉名条 ——
+              // 否则有名条时点哪一手都会偏上一条的高度。
+              var py = (event.clientY - box.top) / (box.height || 1) * boardViewH - nameBand
               var gx = Math.round((px - BOARD_PAD) / step)
               var gy = Math.round((py - BOARD_PAD) / step)
               opts.onPick(Math.max(0, Math.min(size - 1, gx)), Math.max(0, Math.min(size - 1, gy)))
@@ -569,6 +622,14 @@ window.__ModuleLoader__.load({
           },
         }))
       }
+
+      // 名条以下的所有盘面内容整体下移一条：坐标、棋子、标记的算法一个字不改。
+      // 点击换算已按整个视口（boardViewH）折算，见上面的 hit 矩形。
+      var viewLevel = kids.slice(0, contentFrom)
+      var bodyKids = kids.slice(contentFrom)
+      kids = viewLevel.concat([
+        React.createElement('g', { key: 'board', transform: 'translate(0,' + nameBand + ')' }, bodyKids),
+      ])
 
       kids.unshift(React.createElement('defs', { key: 'defs' },
         React.createElement('linearGradient', { id: 'dgs-wood', x1: '0', y1: '0', x2: '0', y2: '1' },
@@ -585,7 +646,7 @@ window.__ModuleLoader__.load({
       ))
 
       return React.createElement('svg', {
-        className: 'dgs-board', viewBox: '0 0 ' + BOARD_VIEW + ' ' + BOARD_VIEW,
+        className: 'dgs-board', viewBox: '0 0 ' + BOARD_VIEW + ' ' + boardViewH,
         xmlns: 'http://www.w3.org/2000/svg', 'data-dgs-board': String(size),
       }, kids)
     }
@@ -1445,6 +1506,7 @@ window.__ModuleLoader__.load({
           React.createElement('div', { className: 'dgs-page-board' },
             renderBoard({
               board: board, upto: cur, problem: problemPointOf(problem, curMove),
+              players: data.players,
               marks: problemMarks, pv: pvPoints,
               noteMoves: noteMoves, showProblem: senseiStore.showProblem, showNote: senseiStore.showNote, showHint: senseiStore.showHint,
               hintLabel: hint && hint.label ? hint.label : '',
@@ -2078,6 +2140,7 @@ window.__ModuleLoader__.load({
               board: board,
               upto: cur,
               problem: problemPoint,
+              players: data.players,
               marks: problemMarks,
               pv: pvPoints,
               noteMoves: noteMoves, showProblem: senseiStore.showProblem, showNote: senseiStore.showNote, showHint: senseiStore.showHint,
@@ -2256,6 +2319,8 @@ window.__ModuleLoader__.load({
       filePathOfAddress: filePathOfAddress,
       sameFile: sameFile,
       renderBoard: renderBoard,
+      // 棋手名条：与宿主 half 的 playerLabels 同一口径，单测直接钉死写法
+      playerNameText: playerNameText,
       // 曲线图（三处视图共用）：单测直接渲染它，验证缺口断开、纵轴口径与点击定位
       renderCurve: renderCurve,
       curveDomain: curveDomain,
