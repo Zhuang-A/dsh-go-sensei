@@ -350,6 +350,18 @@ function registerPanelRoute(ctx, cfg, diagram) {
    * 客户端据此判断"这条指针我处理过没有"，不必比较对象内容。
    */
   const focus = { seq: 0, value: null }
+  /**
+   * 面板/配图路由的 dispose 函数。webServer.register 返回「移除该路由」的 disposer；
+   * DSH 0.1.6 起宿主支持插件运行时卸载，路由必须随本插件 fiber 一起释放，否则停用
+   * 插件后路由仍然挂着。这里**同步**登记回收动作（此刻 fiber 必定有效），dispose 时
+   * 再读数组，因此晚到的 mount（ctx.inject 是异步的）也能被覆盖。
+   */
+  const routeOffs = []
+  ctx.effect(() => () => {
+    for (const off of routeOffs.splice(0)) {
+      try { off() } catch { /* 卸载阶段的清理失败不阻塞其它清理 */ }
+    }
+  })
   ctx.on('tools/result', (exec, result) => {
     try {
       const name = exec?.name
@@ -395,12 +407,17 @@ function registerPanelRoute(ctx, cfg, diagram) {
       const host = server.host === '0.0.0.0' ? '127.0.0.1' : String(server.host ?? '127.0.0.1')
       diagram.base = `http://${host}:${server.port}`
     }
+    // 每条路由登记后立刻收集它的 dispose 函数（回收动作见 apply 顶部的 routeOffs）。
+    const addRoute = (route) => {
+      const off = webCtx.webServer.register(route)
+      if (typeof off === 'function') routeOffs.push(off)
+    }
     const rememberHost = (req) => {
       const host = req?.headers?.host
       if (typeof host === 'string' && host !== '') diagram.base = `http://${host}`
     }
     // 面板启动时读取已知工作区根（相对路径的解析候选）
-    webCtx.webServer.register({
+    addRoute({
       kind: 'exact',
       path: '/go-sensei/roots',
       handler: (req, res) => {
@@ -412,7 +429,7 @@ function registerPanelRoute(ctx, cfg, diagram) {
       },
     })
     // 「正在讲解的局面」指针：棋盘跟随讲解用的轻量轮询端点（纯内存，不读盘）
-    webCtx.webServer.register({
+    addRoute({
       kind: 'exact',
       path: '/go-sensei/focus',
       handler: (req, res) => {
@@ -426,7 +443,7 @@ function registerPanelRoute(ctx, cfg, diagram) {
     // 讲解配图：把「局面 + 变化图 + 重点棋子标注」画成一张 SVG 图片直接回给浏览器，
     // 于是对话正文里一个 `![](/go-sensei/diagram?…)` 就能显示出来（图片源是绝对 URL 时
     // 聊天区按原样渲染 <img>）。参数即全部输入，无状态 —— 重启后旧链接照样能打开。
-    webCtx.webServer.register({
+    addRoute({
       kind: 'exact',
       path: '/go-sensei/diagram',
       handler: async (req, res) => {
@@ -501,7 +518,7 @@ function registerPanelRoute(ctx, cfg, diagram) {
         }
       },
     })
-    webCtx.webServer.register({
+    addRoute({
       kind: 'exact',
       path: '/go-sensei/review',
       handler: async (req, res) => {

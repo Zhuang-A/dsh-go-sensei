@@ -37,6 +37,8 @@ function makeCtx(workspace, services = {}) {
     registered,
     sections,
     writes,
+    // Cordis 的 ctx.effect：桩里立刻执行回调（清理函数在真实 fiber 卸载时才跑）
+    effect: (fn) => fn(),
     tools: {
       register(def) {
         registered.set(def.name, def)

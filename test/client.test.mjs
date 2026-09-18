@@ -594,11 +594,19 @@ function makeRouteCtx({ withWebServer = true, sessions = null } = {}) {
   const registered = new Map()
   const sections = []
   const listeners = new Map()
+  const effects = []
   return {
     routes,
     registered,
     sections,
     listeners,
+    effects,
+    /** Cordis 的 ctx.effect：记下清理函数，测试里手动触发（模拟插件卸载）。 */
+    effect(fn) {
+      const off = fn()
+      if (typeof off === 'function') effects.push(off)
+      return () => {}
+    },
     fs: makeFsStub(),
     tools: { register: (d) => { registered.set(d.name, d); return () => registered.delete(d.name) } },
     systemPrompt: {
@@ -618,7 +626,13 @@ function makeRouteCtx({ withWebServer = true, sessions = null } = {}) {
         return {
           host: '127.0.0.1',
           port: 3080,
-          register: (route) => { routes.push(route); return () => {} },
+          register: (route) => {
+            routes.push(route)
+            return () => {
+              const at = routes.indexOf(route)
+              if (at >= 0) routes.splice(at, 1)
+            }
+          },
         }
       }
       // 会话服务：宿主用它按 id 反查工作区根（右侧栏文档给的是会话内相对路径）
@@ -814,6 +828,16 @@ test('路由: webServer 缺席时不注册也不抛错', () => {
   assert.equal(ctx.routes.length, 0, '无 webServer 时不应注册路由')
   // 无引擎（engineDir 指到不存在的目录）：6 个复盘工具（含 go_draw_diagram）+ 始终注册的 go_engine_info
   assert.equal(ctx.registered.size, 7, '工具仍应照常注册')
+})
+
+test('路由: 插件卸载时释放全部 webServer 路由（0.1.6 运行时卸载）', () => {
+  const ctx = makeRouteCtx()
+  apply(ctx, Config(NO_ENGINE_CFG))
+  assert.equal(ctx.routes.length, 4, '挂载后应有 4 条路由（roots/focus/diagram/review）')
+  assert.ok(ctx.effects.length >= 1, '应登记了路由回收动作')
+  // 模拟 fiber 卸载：Cordis 会把 ctx.effect 的清理函数全部跑一遍
+  for (const off of ctx.effects.splice(0)) off()
+  assert.equal(ctx.routes.length, 0, '卸载后路由应全部移除')
 })
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 {
   "name": "dsh-go-sensei",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "type": "module",
   "description": "DeepGo Sensei —— DSH 围棋复盘教练插件：把围棋 AI 的数学判断（胜率/目差/候选点/变化图）翻译成老师级口头讲解，供自学棋手复盘；自带 KataGo 18b 引擎与权重，装完即用，Web 面板带一块可收起的棋盘（点问题手即跳转、可跟随讲解），讲解可回写 SGF 注释。",
   "keywords": [
@@ -42,6 +42,15 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "engines": {
+      "dsh": ">=0.1.5-rc.1"
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.1.5-rc.1": "compatible",
+        "0.1.5-rc.2": "compatible"
+      }
     },
     "client": {
       "inject": [

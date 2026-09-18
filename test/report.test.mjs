@@ -47,6 +47,8 @@ function makeCtx(workspace) {
     emit() {},
     // tools/result 观察者（面板路由用它记住工作区根）
     on() { return () => {} },
+    // Cordis 的 ctx.effect：桩里立刻执行回调
+    effect: (fn) => fn(),
     logger: { warn() {} },
   }
 }

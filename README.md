@@ -69,7 +69,7 @@ Sensei 会自己读谱、找问题手、逐手讲解。棋谱里没有 AI 分析
 
 | 项 | 要求 |
 |---|---|
-| DSH | 能正常启动 `dsh web` |
+| DSH | **≥ 0.1.5-rc.1**（见 `package.json` 的 `dsh.engines.dsh`；本机实测 0.1.5-rc.1 / 0.1.5-rc.2） |
 | Node.js | **≥ 22.19**（见 `package.json` 的 `engines`；本机实测 v24.19.0） |
 | 运行环境 | Windows / macOS / Linux 均可；依赖只有 3 个纯 JS 包，`npm install` 即可，**无编译步骤** |
 | 自带引擎 | `engine/` 里随包分发的是 **Windows x64 OpenCL** 版 KataGo + 18b 权重；macOS / Linux 需自己下载对应平台的引擎（[见下文](#自己装一套非-windows或想换后端)） |

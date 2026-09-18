@@ -54,6 +54,8 @@ function registerAllTools() {
     fs: {},
     get: () => undefined,
     on: () => () => {},
+    // Cordis 的 ctx.effect：桩里立刻执行回调（清理函数在真实 fiber 卸载时才跑）
+    effect: (fn) => fn(),
     emit() {},
     logger: { warn() {} },
   }
