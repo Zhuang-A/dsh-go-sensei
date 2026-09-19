@@ -892,6 +892,25 @@ window.__ModuleLoader__.load({
      */
     var focusPointer = { seq: 0, seen: 0, failures: 0, tried: {} }
 
+    /**
+     * 按会话分桶的游标。
+     *
+     * 宿主把「正在讲解的局面」也按会话分开存（/go-sensei/focus?session=…），客户端必须
+     * 同样分桶：共用一个 seq 游标时，序号较小的那个会话会被另一个会话的 seen 永久挡掉
+     * （自己的讲解再也带不进来）。无会话 id 时退回上面那个默认桶（单会话/旧行为不变）。
+     */
+    var focusPointers = {}
+    function pointerFor(sessionId) {
+      var key = typeof sessionId === 'string' ? sessionId : ''
+      if (key === '') return focusPointer
+      var found = focusPointers[key]
+      if (found === undefined) {
+        found = { seq: 0, seen: 0, failures: 0, tried: {} }
+        focusPointers[key] = found
+      }
+      return found
+    }
+
     // -----------------------------------------------------------------------
     // 两份 UI 的共享状态：输入框下方的面板（控制器）＋ 左侧栏点开的整页棋盘
     //
@@ -1289,7 +1308,23 @@ window.__ModuleLoader__.load({
      * 这里负责"看得大、看得全"（没有输入框能力，所以点一行改为复制追问语）。
      * 两边共用 senseiStore，所以在哪边翻手、开关跟随，另一边立刻同步。
      */
-    function SenseiBoardPage() {
+    function SenseiBoardPage(props) {
+      // 整页棋盘也参与「跟随讲解」的轮询，所以同样要带上自己的会话 id ——
+      // 否则只能退回宿主那份"最近一次"的全局指针，多会话下仍会串台。
+      // 该 slot 未提供 useSession 时保持空串（退回旧行为），不报错。
+      var pageSessionId = ''
+      try {
+        var sessionSnapshot = props && typeof props.useSession === 'function'
+          ? props.useSession(function (s) { return s })
+          : null
+        if (sessionSnapshot && sessionSnapshot.header && sessionSnapshot.header.id) {
+          pageSessionId = String(sessionSnapshot.header.id)
+        } else if (sessionSnapshot && sessionSnapshot.id) {
+          pageSessionId = String(sessionSnapshot.id)
+        }
+      } catch (error) {
+        pageSessionId = ''
+      }
       var store = useSenseiStore()
       var copyState = React.useState('')
       var copied = copyState[0]
@@ -1350,12 +1385,14 @@ window.__ModuleLoader__.load({
       function loadIntoStore(target, cwdOverride) {
         var wanted = String(target == null ? '' : target).trim()
         if (wanted === '') return
+        var pointer = pointerFor(pageSessionId)
         var key = wanted + '|' + String(cwdOverride || '')
-        var last = focusPointer.tried[key] || 0
+        var last = pointer.tried[key] || 0
         if (Date.now() - last < 20000) return
-        focusPointer.tried[key] = Date.now()
+        pointer.tried[key] = Date.now()
         var url = '/go-sensei/review?path=' + encodeURIComponent(wanted)
           + (cwdOverride ? '&cwd=' + encodeURIComponent(cwdOverride) : '')
+          + (pageSessionId ? '&session=' + encodeURIComponent(pageSessionId) : '')
         fetch(url)
           .then(function (response) { return response.json().catch(function () { return {} }) })
           .then(function (body) {
@@ -1374,14 +1411,15 @@ window.__ModuleLoader__.load({
       }
 
       function pollFocusPage() {
-        fetch('/go-sensei/focus')
+        var pointer = pointerFor(pageSessionId)
+        fetch('/go-sensei/focus' + (pageSessionId ? '?session=' + encodeURIComponent(pageSessionId) : ''))
           .then(function (response) { return response.json().catch(function () { return {} }) })
           .then(function (body) {
             var f = body && body.ok === true ? body.focus : null
             if (!f || typeof f.seq !== 'number') return
-            if (f.seq > focusPointer.seen) focusPointer.seen = f.seq
-            if (f.seq <= focusPointer.seq) return
-            focusPointer.seq = f.seq
+            if (f.seq > pointer.seen) pointer.seen = f.seq
+            if (f.seq <= pointer.seq) return
+            pointer.seq = f.seq
             var loaded = senseiStore.data && senseiStore.data.path ? senseiStore.data.path : ''
             if (loaded !== '' && sameFile(loaded, f.path || f.name || '')) {
               if (typeof f.moveNumber === 'number' && f.moveNumber > 0) senseiPatch({ upto: f.moveNumber })
@@ -1648,8 +1686,25 @@ window.__ModuleLoader__.load({
           setHint('仍在读取：棋谱没有分析数据时，宿主会用 KataGo 现场补算（实测 1~2 分钟），算完自动出结果。')
         }, SLOW_HINT_DELAY)
         var done = function () { clearTimeout(slowTimer); setHint('') }
+        /**
+         * 面板路由与 GUI 共用同一道登录闸门（宿主 connection 服务）：
+         * 没登录过 GUI 的设备会拿到 401，跨站/伪造 Host 会拿到 403。
+         * 这对局域网使用是常态（换了设备、清了 cookie），所以要给出可操作的提示，
+         * 不能让用户只看到一句 "unauthorized"。
+         */
+        var describePanelStatus = function (status) {
+          if (status === 401) return '需要与界面相同的登录凭据：请用带 token 的地址重新打开界面后再试'
+          if (status === 403) return '该请求被来源校验拒绝（跨站或 Host 不匹配），请从界面所在地址访问'
+          if (status === 429) return '请求过于频繁，请稍后再试'
+          if (status === 503) return '宿主正在读取上一份棋谱，请稍后再试'
+          return ''
+        }
         fetch(url)
-          .then(function (response) { return response.json().catch(function () { return {} }) })
+          .then(function (response) {
+            var blocked = describePanelStatus(response.status)
+            if (blocked !== '') return { ok: false, error: blocked }
+            return response.json().catch(function () { return {} })
+          })
           .then(function (body) {
             done()
             setBusy(false)
@@ -1679,7 +1734,8 @@ window.__ModuleLoader__.load({
         // 手动读取＝用户此刻的选择：把已经见过的指针「认掉」，免得下一次轮询
         // 又用同一件旧事（比如别的会话留下的指针）把用户刚选的棋谱换掉。
         // 只有**新**的讲解事件（seq 更大）才会再切走。
-        focusPointer.seq = focusPointer.seen
+        var pointer = pointerFor(sessionId)
+        pointer.seq = pointer.seen
       }
 
       /**
@@ -1690,19 +1746,20 @@ window.__ModuleLoader__.load({
        * 代价可以忽略，而且只在"面板展开 + 跟随开启"时才轮询。
        */
       function pollFocus() {
-        fetch('/go-sensei/focus')
+        var pointer = pointerFor(sessionId)
+        fetch('/go-sensei/focus' + (sessionId ? '?session=' + encodeURIComponent(sessionId) : ''))
           .then(function (response) { return response.json().catch(function () { return {} }) })
           .then(function (body) {
-            if (focusPointer.failures > 0) {
-              focusPointer.failures = 0
+            if (pointer.failures > 0) {
+              pointer.failures = 0
               setFollowNote('')
             }
             var f = body && body.ok === true ? body.focus : null
             if (!f || typeof f.seq !== 'number') return
-            if (f.seq > focusPointer.seen) focusPointer.seen = f.seq
+            if (f.seq > pointer.seen) pointer.seen = f.seq
             // seq 不比"已应用"更新就什么都不做：同一件旧事不该反复抢走用户选的棋谱
-            if (f.seq <= focusPointer.seq) return
-            focusPointer.seq = f.seq
+            if (f.seq <= pointer.seq) return
+            pointer.seq = f.seq
             applyFocus(f)
           })
           .catch(function () {
@@ -1722,9 +1779,10 @@ window.__ModuleLoader__.load({
         if (!sameGame) {
           // 别急着反复重试：路径解析不了时（相对路径基准不对）20 秒内只试一次
           var key = String(f.path || '') + '|' + String(f.cwd || '')
-          var last = focusPointer.tried[key] || 0
+          var pointer = pointerFor(sessionId)
+          var last = pointer.tried[key] || 0
           if (Date.now() - last < 20000) return
-          focusPointer.tried[key] = Date.now()
+          pointer.tried[key] = Date.now()
           setPath(String(f.path || ''))
           loadTarget(f.path, f.cwd)
           return
@@ -2013,14 +2071,15 @@ window.__ModuleLoader__.load({
       }, [path])
 
       function pollFocusDoc() {
-        fetch('/go-sensei/focus')
+        var pointer = pointerFor(sessionId)
+        fetch('/go-sensei/focus' + (sessionId ? '?session=' + encodeURIComponent(sessionId) : ''))
           .then(function (response) { return response.json().catch(function () { return {} }) })
           .then(function (body) {
             var f = body && body.ok === true ? body.focus : null
             if (!f || typeof f.seq !== 'number') return
-            if (f.seq > focusPointer.seen) focusPointer.seen = f.seq
-            if (f.seq <= focusPointer.seq) return
-            focusPointer.seq = f.seq
+            if (f.seq > pointer.seen) pointer.seen = f.seq
+            if (f.seq <= pointer.seq) return
+            pointer.seq = f.seq
             if (path !== '' && sameFile(path, f.path || f.name || '')) {
               if (typeof f.moveNumber === 'number' && f.moveNumber > 0) setUpto(f.moveNumber)
             }

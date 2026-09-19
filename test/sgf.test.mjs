@@ -21,6 +21,11 @@ import {
   countWinratePairs,
   injectComments,
   injectAnalysis,
+  MAX_SGF_CHARS,
+  MAX_SGF_NODES,
+  MAX_SGF_DEPTH,
+  MAX_BOARD_SIZE,
+  MIN_BOARD_SIZE,
   analysisEntriesOf,
   serializeLz,
 } from '../src/sgf.js'
@@ -586,4 +591,37 @@ test('写回→重读：复盘能取到 AI 首选与变化图（改下 X 的答�
   assert.ok(Array.isArray(m2.pv) && m2.pv.length > 0, '写回的候选必须能被复盘取到（否则面板没有首选/变化图）')
   assert.equal(m2.pv[0].coord, 'Q16')
   assert.equal(m2.pv[0].pv, 'Q16 D4 R4', '变化图以人类可读坐标串给出')
+})
+
+// ---------------------------------------------------------------------------
+// 解析前上限与棋盘尺寸钳制（2026-09 复核）
+// ---------------------------------------------------------------------------
+
+test('解析前上限: 超长棋谱与超多节点在进入解析器之前就被拒', () => {
+  // 字符数：必须在 sgf.parse 之前挡下（否则整棵树先被材质化，旧上限才生效）
+  const huge = `(;SZ[19]C[${'x'.repeat(MAX_SGF_CHARS)}])`
+  assert.throws(() => parseGame(huge), /棋谱过大/)
+  // 节点数：'(' 与 ';' 的总数
+  const manyNodes = `(;${';'.repeat(MAX_SGF_NODES + 1)})`
+  assert.throws(() => parseGame(manyNodes), /节点过多/)
+  // 三个解析入口共用同一道守卫
+  assert.throws(() => injectComments(manyNodes, [{ moveNumber: 1, comment: 'x' }]), /节点过多/)
+  assert.throws(() => injectAnalysis(manyNodes, [{ moveNumber: 1 }]), /节点过多/)
+})
+
+test('解析前上限: 嵌套过深在递归解析器爆栈之前被拒；属性值里的结构字符不算节点', () => {
+  // 深度：'(' 的层数超过上限即拒（此时节点数远未到上限）
+  const deep = '('.repeat(MAX_SGF_DEPTH + 2)
+  assert.throws(() => parseGame(deep), /嵌套过深/)
+  // 属性值里的 ';' 不是节点：200KB 的注释不该被当成"节点过多"
+  const commentFull = `(;SZ[19]C[${';'.repeat(MAX_SGF_NODES + 5)}])`
+  assert.doesNotThrow(() => parseGame(commentFull), '值内部的 ; 必须被跳过')
+})
+
+test('棋盘尺寸: 畸形 SZ 被钳到合法区间（不再撑爆逐格数组）', () => {
+  assert.equal(parseGame('(;SZ[9999];B[pd])').info.size, MAX_BOARD_SIZE)
+  assert.equal(parseGame('(;SZ[1];B[pd])').info.size, MIN_BOARD_SIZE)
+  assert.equal(parseGame('(;SZ[19];B[pd])').info.size, 19)
+  assert.equal(parseGame('(;SZ[abc];B[pd])').info.size, 19, '非数字退回 19 路')
+  assert.equal(parseGame('(;B[pd])').info.size, 19, '缺 SZ 仍是 19 路')
 })

@@ -87,6 +87,8 @@ function makeCtx(workspace, services = {}) {
     // tools/result 观察者（面板路由用它记住工作区根）；测试里只登记不触发
     on() { return () => {} },
     get(name) {
+      // services.<name> === null：显式模拟"这个组合里没有该服务"
+      if (services[name] === null) return undefined
       if (services[name] !== undefined) return services[name]
       if (name === 'sandboxPolicy') {
         return {
@@ -833,4 +835,65 @@ test('mergeCachedAnalysis: 对不上时返回 0（调用方按未命中处理，
   assert.equal(mergeCachedAnalysis(game, []), 0)
   assert.equal(mergeCachedAnalysis(game, undefined), 0)
   assert.equal(game.moves[0].analysis, null, '未命中不得改动 moves')
+})
+
+// ---------------------------------------------------------------------------
+// 写盘 fail-closed：拿不到 sandboxPolicy 服务时拒绝写入（2026-09 复核）
+//
+// 写入若不携带策略，沙箱后端会退回自身默认策略 —— 在 workspace-write 会话里
+// 表现为"偶发被拒"，而在没有 confining 后端时就是绕过工作区限制。故必须拒绝。
+// 读取不由 sandboxPolicy 约束，只读工具照常工作。
+// ---------------------------------------------------------------------------
+
+test('写盘契约: 拿不到 sandboxPolicy 服务时拒绝写入（fail-closed），读取不受影响', async () => {
+  // apply() 时就把服务捕获进策略解析器，所以要**另起一个没有该服务的 ctx**
+  const noc = makeCtx(WORKSPACE, { sandboxPolicy: null })
+  apply(noc, Config(CFG))
+  const writesBefore = noc.writes.length
+  // 只读工具照常工作（读取不由 sandboxPolicy 约束）
+  const parsed = await call(noc.registered.get('go_parse_sgf'), WORKSPACE, { path: 'game.sgf' })
+  assert.ok(parsed !== undefined, '读取类工具不应受 sandboxPolicy 缺席影响')
+  // 写入类工具必须拒绝，而不是降级成"无策略写入"
+  await assert.rejects(
+    () => call(noc.registered.get('go_write_review'), WORKSPACE, {
+      path: 'game.sgf',
+      entries: [{ moveNumber: 4, comment: 'x' }],
+    }),
+    /sandboxPolicy/,
+  )
+  await assert.rejects(
+    () => call(noc.registered.get('go_export_report'), WORKSPACE, { path: 'game.sgf' }),
+    /sandboxPolicy/,
+  )
+  assert.equal(noc.writes.length, writesBefore, '被拒时不得发生任何写入')
+})
+
+// ---------------------------------------------------------------------------
+// 报告正文上限：写入是唯一的副作用面，不该由调用方决定写多大（2026-09 复审）
+// ---------------------------------------------------------------------------
+
+test('go_export_report: 传入正文超过上限时拒绝写入', async () => {
+  const tool = ctx.registered.get('go_export_report')
+  const writesBefore = ctx.writes.length
+  await assert.rejects(
+    () => call(tool, WORKSPACE, { path: 'game.sgf', content: 'x'.repeat(1024 * 1024 + 1) }),
+    /报告内容过长/,
+  )
+  assert.equal(ctx.writes.length, writesBefore, '被拒时不得写入')
+})
+
+test('写盘契约: sandboxPolicy 服务解析出 null 时同样拒绝写入（fail-closed）', async () => {
+  // service.resolve() 返回 null 时 `null === undefined` 为假 —— 旧守卫会被绕过，
+  // 让写入带着"空策略"落到 fs 后端（2026-09 复审）
+  const nullish = makeCtx(WORKSPACE, { sandboxPolicy: { resolve: () => null } })
+  apply(nullish, Config(CFG))
+  const writesBefore = nullish.writes.length
+  await assert.rejects(
+    () => call(nullish.registered.get('go_write_review'), WORKSPACE, {
+      path: 'game.sgf',
+      entries: [{ moveNumber: 4, comment: 'x' }],
+    }),
+    /sandboxPolicy/,
+  )
+  assert.equal(nullish.writes.length, writesBefore, '空策略不得放行写入')
 })

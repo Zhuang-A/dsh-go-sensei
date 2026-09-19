@@ -589,7 +589,7 @@ function makeFsStub() {
 }
 
 /** 路由测试用的完整 ctx 桩：apply() 需要 systemPrompt/tools/fs/on，路由需要 webServer。 */
-function makeRouteCtx({ withWebServer = true, sessions = null } = {}) {
+function makeRouteCtx({ withWebServer = true, sessions = null, connection = { requestRejection: () => undefined } } = {}) {
   const routes = []
   const registered = new Map()
   const sections = []
@@ -639,13 +639,16 @@ function makeRouteCtx({ withWebServer = true, sessions = null } = {}) {
       if (name === 'sessions' && sessions !== null) {
         return { get: (id) => sessions[id] }
       }
+      // 准入闸门：面板路由与 GUI 的 /api 共用 connection.requestRejection()。
+      // 路由行为用例默认放行；闸门本身的行为见 test/panel-guard.test.mjs。
+      if (name === 'connection') return connection
       return undefined
     },
   }
 }
 
 /** 调一次路由处理器，收集响应。 */
-async function callRoute(route, url) {
+async function callRoute(route, url, req = {}) {
   let body = ''
   const res = {
     statusCode: 200,
@@ -653,7 +656,8 @@ async function callRoute(route, url) {
     setHeader(k, v) { this.headers[k] = v },
     end(chunk) { body = chunk },
   }
-  await route.handler({ url }, res)
+  const request = { url, headers: { host: '127.0.0.1:3080' }, socket: { remoteAddress: '127.0.0.1' }, ...req }
+  await route.handler(request, res)
   let parsed = null
   try { parsed = JSON.parse(body) } catch { /* 非 JSON */ }
   return { status: res.statusCode, body: parsed }
@@ -786,14 +790,25 @@ test('工具: 没有 Web 服务器时 go_draw_diagram 如实报错（不编造 U
   )
 })
 
-test('路由: cwd 参数控制相对路径解析基准', async () => {
+test('路由: ?cwd 自造基准不再放行（包含校验生效），已知根之内照常可读', async () => {
   const ctx = makeRouteCtx()
   apply(ctx, Config(NO_ENGINE_CFG))
   const route = ctx.routes.find((r) => r.path === '/go-sensei/review')
-  const r = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent('real-analysis.sgf')
+  // ① 调用方自造的基准：拒绝，并给出可操作提示
+  const refused = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent('real-analysis.sgf')
     + '&cwd=' + encodeURIComponent(join(here, 'fixtures')))
-  assert.equal(r.status, 200)
-  assert.equal(r.body.data.moveCount, 106)
+  assert.equal(refused.status, 404, '自造基准不得成为读取依据')
+  assert.match(String(refused.body.error), /不在已知工作区/)
+  assert.ok(String(refused.body.hint || '').length > 0, '要给出可操作的提示')
+  // ② 已知工作区之外的绝对路径：同样拒绝
+  const outside = await callRoute(route, '/go-sensei/review?path='
+    + encodeURIComponent(resolve(here, '..', '..', '..', 'outside.sgf')))
+  assert.equal(outside.status, 404)
+  // ③ 允许的根之内（面板默认根＝进程 cwd）：照常读出
+  const ok = await callRoute(route, '/go-sensei/review?path='
+    + encodeURIComponent(fixture('real-analysis.sgf')))
+  assert.equal(ok.status, 200)
+  assert.equal(ok.body.data.moveCount, 106)
 })
 
 test('路由: 缺 path 参数 → 400', async () => {

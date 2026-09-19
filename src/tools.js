@@ -13,6 +13,7 @@ import {
   analysisEntriesOf,
   coordLabel,
   hasWinrateData,
+  MAX_SGF_CHARS,
 } from './sgf.js'
 import { reviewGame, inferLevel, RANKS } from './review.js'
 import { ReviewCache, gameFingerprint } from './cache.js'
@@ -25,6 +26,8 @@ const MAX_MOVE_LIST = 400
 const MAX_CANDIDATES_CAP = 50
 const MAX_ENTRIES_PER_WRITE = 200
 const MAX_COMMENT_CHARS = 2000
+/** go_export_report 传入正文的上限（1 MB；一份 Markdown 报告远小于此）。 */
+const MAX_REPORT_CHARS = 1024 * 1024
 
 function sessionCwd(exec) {
   const agent = exec && exec.agent
@@ -45,10 +48,12 @@ function sessionCwd(exec) {
  */
 function compileSandboxPolicy(ctx) {
   // 未挂载 confining 后端时该服务不存在，仅作可选读取（不可作为硬依赖）。
+  // 把"服务缺席"与"服务不完整"一并当作缺席：宁可走 fail-closed 的写入拒绝，
+  // 也不要在 service.resolve 上抛 TypeError 把工具调用打成内部错误。
   const service = ctx.get('sandboxPolicy')
-  if (service === undefined) {
+  if (service === undefined || service === null || typeof service.resolve !== 'function') {
     ctx.logger?.warn?.(
-      'go-sensei：未找到 sandboxPolicy 服务；写入类工具在沙箱后端下可能被拒（file access denied）',
+      'go-sensei：未找到可用的 sandboxPolicy 服务；写入类工具将被拒绝（读取不受影响）',
     )
     return () => undefined
   }
@@ -56,6 +61,31 @@ function compileSandboxPolicy(ctx) {
     const session = exec?.agent?.session
     return service.resolve(session !== undefined ? { session } : {})
   }
+}
+
+/**
+ * 写入前的策略门禁：拿不到 sandboxPolicy 服务时**拒绝写入**。
+ *
+ * 为什么必须 fail-closed：写入若不带策略，沙箱后端会退回自身默认策略 ——
+ * 在 workspace-write 会话里表现为"偶发被拒"，而在没有 confining 后端时则是
+ * **绕过工作区限制**（等同把受限会话的写权限放大到无限制）。读取不受影响：
+ * 读取本就不由 sandboxPolicy 约束，故只读工具照常工作（2026-09 复核）。
+ *
+ * @param {object|undefined} policy 已解析的执行策略
+ * @returns {object} 同一个策略对象
+ */
+function requireSandboxPolicy(policy) {
+  // 也要挡 null／非对象：`service.resolve()` 在某些会话下可能返回 null，而
+  // `null === undefined` 为假 —— 少了这一句，写入会带着"空策略"落到 fs 后端，
+  // 正是 fail-closed 要堵的那条路（2026-09 复审，静态扫描逮到）。
+  if (policy === undefined || policy === null || typeof policy !== 'object') {
+    throw new Error(
+      'go-sensei：当前组合没有 sandboxPolicy 服务，写入被拒绝'
+        + '（避免在无沙箱后端时绕过工作区限制）。读取类工具不受影响；'
+        + '如需写回，请在带沙箱服务的 DSH 会话里执行。',
+    )
+  }
+  return policy
 }
 
 function resolveOptions(exec, p, policy) {
@@ -101,7 +131,9 @@ async function derivedTargetFor(ctx, exec, sourcePath, policy) {
 async function readGameFile(ctx, exec, p, policy) {
   const { source, target, derived } = await resolveWorkingFile(ctx, exec, p, policy)
   const readText = async (t) => {
-    const bytes = await ctx.fs.readBytes(t, exec.signal, 64 * 1024 * 1024)
+    // 读取上限与解析守卫同源（MAX_SGF_CHARS）：超限的文件在读盘这一步就被拒，
+    // 不会先整份读进内存再交给解析器判（2026-09 复审）。
+    const bytes = await ctx.fs.readBytes(t, exec.signal, MAX_SGF_CHARS)
     return decodeBuffer(bytes)
   }
   let used = target
@@ -607,7 +639,7 @@ function goWriteReview(ctx, cfg, cache, policy) {
         if (comment.length > MAX_COMMENT_CHARS) throw new Error(`第 ${moveNumber} 手注释超过 ${MAX_COMMENT_CHARS} 字`)
         return { moveNumber, comment }
       })
-      const sandboxPolicy = policy(exec)
+      const sandboxPolicy = requireSandboxPolicy(policy(exec))
       // 走同一条读取规则（副本优先、坏副本退回源棋谱），拿原文注入注释
       const game = await readGameFile(ctx, exec, args.path, sandboxPolicy)
       const result = injectComments(game._meta.text, cleaned, { replace: args.replace === true })
@@ -671,7 +703,7 @@ function goExportReport(ctx, cfg, cache, policy) {
       if (format !== 'markdown') {
         throw new Error(`暂不支持的报告格式：${args.format}（当前仅支持 'markdown'）`)
       }
-      const sandboxPolicy = policy(exec)
+      const sandboxPolicy = requireSandboxPolicy(policy(exec))
       const game = await readGameFile(ctx, exec, args.path, sandboxPolicy)
       const outPath =
         args.outPath ??
@@ -683,6 +715,11 @@ function goExportReport(ctx, cfg, cache, policy) {
       const content = args.content !== undefined && String(args.content).trim() !== ''
         ? String(args.content)
         : buildReportSkeleton(game, cfg)
+      // 传入的报告正文也要有上限：写入是唯一会让插件产生副作用的地方，不该由调用方
+      // 决定写多大（2026-09 复审）。生成骨架走同一道检查，顺带保证两条路一致。
+      if (content.length > MAX_REPORT_CHARS) {
+        throw new Error(`报告内容过长：${content.length} 字符，上限 ${MAX_REPORT_CHARS} 字符`)
+      }
       // 第 5 参数必须带沙箱策略，否则沙箱后端按自身默认策略拒写。
       await ctx.fs.writeText(target, content, undefined, exec.signal, sandboxPolicy)
       ctx.emit('fs/observed', target, { kind: 'present' }, exec)
@@ -1304,6 +1341,9 @@ async function writeAnalysisBack(ctx, exec, sandboxPolicy, game) {
   if (typeof text !== 'string' || text === '') return undefined
   const entries = analysisEntriesOf(game)
   if (entries.length === 0) return undefined
+  // 真有内容要写时才要求策略：无策略即拒绝（调用方 go_review_moves 会吞掉这个错误
+  // 并跳过写回，绝不静默地做一次不受约束的写）。
+  requireSandboxPolicy(sandboxPolicy)
   const injected = injectAnalysis(text, entries)
   if (injected.written.length === 0) return undefined
   // 写回**副本**：源棋谱（野狐导出/别人给的谱）永远保持原样，分析数据与讲解

@@ -14,6 +14,7 @@ import {
   renderBoardSvg,
   starPoints,
   playerLabels,
+  playStone,
   MARK_SHAPES,
 } from '../src/diagram.js'
 
@@ -167,4 +168,43 @@ test('diagram: 盘上沿写黑方白方的名字（棋谱没名字时不占名�
   assert.deepEqual(playerLabels({ whiteRank: '9级' }), { black: '', white: '9级' })
   assert.deepEqual(playerLabels({ black: '  甲  ', white: '乙' }), { black: '甲', white: '乙' })
   assert.deepEqual(playerLabels(null), { black: '', white: '' })
+})
+
+// ---------------------------------------------------------------------------
+// 盘外坐标不该污染逐格数组（2026-09 复审）
+//
+// coordLabel 对盘外坐标会原样返回 x/y，而 buildGrid 原先只挡 < 0 —— 一个
+// 19 路上的 B[zz]（x=y=25）会把 grid 撑成 501 长度的稀疏数组，渲染就多画格子。
+// ---------------------------------------------------------------------------
+
+test('buildGrid: 盘外坐标被忽略，grid 长度恒为 size*size', () => {
+  const board = { size: 19, moves: [{ x: 25, y: 25, c: 'B' }, { x: 3, y: 3, c: 'W' }], setup: {} }
+  const grid = buildGrid(board, 2)
+  assert.equal(grid.length, 19 * 19, '越界坐标不得扩展数组')
+  assert.equal(grid.every((v) => v === 0), false, '合法的那一手仍要落子')
+  assert.equal(grid[3 * 19 + 3], 2, '白子在 (3,3)')
+
+  // 越界坐标全部丢弃时，盘面必须干净
+  const onlyOutside = buildGrid({ size: 19, moves: [{ x: -1, y: 5, c: 'B' }, { x: 5, y: 99, c: 'W' }], setup: {} }, 2)
+  assert.equal(onlyOutside.length, 19 * 19)
+  assert.ok(onlyOutside.every((v) => v === 0))
+
+  // playStone 自身也要挡住盘外（它被多处直接调用）
+  const g = buildGrid({ size: 9, moves: [], setup: {} }, 0)
+  playStone(g, 9, 42, 42, 1)
+  assert.equal(g.length, 9 * 9, 'playStone 不得写入盘外下标')
+})
+
+test('buildGrid/renderBoardSvg: 摆子越界、超大宽度、越界最后一手都被挡住', () => {
+  const grid = buildGrid({ size: 9, moves: [], setup: { black: [[99, 99]], white: [[-3, 2], [4, 4]] } }, 0)
+  assert.equal(grid.length, 9 * 9, '越界摆子不得扩展数组')
+  assert.equal(grid[4 * 9 + 4], 2, '同一批里合法的那颗白子仍要摆上')
+
+  assert.ok(renderBoardSvg({ size: 9, grid, width: 999999 }).includes('width="1600"'), '宽度上限 1600')
+  assert.ok(renderBoardSvg({ size: 9, grid, width: 10 }).includes('width="120"'), '宽度下限 120')
+
+  // lastMove 越界：输出必须与"不传 lastMove"完全一致（等于整支笔画被跳过）
+  const without = renderBoardSvg({ size: 9, grid })
+  const withBad = renderBoardSvg({ size: 9, grid, lastMove: { x: 40, y: 40, color: 'B' } })
+  assert.equal(withBad, without, '越界的最后一手不得画到盘外')
 })

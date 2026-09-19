@@ -213,7 +213,11 @@ export function serializeLz(entry) {
   }
   if (lines.length === 0) return undefined
 
-  const engine = typeof entry?.engine === 'string' && entry.engine.trim() !== '' ? entry.engine.trim() : 'KataGo'
+  // 引擎名会作为 LZ 头部的第一个词写回 SGF，而 '\\' 与 ']' 在属性值里有结构含义：
+  // 畸形或恶意输入不能让它把写回的副本写坏（2026-09 复审）。空白折成 '_'，
+  // parseLz 读回时仍是同一个词。
+  const engineRaw = typeof entry?.engine === 'string' && entry.engine.trim() !== '' ? entry.engine.trim() : 'KataGo'
+  const engine = engineRaw.replace(/[\\\]]/g, '').replace(/\s+/g, '_').slice(0, 32) || 'KataGo'
   const playouts = compactNumber(entry?.playouts) ?? String(firstVisits ?? 0)
   const head = [
     engine,
@@ -314,6 +318,77 @@ export function parseWinrateComment(comment) {
 
 const ROOT_NUMERIC_PROPS = ['SZ', 'KM', 'HA']
 
+/**
+ * 解析前的输入上限。
+ *
+ * 为什么必须在 `sgf.parse()` **之前**：@sabaki/sgf 会把整棵树一次性材质化，而原先
+ * 唯一的防御（走主线时的 2000 手上限）是在解析**之后**才生效的 —— 一个深嵌套或
+ * 超多变化的畸形 SGF，可以在那道上限生效前就把内存与 CPU 吃满（2026-09 复核）。
+ */
+export const MAX_SGF_CHARS = 8 * 1024 * 1024
+/** 解析前的节点数上限（'(' 与 ';' 的总数；宽松，只用来挡住畸形/拼接输入）。 */
+export const MAX_SGF_NODES = 200_000
+/**
+ * 解析前的嵌套深度上限。
+ *
+ * 为什么要单独限深度：@sabaki/sgf 是递归下降解析器，`((((…` 这类输入会在节点数
+ * 上限之前先把调用栈爆掉（抛 RangeError 而不是可读的拒绝）。真实棋谱的嵌套极浅
+ * （主线 + 几层变化图，实测 ≤ 10），512 层足够宽松又远离栈上限（2026-09 复审）。
+ */
+export const MAX_SGF_DEPTH = 512
+
+/** 解析前的输入守卫：字符数、节点数与嵌套深度。超限直接抛错，不进入解析器。 */
+function guardParseInput(text) {
+  const content = typeof text === 'string' ? text : ''
+  if (content === '') throw new Error('SGF 内容为空')
+  if (content.length > MAX_SGF_CHARS) {
+    throw new Error(`棋谱过大：${content.length} 字符，上限 ${MAX_SGF_CHARS} 字符；请在打谱软件里另存为单局棋谱`)
+  }
+  // 词法扫描：区分「属性值内部」与结构字符（`C[;]` 里的 ';' 不算节点），顺便量嵌套深度。
+  let nodes = 0
+  let depth = 0
+  let inValue = false
+  for (let i = 0; i < content.length; i += 1) {
+    const code = content.charCodeAt(i)
+    if (inValue) {
+      if (code === 0x5c) { i += 1; continue } // '\' 转义：跳过被转义的那个字符
+      if (code === 0x5d) inValue = false // ']' 结束属性值
+      continue
+    }
+    if (code === 0x5b) { inValue = true; continue } // '[' 开始属性值
+    if (code === 0x28 || code === 0x3b) { // '(' 或 ';'
+      nodes += 1
+      if (nodes > MAX_SGF_NODES) {
+        throw new Error(`棋谱节点过多（超过 ${MAX_SGF_NODES} 个节点）：疑似畸形输入或拼接了多局棋谱`)
+      }
+      if (code === 0x28) {
+        depth += 1
+        if (depth > MAX_SGF_DEPTH) {
+          throw new Error(`棋谱嵌套过深（超过 ${MAX_SGF_DEPTH} 层）：疑似畸形输入`)
+        }
+      }
+      continue
+    }
+    if (code === 0x29 && depth > 0) depth -= 1 // ')'
+  }
+}
+
+/** 棋盘路数的合法区间（SGF 规范上限 52×52）。 */
+export const MIN_BOARD_SIZE = 2
+export const MAX_BOARD_SIZE = 52
+
+/**
+ * 把 SZ 归一化到合法区间，非法值退回 19 路。
+ *
+ * 为什么要在**源头**钳：SZ 会被 compactBoard / emptyGrid 直接当作 `new Array(size*size)`
+ * 的边长 —— 一个 `SZ[9999]` 就是约 1 亿格，足以把宿主拖死（2026-09 复核）。
+ */
+export function clampBoardSize(value) {
+  const n = Math.trunc(Number(value))
+  if (!Number.isFinite(n)) return 19
+  return Math.min(MAX_BOARD_SIZE, Math.max(MIN_BOARD_SIZE, n))
+}
+
 function nodeDataAsObject(data) {
   // @sabaki/sgf 的 node.data 为 Map；防御性地同时支持普通对象。
   if (data instanceof Map) {
@@ -335,6 +410,7 @@ function nodeDataAsObject(data) {
  *             comment?, commentAnalysis?, moves } | null }
  */
 export function parseGame(text) {
+  guardParseInput(text)
   const trees = sgf.parse(text)
   if (!Array.isArray(trees) || trees.length === 0) {
     throw new Error('SGF 解析失败：没有找到棋局（(; 根节点）')
@@ -352,7 +428,7 @@ export function parseGame(text) {
   const komi = komiRaw > 20 ? komiRaw / 100 : komiRaw
 
   const info = {
-    size: num(rootData.SZ?.[0]) ?? 19,
+    size: clampBoardSize(num(rootData.SZ?.[0]) ?? 19),
     komi,
     handicap: num(rootData.HA?.[0]) ?? 0,
     result: str(rootData.RE?.[0]),
@@ -604,6 +680,7 @@ export function injectComments(sgfText, entries, opts = {}) {
     .filter((e) => Number.isFinite(e.moveNumber) && e.moveNumber >= 1 && e.comment !== '')
     .sort((a, b) => a.moveNumber - b.moveNumber)
 
+  guardParseInput(sgfText)
   const trees = sgf.parse(sgfText)
   if (trees.length === 0) return { text: sgfText, ...out }
 
@@ -682,6 +759,7 @@ export function injectAnalysis(sgfText, entries) {
   const out = { written: [], missing: [] }
   if (!Array.isArray(entries) || entries.length === 0) return { text: sgfText, ...out }
 
+  guardParseInput(sgfText)
   const trees = sgf.parse(sgfText)
   if (trees.length === 0) return { text: sgfText, ...out }
 

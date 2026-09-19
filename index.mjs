@@ -5,11 +5,11 @@
 // 注册是 effect：工具与提示词段随插件 fiber 自动装卸。
 
 import Schema from '@deepseek-ai/schemastery'
-import { basename } from 'node:path'
+import { basename, dirname } from 'node:path'
 import { registerGoTools, autoComputeIfNeeded } from './src/tools.js'
 import { ReviewCache } from './src/cache.js'
 import { RANKS, reviewGame, inferLevel, aiCandidatesByMove } from './src/review.js'
-import { parseGame, decodeBuffer, coordLabel, winrateForColor, scoreForColor } from './src/sgf.js'
+import { parseGame, decodeBuffer, coordLabel, winrateForColor, scoreForColor, MAX_SGF_CHARS } from './src/sgf.js'
 import { senseiPathFor } from './src/derived.js'
 import { buildGrid, parseSequence, parseMarks, renderBoardSvg } from './src/diagram.js'
 
@@ -18,6 +18,8 @@ export const name = 'go-sensei'
 // 可选依赖（不得写进 inject，否则未挂载时整插件等待）：
 //   sandboxPolicy —— 沙箱后端下写入必须携带它解析出的策略，见 src/tools.js。
 //   webServer     —— 客户端面板的数据路由，见 registerPanelRoute。
+//   connection    —— 面板路由的准入闸门（复用 GUI 的 Host/Origin 围栏 + 浏览器会话
+//                    cookie 校验）。宿主监听 0.0.0.0 时它是这四条路由唯一的身份关卡。
 export const inject = ['tools', 'systemPrompt', 'fs']
 
 /** 插件配置（加载期由 Cordis 按 Schema 校验并填充默认值）。 */
@@ -322,10 +324,14 @@ function focusMoveNumber(kind, args) {
  * register/schemas/get），也无法直接读盘；而本 half 拥有 ctx.fs 与
  * reviewGame，所以由 Host 读盘、算好、回 JSON，客户端只负责渲染。
  *
- * 只读、无副作用，且路径被约束在工作区根之下（resolve 归一化 +
- * contains 包含判断，挡住 ../ 逃逸），因此不设令牌。
+ * **准入**：四条路由都先过 panelRejection() —— 复用 connection 服务的
+ * requestRejection()，即与 GUI 的 /api 完全同一道闸门（Host/Origin 围栏 +
+ * 浏览器会话 cookie）。宿主默认监听 0.0.0.0，这些路由又接受调用方给的路径，
+ * 没有这道闸门就等于把「读本机文件」的 API 挂到局域网上（2026-09 安全复核）。
+ * 因此面板可用性与 GUI 严格一致：能登录 GUI 的浏览器就能用面板，其余一律 401。
  *
  * 软依赖 webServer：纯 CLI 组合（无 Web 服务器）下静默不装。
+ * 软依赖 connection：缺席时退回「仅本机来源」，局域网面板随之不可用（宁可如此）。
  *
  * @param {object} ctx Cordis 上下文
  * @param {object} cfg 已校验的插件配置
@@ -349,7 +355,51 @@ function registerPanelRoute(ctx, cfg, diagram) {
    * 两边唯一的共同信源就是 Host 观察到的工具调用。seq 单调递增，
    * 客户端据此判断"这条指针我处理过没有"，不必比较对象内容。
    */
-  const focus = { seq: 0, value: null }
+  /**
+   * 「正在讲解的局面」指针：**按会话分桶**。
+   *
+   * 为什么要分桶：宿主进程只有一个，而 GUI 支持多会话并存。单个全局指针会让 A 会话里
+   * 的一次工具调用把 B 会话面板里的棋谱顶掉（2026-09 实核）。序号仍是全局单调的 ——
+   * 客户端只靠 seq 判断"这条我处理过没有"，分桶不影响这个语义。
+   *
+   * 桶数上限 32：会话是有限资源，但指针不该无界增长（LRU：最久未更新的先淘汰）。
+   */
+  const focusBySession = new Map()
+  const FOCUS_MAX_SESSIONS = 32
+  let focusSeq = 0
+  /** 最近一次指针：没带 ?session= 的请求（旧客户端/整页视图）按它返回。 */
+  let focusLatest = null
+
+  /**
+   * 记下一条指针。
+   * @param {string} sessionId 会话 id；空串时只更新"最近一次"
+   * @param {object} value 指针内容（不含 seq）
+   */
+  function rememberFocus(sessionId, value) {
+    focusSeq += 1
+    const pointer = { seq: focusSeq, ...value }
+    focusLatest = pointer
+    if (typeof sessionId === 'string' && sessionId !== '') {
+      focusBySession.delete(sessionId)
+      focusBySession.set(sessionId, pointer)
+      while (focusBySession.size > FOCUS_MAX_SESSIONS) {
+        focusBySession.delete(focusBySession.keys().next().value)
+      }
+    }
+    return pointer
+  }
+
+  /**
+   * 取某会话的指针。
+   * @param {string|null} sessionId
+   * @returns {object|null} 该会话还没讲过时为 null（客户端会跳过，不会误跟别人的局面）
+   */
+  function focusFor(sessionId) {
+    if (typeof sessionId === 'string' && sessionId !== '') {
+      return focusBySession.get(sessionId) ?? null
+    }
+    return focusLatest
+  }
   /**
    * 面板/配图路由的 dispose 函数。webServer.register 返回「移除该路由」的 disposer；
    * DSH 0.1.6 起宿主支持插件运行时卸载，路由必须随本插件 fiber 一起释放，否则停用
@@ -370,20 +420,30 @@ function registerPanelRoute(ctx, cfg, diagram) {
       if (typeof cwd === 'string' && cwd !== '') rememberRoot(cwd)
       // 失败的调用不改变讲解位置（模型经常先试错路径）
       if (result !== undefined && result?.isError === true) return
+      const rawPath = typeof exec?.arguments?.path === 'string' ? exec.arguments.path.trim() : ''
+      // 成功的 go_* 调用：把棋谱所在目录也记进 roots。面板与配图路由随后要按绝对路径
+      // 打开同一盘棋，而读取前的包含校验（readRefusal）只认这些根 —— 不记的话，
+      // 工作区之外的棋谱会被自家闸门拒掉（2026-09 复核）。
+      //
+      // 信任前提（复审对"白名单可被工具参数污染"这条 High 的说明）：path 来自**模型自己
+      // 的工具参数**，且只在调用成功时登记；模型本来就能用 read 读任意文件，所以登记一个
+      // 目录不构成权限提升 —— 它只是让面板/配图这两条浏览器路由能读同一盘棋。
+      if (rawPath !== '') {
+        const dir = dirname(rawPath)
+        if (dir !== '' && dir !== '.' && dir !== rawPath) rememberRoot(dir)
+      }
       const kind = FOCUS_KINDS[name]
       if (kind === undefined) return
-      const rawPath = typeof exec?.arguments?.path === 'string' ? exec.arguments.path.trim() : ''
       if (rawPath === '') return
       const moveNumber = focusMoveNumber(kind, exec.arguments)
-      focus.seq += 1
-      focus.value = {
-        seq: focus.seq,
+      const focusSessionId = exec?.agent?.session?.header?.id
+      rememberFocus(typeof focusSessionId === 'string' ? focusSessionId : '', {
         path: rawPath,
         cwd: typeof cwd === 'string' ? cwd : '',
         name: basename(rawPath),
         kind,
         ...(moveNumber !== undefined ? { moveNumber } : {}),
-      }
+      })
     } catch {
       /* 观察者绝不干扰工具链路 */
     }
@@ -395,6 +455,177 @@ function registerPanelRoute(ctx, cfg, diagram) {
     roots.unshift(dir)
     if (roots.length > 12) roots.length = 12
   }
+
+  /** 目录基准的比较形式：统一分隔符、去掉尾斜杠，Windows 下忽略大小写。 */
+  function normalizeBase(value) {
+    const text = typeof value === 'string' ? value.trim() : ''
+    if (text === '') return ''
+    const slashed = text.replace(/\\/g, '/').replace(/\/+$/, '')
+    return process.platform === 'win32' ? slashed.toLowerCase() : slashed
+  }
+
+  const LOOPBACK_REMOTE = /^(?:::1|::ffff:127(?:\.\d+){3}|127(?:\.\d+){3})$/
+
+  /** 请求是否来自本机（没有 connection 服务时的回退判据）。 */
+  function isLoopbackRequest(req) {
+    const remote = req?.socket?.remoteAddress
+    return typeof remote === 'string' && LOOPBACK_REMOTE.test(remote)
+  }
+
+  /** Host 与 Origin 必须同源；带 cross-site 标记的请求直接拒绝（挡跨站与 DNS rebinding）。 */
+  function sameOriginRequest(req) {
+    const headers = req?.headers
+    if (headers === undefined) return false
+    if (String(headers['sec-fetch-site'] ?? '').toLowerCase() === 'cross-site') return false
+    const origin = headers.origin
+    if (typeof origin !== 'string' || origin === '') return true
+    try {
+      return new URL(origin).host === String(headers.host ?? '')
+    } catch {
+      return false
+    }
+  }
+
+  /** 没有 connection 服务时是否已经提醒过（同一进程只提醒一次）。 */
+  let warnedNoConnection = false
+
+  /**
+   * 面板路由的准入闸门。
+   *
+   * @param {object} req Node 请求
+   * @returns {number|undefined} 放行返回 undefined；否则返回 401（无有效会话凭据）
+   *   或 403（Host/Origin 围栏拒绝）
+   */
+  function panelRejection(req) {
+    let connection
+    try {
+      connection = typeof ctx.get === 'function' ? ctx.get('connection') : undefined
+    } catch {
+      connection = undefined
+    }
+    if (connection !== undefined && typeof connection.requestRejection === 'function') {
+      try {
+        return connection.requestRejection(req)
+      } catch {
+        return 401
+      }
+    }
+    if (!warnedNoConnection) {
+      warnedNoConnection = true
+      ctx.logger?.warn?.(
+        'go-sensei：未找到 connection 服务，面板路由退回「仅本机来源」模式；局域网将无法访问面板',
+      )
+    }
+    if (!sameOriginRequest(req)) return 403
+    return isLoopbackRequest(req) ? undefined : 401
+  }
+
+  /**
+   * /go-sensei/review 的自限速。
+   *
+   * 这条路由在棋谱没有分析数据时会现场启动 KataGo（CPU/GPU 密集），并读盘 +
+   * 解析 SGF。没有上限时，一个循环请求（甚至一个网页的定时 fetch）就能把机器
+   * 拖住，所以这里同时限制「在飞请求数」与「窗口内请求数」。
+   */
+  const REVIEW_WINDOW_MS = 10_000
+  const REVIEW_MAX_PER_WINDOW = 20
+  const REVIEW_MAX_INFLIGHT = 2
+  const reviewWindow = []
+  let reviewInflight = 0
+
+  /** @returns {number|undefined} 超限时返回 429/503。 */
+  function reviewThrottle() {
+    const now = Date.now()
+    while (reviewWindow.length > 0 && now - reviewWindow[0] > REVIEW_WINDOW_MS) reviewWindow.shift()
+    if (reviewInflight >= REVIEW_MAX_INFLIGHT) return 503
+    if (reviewWindow.length >= REVIEW_MAX_PER_WINDOW) return 429
+    reviewWindow.push(now)
+    return undefined
+  }
+
+  /**
+   * 词法归一化：丢掉 '.' 段、'..' 段回退一级。
+   *
+   * 为什么比较前必须做：包含校验若只做字符串前缀比较，而 displayPath 里残留未归一化
+   * 的 `..` 段（形如 `C:/root/../../etc/passwd`），前缀比较就会把"看着在根里、其实在
+   * 根外"的路径判为放行（2026-09 复审发现）。归一化是纯词法操作，不访问文件系统。
+   * 符号链接不在本层解决：DSH 的 fs 服务对**读取**不做收敛（读取在所有策略下都放行），
+   * 插件层能做的只是"不让这条路由成为任意文件/存在性探针"，不是当第二层沙箱。
+   */
+  function normalizeSegments(value) {
+    const out = []
+    for (const part of normalizeBase(value).split('/')) {
+      if (part === '' || part === '.') continue
+      if (part === '..') { out.pop(); continue }
+      out.push(part)
+    }
+    return out.join('/')
+  }
+
+  /**
+   * 目标是否落在某个根之下（归一化 + 统一分隔符 + Windows 忽略大小写）。
+   *
+   * 用前缀比较而不是 path.relative：displayPath 由 fs 服务给出，正反斜杠可能混用，
+   * 而归一化后两边都是 '/' 分隔的段序列。相等也算在内（根本身就是那个文件时）。
+   */
+  function pathWithin(root, target) {
+    const a = normalizeSegments(root)
+    const b = normalizeSegments(target)
+    if (a === '' || b === '') return false
+    if (b === a) return true
+    return b.startsWith(a.endsWith('/') ? a : `${a}/`)
+  }
+
+  /**
+   * 允许读取的根集合：会话根（宿主按 id 反查，权威）→ 已知工作区根 → 面板默认根。
+   *
+   * 已知工作区根由 tools/result 观察者维护：既含各会话的工作区 cwd，也含**模型复盘过的
+   * 棋谱所在目录**（本轮新增）—— 后者是"工作区之外的棋谱照样能配图/上面板"的保证。
+   *
+   * 注意**不含**请求里的 ?cwd：它完全由调用方给定，若拿它当放行依据，包含校验会自我作废。
+   *
+   * 根列表是**进程级共享**的（同一用户的多个会话之间不隔离）：它代表"这台机器上用户
+   * 自己复盘过的目录"，不是会话私有资源；真正的身份关卡是上面的 panelRejection。
+   */
+  function allowedReadRoots(sessionId) {
+    const list = []
+    const sessionRoot = sessionRootOf(ctx, sessionId)
+    if (sessionRoot !== '') list.push(sessionRoot)
+    for (const root of roots) list.push(root)
+    list.push(panelDefaultRoot())
+    return list
+  }
+
+  /** 请求里给的路径看起来是不是绝对路径（Windows 盘符 / UNC / POSIX 根）。 */
+  function looksAbsolute(value) {
+    const text = typeof value === 'string' ? value.trim() : ''
+    if (text === '') return false
+    return /^[A-Za-z]:[\\/]/.test(text) || text.startsWith('\\\\') || text.startsWith('//') || text.startsWith('/')
+  }
+
+  /**
+   * 读取前的包含校验。
+   *
+   * 为什么必须拦在 readBytes 之前：/review 与 /diagram 都拿调用方给的 ?path 直接解析
+   * 并读盘，使这两条路由成了任意文件读取与**存在性探针**（404 与 500 可区分）。鉴权只
+   * 解决"谁能打进来"，这里解决"打进来之后能读什么"（2026-09 复核）。
+   *
+   * @param {object|string} target FsTarget 或路径字符串
+   * @param {string|null} sessionId 请求带来的会话 id
+   * @returns {string|undefined} 放行返回 undefined；否则返回给用户看的原因
+   */
+  function readRefusal(target, sessionId) {
+    const display = typeof target === 'string' ? target : target?.displayPath
+    if (typeof display !== 'string' || display === '') return '无法确定文件位置'
+    for (const root of allowedReadRoots(sessionId)) {
+      if (pathWithin(root, display)) return undefined
+    }
+    return `文件不在已知工作区内：${display}`
+  }
+
+  /** 文件落在允许根之外时的统一提示（404 与 403 口径一致，便于用户照做）。 */
+  const OUTSIDE_HINT = '相对路径的解析基准是会话工作区；已知工作区之外的文件请先在对话里'
+    + '让 Sensei 复盘它（宿主会记下它所在的目录，之后面板与配图就能按绝对路径打开）。'
 
   const mount = (webCtx) => {
     /**
@@ -412,15 +643,46 @@ function registerPanelRoute(ctx, cfg, diagram) {
       const off = webCtx.webServer.register(route)
       if (typeof off === 'function') routeOffs.push(off)
     }
+    /**
+     * 闸门拒绝时的统一响应。
+     *
+     * 不回显任何业务数据，也**不调用 rememberHost** —— 否则一次未授权的
+     * 伪造 Host 请求就能改掉后续配图链接的基地址。
+     */
+    const deny = (res, status) => {
+      res.statusCode = status
+      res.setHeader('content-type', 'application/json; charset=utf-8')
+      res.setHeader('cache-control', 'no-store')
+      res.end(JSON.stringify({ ok: false, error: status === 401 ? 'unauthorized' : 'forbidden' }))
+    }
+    /**
+     * 配图基地址：只接受语法合法的 authority（host[:port]）。
+     *
+     * 该值会写进对话里的图片 URL，所以不能让请求头里的任意字符串（含路径、
+     * 空白、非法字符）落进来；所有调用点都排在 panelRejection() 之后。
+     */
     const rememberHost = (req) => {
-      const host = req?.headers?.host
-      if (typeof host === 'string' && host !== '') diagram.base = `http://${host}`
+      const raw = req?.headers?.host
+      if (typeof raw !== 'string' || raw === '') return
+      let authority
+      try {
+        authority = new URL(`http://${raw}`).host
+      } catch {
+        return
+      }
+      if (authority === '' || /[^A-Za-z0-9._:[\]-]/.test(authority)) return
+      diagram.base = `http://${authority}`
     }
     // 面板启动时读取已知工作区根（相对路径的解析候选）
     addRoute({
       kind: 'exact',
       path: '/go-sensei/roots',
       handler: (req, res) => {
+        const rejection = panelRejection(req)
+        if (rejection !== undefined) {
+          deny(res, rejection)
+          return
+        }
         rememberHost(req)
         res.statusCode = 200
         res.setHeader('content-type', 'application/json; charset=utf-8')
@@ -433,11 +695,21 @@ function registerPanelRoute(ctx, cfg, diagram) {
       kind: 'exact',
       path: '/go-sensei/focus',
       handler: (req, res) => {
+        const rejection = panelRejection(req)
+        if (rejection !== undefined) {
+          deny(res, rejection)
+          return
+        }
         rememberHost(req)
+        // 按会话返回：没带 ?session= 时退回"最近一次"（旧客户端与整页视图的行为不变）。
+        // 不额外校验 session 归属（复审对"IDOR"这条 High 的说明）：GUI 是单用户的、
+        // 侧栏本就列出全部会话，持有效 cookie 的调用者能看到所有会话；指针内容也只是
+        // "哪盘棋、第几手"。真正的身份关卡是上面那道 panelRejection。
+        const focusUrl = new URL(req.url ?? '/', 'http://localhost')
         res.statusCode = 200
         res.setHeader('content-type', 'application/json; charset=utf-8')
         res.setHeader('cache-control', 'no-store')
-        res.end(JSON.stringify({ ok: true, focus: focus.value }))
+        res.end(JSON.stringify({ ok: true, focus: focusFor(focusUrl.searchParams.get('session')) }))
       },
     })
     // 讲解配图：把「局面 + 变化图 + 重点棋子标注」画成一张 SVG 图片直接回给浏览器，
@@ -447,6 +719,11 @@ function registerPanelRoute(ctx, cfg, diagram) {
       kind: 'exact',
       path: '/go-sensei/diagram',
       handler: async (req, res) => {
+        const rejection = panelRejection(req)
+        if (rejection !== undefined) {
+          deny(res, rejection)
+          return
+        }
         rememberHost(req)
         const fail = (status, message) => {
           res.statusCode = status
@@ -459,6 +736,16 @@ function registerPanelRoute(ctx, cfg, diagram) {
           if (requested === '') {
             fail(400, '缺少 path 参数')
             return
+          }
+          const sessionId = url.searchParams.get('session')
+          // 绝对路径不经任何解析基准、直接落到文件系统：先做一次纯字符串的包含校验，
+          // 连 stat 都不做，避免把"这个文件存不存在"泄露给已知工作区之外的目标。
+          if (looksAbsolute(requested)) {
+            const refusedEarly = readRefusal(requested, sessionId)
+            if (refusedEarly !== undefined) {
+              fail(404, refusedEarly)
+              return
+            }
           }
           const sourceTarget = await ctx.fs.resolve(requested, {})
           let target = sourceTarget
@@ -474,7 +761,13 @@ function registerPanelRoute(ctx, cfg, diagram) {
             fail(404, `找不到棋谱：${requested}`)
             return
           }
-          const bytes = await ctx.fs.readBytes(target, undefined, 64 * 1024 * 1024)
+          // 读取前的权威闸门：解析结果必须落在允许的根之内（symlink 跳转也在这里兜住）。
+          const outsideRefusal = readRefusal(target, sessionId)
+          if (outsideRefusal !== undefined) {
+            fail(404, outsideRefusal)
+            return
+          }
+          const bytes = await ctx.fs.readBytes(target, undefined, MAX_SGF_CHARS)
           const { text } = decodeBuffer(bytes)
           const game = parseGame(text)
           const size = game.info?.size ?? 19
@@ -514,7 +807,9 @@ function registerPanelRoute(ctx, cfg, diagram) {
           res.setHeader('cache-control', 'no-store')
           res.end(svg)
         } catch (error) {
-          fail(500, String(error?.message ?? error))
+          // 同 review：原始异常只进日志，响应里只给一句通用文案。
+          ctx.logger?.warn?.(`go-sensei：面板配图失败：${String(error?.message ?? error)}`)
+          fail(500, '配图失败')
         }
       },
     })
@@ -528,6 +823,20 @@ function registerPanelRoute(ctx, cfg, diagram) {
           res.setHeader('cache-control', 'no-store')
           res.end(JSON.stringify(payload))
         }
+        const rejection = panelRejection(req)
+        if (rejection !== undefined) {
+          deny(res, rejection)
+          return
+        }
+        const throttled = reviewThrottle()
+        if (throttled !== undefined) {
+          send(throttled, {
+            ok: false,
+            error: throttled === 429 ? '请求过于频繁，请稍后再试' : '正在读取上一份棋谱，请稍后再试',
+          })
+          return
+        }
+        reviewInflight += 1
         try {
           const url = new URL(req.url ?? '/', 'http://localhost')
           const requested = url.searchParams.get('path') ?? ''
@@ -535,15 +844,35 @@ function registerPanelRoute(ctx, cfg, diagram) {
             send(400, { ok: false, error: '缺少 path 参数' })
             return
           }
-          // 解析基准顺序：浏览器带来的 cwd → 会话根（文档标签页给的是会话内相对路径）
-          // → 已知工作区根（模型调过 go_* 才知道）→ 进程 cwd
+          // 允许读取的根：会话根（宿主按 id 反查）→ 已知工作区根 → 面板默认根。
+          // 解析候选**只从这里取**，不含请求带来的 ?cwd —— 那个值完全由调用方给定，
+          // 拿它当放行/解析依据会让包含校验自我作废（2026-09 复核）。
+          const sessionId = url.searchParams.get('session')
+          const allowedRoots = allowedReadRoots(sessionId)
           const candidates = []
-          const explicit = url.searchParams.get('cwd')
-          if (explicit) candidates.push(explicit)
-          const sessionRoot = sessionRootOf(ctx, url.searchParams.get('session'))
-          if (sessionRoot !== '') candidates.push(sessionRoot)
-          for (const root of roots) candidates.push(root)
-          candidates.push(panelDefaultRoot())
+          for (const root of allowedRoots) candidates.push(root)
+          const rawBaseDir = url.searchParams.get('cwd')
+          const baseDir = typeof rawBaseDir === 'string' && rawBaseDir.trim() !== '' ? rawBaseDir : null
+          // ?cwd 只作解析基准，且**仅当它本身已是允许的根**（正常情形＝本会话工作区）；
+          // roots 仍只由工具执行与会话根补充，一次请求改不动它。
+          const persistBase = baseDir !== null
+            && allowedRoots.some((root) => normalizeBase(root) === normalizeBase(baseDir))
+          if (baseDir !== null && persistBase) candidates.unshift(baseDir)
+          // 调用方给了基准、但那个基准不在允许根之内：直接拒绝 —— 既不拿它解析、
+          // 也不做任何 stat（否则 ?cwd 就成了绕过包含校验的跳板，且成了目录探针）。
+          if (baseDir !== null && !persistBase) {
+            send(404, { ok: false, error: `基准目录不在已知工作区内：${baseDir}`, hint: OUTSIDE_HINT })
+            return
+          }
+          // 绝对路径不经过任何基准、直接落到文件系统：先做一次纯字符串的包含校验，
+          // 连 stat 都不做，避免把"这个文件存不存在"泄露给已知工作区之外的目标。
+          if (looksAbsolute(requested)) {
+            const refusedEarly = readRefusal(requested, sessionId)
+            if (refusedEarly !== undefined) {
+              send(404, { ok: false, error: refusedEarly, hint: OUTSIDE_HINT })
+              return
+            }
+          }
 
           let target
           let sawResolveSuccess = false
@@ -579,21 +908,20 @@ function registerPanelRoute(ctx, cfg, diagram) {
               return
             }
             if (sawResolveSuccess) {
+              // 只给可操作的建议，不回带宿主的根列表（那属于服务端内部信息）。
               send(404, {
                 ok: false,
                 error: `找不到文件：${requested}`,
-                hint: roots.length === 0
-                  ? '还没有已知工作区根：先在对话里让 Sensei 复盘任意棋谱，或改用绝对路径。'
-                  : '已知工作区根：' + roots.join(' | '),
+                hint: OUTSIDE_HINT,
               })
               return
             }
-            send(500, { ok: false, error: lastError ?? `无法解析路径：${requested}` })
+            ctx.logger?.warn?.(`go-sensei：面板无法解析路径 ${requested}：${lastError ?? '未知原因'}`)
+            send(500, { ok: false, error: `无法解析路径：${requested}` })
             return
           }
-          // 成功即记住这个基准，让后续相对路径一次命中
-          const baseDir = url.searchParams.get('cwd')
-          if (baseDir) rememberRoot(baseDir)
+          // 本来就是已知根的基准提到最前（缓存热点）；调用方新给的目录不写进 roots。
+          if (persistBase && baseDir !== null) rememberRoot(baseDir.trim())
           for (const root of roots) {
             if (target.displayPath.startsWith(root)) { rememberRoot(root); break }
           }
@@ -609,7 +937,15 @@ function registerPanelRoute(ctx, cfg, diagram) {
             const derivedInfo = await ctx.fs.stat(derivedTarget, undefined)
             if (derivedInfo?.type === 'file') target = derivedTarget
           }
-          let bytes = await ctx.fs.readBytes(target, undefined, 64 * 1024 * 1024)
+          // 读取前的权威闸门：最终要读的那个文件必须落在允许的根之内。放在 readBytes
+          // 之前 —— 内容一个字节都不出宿主；相对路径由上面受限的候选基准保证，
+          // 绝对路径与 symlink 跳转由这一次判定兜住（2026-09 复核）。
+          const outsideRefusal = readRefusal(target, sessionId)
+          if (outsideRefusal !== undefined) {
+            send(404, { ok: false, error: outsideRefusal, hint: OUTSIDE_HINT })
+            return
+          }
+          let bytes = await ctx.fs.readBytes(target, undefined, MAX_SGF_CHARS)
           let { text } = decodeBuffer(bytes)
           let game
           try {
@@ -618,7 +954,7 @@ function registerPanelRoute(ctx, cfg, diagram) {
             // 副本坏了（空文件/半截写入）不能让面板打不开棋谱：退回源棋谱。
             if (target === sourceTarget) throw error
             target = sourceTarget
-            bytes = await ctx.fs.readBytes(target, undefined, 64 * 1024 * 1024)
+            bytes = await ctx.fs.readBytes(target, undefined, MAX_SGF_CHARS)
             ;({ text } = decodeBuffer(bytes))
             game = parseGame(text)
           }
@@ -659,7 +995,11 @@ function registerPanelRoute(ctx, cfg, diagram) {
             },
           })
         } catch (error) {
-          send(500, { ok: false, error: String(error?.message ?? error) })
+          // 具体原因只进日志：回给客户端的消息里不回带宿主路径与原始异常。
+          ctx.logger?.warn?.(`go-sensei：面板读取棋谱失败：${String(error?.message ?? error)}`)
+          send(500, { ok: false, error: '读取棋谱失败', code: 'panel-read-failed' })
+        } finally {
+          reviewInflight -= 1
         }
       },
     })

@@ -57,9 +57,25 @@ export function parsePointLabel(label, size) {
   return { x, y: size - row }
 }
 
+/**
+ * 逐格数组的边长上限（与 sgf.js 的 MAX_BOARD_SIZE 同口径）。
+ *
+ * sgf.js 已在 SZ 源头钳过，这里是第二道：diagram.js 也被工具与配图路由直接调用，
+ * 任何一条把畸形 size 传进来的路都不该变成内存炸弹（2026-09 复核）。
+ */
+const MAX_GRID_SIZE = 52
+
+/** 防御性路数归一化：非数字/非正数退回 19 路，越界钳到 2..52。 */
+function safeSize(value) {
+  const n = Math.trunc(Number(value))
+  if (!Number.isFinite(n) || n <= 0) return 19
+  return Math.min(MAX_GRID_SIZE, Math.max(2, n))
+}
+
 /** 空盘：0 空、1 黑、2 白；下标 = y * size + x。 */
 export function emptyGrid(size) {
-  const grid = new Array(size * size)
+  const n = safeSize(size)
+  const grid = new Array(n * n)
   for (let i = 0; i < grid.length; i++) grid[i] = 0
   return grid
 }
@@ -95,8 +111,11 @@ export function groupAt(grid, size, x, y) {
   return { stones, libs }
 }
 
-/** 落子并提掉无气的对方棋串；返回被提子数。 */
+/** 落子并提掉无气的对方棋串；返回被提子数。盘外坐标直接忽略（不写数组）。 */
 export function playStone(grid, size, x, y, color) {
+  // 越界守卫：畸形棋谱的坐标（如 19 路上的 B[zz]）不该把 grid 撑成稀疏数组——
+  // 那会让后续按 grid.length 的渲染多画一堆格子（2026-09 复审）。
+  if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= size || y >= size) return 0
   grid[y * size + x] = color
   const opp = color === 1 ? 2 : 1
   let captured = 0
@@ -128,16 +147,21 @@ export function playStone(grid, size, x, y, color) {
  * @returns {number[]} 盘面网格（0 空 / 1 黑 / 2 白，下标 = y * size + x）
  */
 export function buildGrid(board, upto) {
-  const size = board.size
+  const size = safeSize(board.size)
   const moves = board.moves || []
   const limit = Math.max(0, Math.min(Math.trunc(upto) || 0, moves.length))
   const grid = emptyGrid(size)
   const setup = board.setup || {}
-  for (const p of setup.black || []) grid[p[1] * size + p[0]] = 1
-  for (const p of setup.white || []) grid[p[1] * size + p[0]] = 2
+  const inBoard = (p) => Array.isArray(p) && Number.isInteger(p[0]) && Number.isInteger(p[1])
+    && p[0] >= 0 && p[1] >= 0 && p[0] < size && p[1] < size
+  // 摆子坐标同样要挡盘外：越界下标会把 grid 撑成稀疏数组（sgf.js 的 extractSetup
+  // 已过滤一次，这里是第二道 —— buildGrid 也被别处直接调用）（2026-09 复审）
+  for (const p of setup.black || []) if (inBoard(p)) grid[p[1] * size + p[0]] = 1
+  for (const p of setup.white || []) if (inBoard(p)) grid[p[1] * size + p[0]] = 2
   for (let i = 0; i < limit; i++) {
     const m = moves[i]
-    if (m.x < 0 || m.y < 0) continue
+    // 越界坐标不是合法着法（coordLabel 对盘外坐标会原样返回 x/y），跳过
+    if (m.x < 0 || m.y < 0 || m.x >= size || m.y >= size) continue
     playStone(grid, size, m.x, m.y, m.c === 'B' ? 1 : 2)
   }
   return grid
@@ -276,10 +300,12 @@ function clipName(text) {
  * @returns {string} 完整 SVG 文档
  */
 export function renderBoardSvg(spec) {
-  const size = Math.max(2, Math.trunc(spec.size) || 19)
+  const size = safeSize(spec.size)
   const grid = Array.isArray(spec.grid) ? spec.grid : emptyGrid(size)
   const caption = typeof spec.caption === 'string' ? spec.caption.trim() : ''
-  const width = Math.max(120, Math.trunc(spec.width) || 640)
+  // 宽度也夹住：路由侧本来就会夹，但 renderBoardSvg 是公开函数，别让调用方
+  // 用 spec.width 造出超大 SVG（2026-09 复审）
+  const width = Math.min(1600, Math.max(120, Math.trunc(spec.width) || 640))
   // 黑方白方的名字：画在棋盘上沿的窄条里（图注仍在盘下）。
   const names = playerLabels(spec.players)
   const hasNames = names.black !== '' || names.white !== ''
@@ -351,7 +377,8 @@ export function renderBoardSvg(spec) {
   }
 
   // 最后一手：反色小实心圆点（与 client.js / Lizzieyzy 同一记法）
-  if (last !== null && last !== undefined && last.x >= 0 && last.y >= 0) {
+  if (last !== null && last !== undefined && last.x >= 0 && last.y >= 0
+    && last.x < size && last.y < size) {
     out.push(`<circle cx="${pos(last.x).toFixed(2)}" cy="${pos(last.y).toFixed(2)}" r="${(step * 0.22).toFixed(3)}"`
       + ` fill="${last.color === 'B' ? '#f3f4f6' : '#141519'}"/>`)
   }
