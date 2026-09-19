@@ -1,130 +1,160 @@
-// test/territory.test.mjs — 简易形势判断（领地估算）的纯函数测试
+// test/territory.test.mjs — 形势判断（引擎归属图 → 黑地/白地/未定三档）
 //
-// 领地显示是"形势判断"的落点：画错了等于替棋手宣布地盘归属，比不画更糟。
-// 所以这里把归属规则（只挨单色才算地、单官中立）、数子法合计、贴目口径
-// 逐项钉死。浏览器 half 有一份同口径实现（client.js 的 estimateTerritory），
-// 那边的用例在 test/client.test.mjs。
+// 规则照 Lizzieyzy 的 KataEstimate.java（用户 2026-09-19 指定）：
+//   ① 阈值 0.4：|归属| 低于它的点算未定（不画、不计）
+//   ② 四邻过滤：空点要四个邻点都不倾向对方，才算自己的地
+//   ③ 死子：落在对方区域里的己方棋子按死子算，画对方的方块、记进对方的「地」
+// 计分用数子法：目 = 活子 + 地；领先 = 黑目 − 白目 − 贴目。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { estimateTerritory, territoryScoreText, formatTerritory } from '../src/territory.js'
+import {
+  TERRITORY_THRESHOLD,
+  cellsFromOwnership,
+  createReplayer,
+  estimateTerritory,
+  estimateTerritorySeries,
+  packTerritory,
+  replayTo,
+  scoreFromCells,
+  territoryScoreText,
+  unpackTerritory,
+} from '../src/territory.js'
 
-/** 空盘：0 空、1 黑、2 白；下标 = y*size+x。 */
-function blank(size) {
-  return new Array(size * size).fill(0)
-}
+/** 造一个 5 路空盘（0 空 / 1 黑 / 2 白）。 */
+const emptyBoard = (size = 5) => new Array(size * size).fill(0)
 
-/** 在网格上摆一圈同色棋子（围出中间的 1 个空点）。 */
-function ring(grid, size, cx, cy, color) {
-  for (const [dx, dy] of [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]) {
-    grid[(cy + dy) * size + (cx + dx)] = color
-  }
-}
-
-test('territory: 空盘全是单官，谁也不算地', () => {
-  const est = estimateTerritory(blank(9), 9, { komi: 0 })
-  assert.equal(est.blackStones + est.whiteStones, 0)
+test('territory: 阈值 0.4 —— 低于它的点算未定，不画也不计', () => {
+  assert.equal(TERRITORY_THRESHOLD, 0.4)
+  const size = 5
+  const board = emptyBoard(size)
+  // 四邻都给同一色，好让四邻过滤不干扰阈值这件事
+  const ownership = new Array(size * size).fill(0.35)
+  ownership[2 * size + 2] = 0.35
+  const est = estimateTerritory(board, size, { ownership, komi: 0 })
+  assert.equal(est.cells[2 * size + 2], 0, '0.35 < 0.4 → 未定')
   assert.equal(est.blackTerritory, 0)
-  assert.equal(est.whiteTerritory, 0)
-  assert.equal(est.dame, 81)
-  assert.ok(est.owner.every((v) => v === 0), '空盘上每个点都是中立')
-  assert.equal(est.lead, 0)
+  assert.equal(est.lead, 0, '双方都是 0 → 持平')
+
+  const strong = new Array(size * size).fill(0.4)
+  const est2 = estimateTerritory(board, size, { ownership: strong, komi: 0 })
+  assert.equal(est2.cells[2 * size + 2], 1, '正好 0.4 → 算黑地（>= 阈值）')
+  assert.equal(est2.blackTerritory, size * size)
 })
 
-test('territory: 只挨单色的空块才算地，黑白都挨的是单官（不画也不计）', () => {
-  const size = 9
-  const grid = blank(size)
-  ring(grid, size, 2, 2, 1) // 黑圈 8 子，圈住 (2,2)
-  ring(grid, size, 6, 6, 2) // 白圈 8 子，圈住 (6,6)
-  const est = estimateTerritory(grid, size, { komi: 0 })
-
-  assert.equal(est.owner[2 * size + 2], 1, '黑圈里的空点＝黑地')
-  assert.equal(est.owner[6 * size + 6], 2, '白圈里的空点＝白地')
-  assert.equal(est.owner[0], 0, '圈外大片空点黑白都挨 → 单官')
-  assert.equal(est.owner[1 * size + 1], 1, '盘上的棋子记自己的颜色（黑子）')
-  assert.equal(est.owner[5 * size + 5], 2, '白子同理')
-
-  assert.equal(est.blackStones, 8)
-  assert.equal(est.whiteStones, 8)
+test('territory: 四邻过滤 —— 只要有一个邻点不倾向自己，空点就不算地', () => {
+  const size = 5
+  const board = emptyBoard(size)
+  const ownership = new Array(size * size).fill(0)
+  // 角上的 (0,0)：两个在盘内的邻点都不倾向白（0 也算"不倾向白"）→ 通过
+  ownership[0 * size + 0] = 0.5
+  // 中间的 (2,2)：右边邻点是 -0.5（倾向白）→ 不通过
+  ownership[2 * size + 2] = 0.5
+  ownership[2 * size + 3] = -0.5
+  const est = estimateTerritory(board, size, { ownership, komi: 0 })
+  assert.equal(est.cells[0], 1, '四邻都不倾向白 → 黑地')
+  assert.equal(est.cells[2 * size + 2], 0, '有个邻点倾向白 → 不算地（防孤点）')
   assert.equal(est.blackTerritory, 1)
-  assert.equal(est.whiteTerritory, 1)
-  assert.equal(est.dame, 81 - 8 - 8 - 1 - 1, '剩下的都是单官')
-  assert.equal(est.blackTotal, 9, '黑＝黑子 8 ＋ 黑地 1')
-  assert.equal(est.whiteTotal, 9, '贴目 0 时白＝白子 8 ＋ 白地 1')
-  assert.equal(est.lead, 0, '盘面两分')
 })
 
-test('territory: 贴目算给白方，领先为正表示黑好', () => {
-  const size = 9
-  const grid = blank(size)
-  ring(grid, size, 2, 2, 1)
-  ring(grid, size, 6, 6, 2)
-  const est = estimateTerritory(grid, size, { komi: 7.5 })
-  assert.equal(est.blackTotal, 9)
-  assert.equal(est.whiteTotal, 16.5, '白总计要含贴目')
-  assert.equal(est.lead, -7.5, '负数＝白领先')
-  assert.ok(!Object.is(est.lead, -0), 'lead 不得是 -0（不是合法 lossless JSON）')
+test('territory: 死子 —— 落在对方区域里的己方棋子画对方方块并记给对方', () => {
+  const size = 5
+  const board = emptyBoard(size)
+  board[1 * size + 1] = 1 // 一颗黑子
+  board[3 * size + 3] = 2 // 一颗白子
+  const ownership = new Array(size * size).fill(0)
+  ownership[1 * size + 1] = -0.9 // 归给白 = 死黑子
+  ownership[3 * size + 3] = 0.9 // 归给黑 = 死白子
+  const est = estimateTerritory(board, size, { ownership, komi: 0 })
+  assert.equal(est.cells[1 * size + 1], 2, '死黑子画白方块')
+  assert.equal(est.cells[3 * size + 3], 1, '死白子画黑方块')
+  assert.equal(est.deadBlack, 1)
+  assert.equal(est.deadWhite, 1)
+  // 死子所在的点算对方的「地」；活子算自己的「子」
+  assert.equal(est.blackPoints, 0 + 1, '黑：活子 0 + 地 1（死白子那点）')
+  assert.equal(est.whitePoints, 0 + 1)
 
-  // 反过来：黑多一颗盘面子、贴目 0 → 黑领先 1
-  grid[0] = 1
-  const lead = estimateTerritory(grid, size, { komi: 0 })
-  assert.equal(lead.lead, 1)
-  assert.equal(lead.blackTotal, 10)
+  // 自己人手里的棋子不画方块（棋子自己就是棋子，叠方块只会糊）
+  const alive = new Array(size * size).fill(0.9)
+  const est2 = estimateTerritory(board, size, { ownership: alive, komi: 0 })
+  assert.equal(est2.cells[1 * size + 1], 0, '活黑子上不叠方块')
+  assert.equal(est2.blackAlive, 1, '活黑子只有那一颗（白子被判死，算黑的地）')
+  assert.equal(est2.deadWhite, 1)
 })
 
-test('territory: 回归——棋盘格子边的空块也要按邻子判归属', () => {
-  // 9 路左上角：黑子在 (1,0)、(0,1)，角上的 (0,0) 与它俩连通成一块，
-  // 这块只挨黑子 → 黑地（哪怕这块一直连到盘边）。
-  const size = 9
-  const grid = blank(size)
-  grid[0 * size + 1] = 1
-  grid[1 * size + 0] = 1
-  grid[1 * size + 1] = 1
-  const est = estimateTerritory(grid, size, { komi: 0 })
-  // 整盘只有黑子：所有空点都只挨黑子，于是全算黑地
-  assert.equal(est.owner[0], 1, '角上的空点贴黑子')
-  assert.equal(est.blackStones, 3)
-  assert.equal(est.blackTerritory, size * size - 3, '没有白子时，空点全归黑（单色包围的极端情形）')
-  assert.equal(est.whiteStones, 0)
-  assert.equal(est.dame, 0)
+test('territory: 数子法计分与领先（贴目算给白方）', () => {
+  const size = 5
+  const board = emptyBoard(size)
+  for (let x = 0; x < size; x++) board[0 * size + x] = 1 // 顶边一排黑子（5 颗）
+  const ownership = new Array(size * size).fill(0.9)
+  const est = estimateTerritory(board, size, { ownership, komi: 7.5 })
+  assert.equal(est.blackAlive, 5)
+  assert.equal(est.blackTerritory, size * size - 5, '其余空点全是黑的')
+  assert.equal(est.blackPoints, size * size)
+  assert.equal(est.whitePoints, 0)
+  assert.equal(est.lead, size * size - 7.5, '黑目 − 白目 − 贴目')
+  assert.equal(territoryScoreText(est), '形势判断：黑 25 目 · 白 0 目（含贴目 7.5）· 黑领先 17.5 目')
+
+  const even = estimateTerritory(emptyBoard(3), 3, { ownership: new Array(9).fill(0), komi: 0 })
+  assert.equal(even.lead, 0)
+  assert.equal(territoryScoreText(even), '形势判断：黑 0 目 · 白 0 目（不贴目）· 双方持平')
+  assert.equal(territoryScoreText(null), '', '没有数据时不编一句话')
 })
 
-test('territory: 调用方给的 grid 不被改写（面板每次翻手都要按同一份重算）', () => {
-  const size = 9
-  const grid = blank(size)
-  ring(grid, size, 4, 4, 2)
-  const before = grid.slice()
-  estimateTerritory(grid, size, { komi: 3.5 })
-  assert.deepEqual(grid, before, '估算不得原地改盘面')
+test('territory: 输入不合法时返回 null（长度不符 / 缺归属图）', () => {
+  const size = 5
+  assert.equal(estimateTerritory(emptyBoard(size), size, {}), null, '没有归属图')
+  assert.equal(estimateTerritory(emptyBoard(size), size, { ownership: [1, 2, 3] }), null, '长度不符')
+  assert.equal(estimateTerritory(null, size, { ownership: new Array(size * size).fill(0) }), null, '没有盘面')
+  assert.equal(cellsFromOwnership(emptyBoard(size), size, null), null)
+  assert.equal(scoreFromCells(emptyBoard(size), size, null), null)
 })
 
-test('territory: 畸形输入不抛错（size 非法、grid 缺失）', () => {
-  const a = estimateTerritory(undefined, 19, {})
-  assert.equal(a.size, 19, '不是数组就当空盘')
-  assert.equal(a.blackTerritory + a.whiteTerritory + a.dame, 361)
-  const b = estimateTerritory(blank(4), 0, { komi: 'x' })
-  assert.equal(b.size, 19, '非法路数退回 19')
-  assert.equal(b.komi, 0, '贴目不是数字时按 0')
+test('territory: 三档图的打包/解包（写进 TP[] 的那串）', () => {
+  const cells = new Uint8Array(81)
+  cells[0] = 1
+  cells[1] = 2
+  cells[80] = 1
+  const packed = packTerritory(cells)
+  assert.equal(typeof packed, 'string')
+  assert.ok(packed.length <= Math.ceil(81 / 4 / 3) * 4 + 4, '紧凑：2 bit/点，base64')
+  assert.ok(!/[^A-Za-z0-9+/=]/.test(packed), 'base64 里没有会被 SGF 吃掉的结构字符')
+  const back = unpackTerritory(packed, 81)
+  assert.equal(back[0], 1)
+  assert.equal(back[1], 2)
+  assert.equal(back[80], 1)
+  assert.equal(back[40], 0)
+  assert.equal(unpackTerritory('', 81), null)
+  assert.equal(unpackTerritory('!!!', 81), null, '不是 base64 就当解析失败')
+  assert.equal(unpackTerritory(packed, 19 * 19), null, '长度不够就解不出来（不猜）')
 })
 
-test('territory: 一句话形势判断的文案（含贴目与领先方向）', () => {
-  const size = 9
-  const grid = blank(size)
-  ring(grid, size, 2, 2, 1)
-  ring(grid, size, 6, 6, 2)
-  grid[0] = 1
-  grid[1] = 2
-  const est = estimateTerritory(grid, size, { komi: 7.5 })
-  assert.equal(
-    territoryScoreText(est),
-    '黑 10 目 · 白 17.5 目（含贴目 7.5）· 白领先 7.5 目',
-  )
-  assert.equal(
-    formatTerritory(est),
-    '简易形势判断（数子估目）：黑 10 目 · 白 17.5 目（含贴目 7.5）· 白领先 7.5 目',
-  )
-  // 盘面两分（贴目 0、黑白完全对称）时要说"两分"，不能写出"黑领先 0 目"
-  const even = estimateTerritory(grid, size, { komi: 0.5 })
-  assert.ok(!territoryScoreText(even).includes('领先 0 目'), territoryScoreText(even))
-  const draw = estimateTerritory(grid, size, { komi: 0 })
-  assert.ok(territoryScoreText(draw).includes('盘面两分'), territoryScoreText(draw))
+test('territory: 重放器算提子，逐手形势判断与手顺对齐', () => {
+  const size = 5
+  // 白在 (0,0)，只有 (1,0) 一口气；黑下 (1,0) 把它提掉
+  const compact = {
+    size,
+    komi: 0,
+    setup: { black: [[0, 1]], white: [[0, 0]] },
+    moves: [
+      { c: 'B', x: 1, y: 0 }, // 收气：白 (0,0) 无气被提
+      { c: 'W', x: 4, y: 4 },
+    ],
+  }
+  const replay = replayTo(compact, 1)
+  assert.equal(replay.capturedWhite, 1, '白方被提 1 子')
+  assert.equal(replay.capturedBlack, 0)
+  assert.equal(replay.board[0], 0, '被提的子从盘上消失')
+  assert.equal(replayTo(compact, 0).board[0], 2, '第 0 手（开局）时它还在')
+
+  const ownership = new Array(size * size).fill(0.9)
+  const series = estimateTerritorySeries(compact, [ownership, null])
+  assert.equal(series.length, 2, '与手顺等长')
+  assert.ok(series[0] !== null && typeof series[0].packed === 'string')
+  assert.equal(series[1], null, '该手没有归属数据 → null（客户端据此不画）')
+  assert.equal(series[0].est.capturedWhite, 1, '数字里带上提子')
+  assert.equal(unpackTerritory(series[0].packed, size * size)[0], 1, '全盘判黑时起点是黑地')
+
+  const replayer = createReplayer(compact)
+  replayer.step(replayer.moves[0])
+  assert.equal(replayer.captures().capturedWhite, 1)
 })

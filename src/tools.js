@@ -14,14 +14,16 @@ import {
   coordLabel,
   compactBoard,
   hasWinrateData,
+  hasTerritoryData,
+  territoryOfMove,
   MAX_SGF_CHARS,
 } from './sgf.js'
 import { reviewGame, inferLevel, RANKS } from './review.js'
 import { ReviewCache, gameFingerprint } from './cache.js'
 import { resolveEngine, describeEngine } from './engine-resolve.js'
 import { senseiPathFor } from './derived.js'
-import { parsePointLabel, parseSequence, parseMarks, buildGrid } from './diagram.js'
-import { estimateTerritory, territoryScoreText } from './territory.js'
+import { parsePointLabel, parseSequence, parseMarks } from './diagram.js'
+import { estimateTerritorySeries } from './territory.js'
 
 /** 工具返回值的裁剪上限，防止异常棋谱撑爆上下文。 */
 const MAX_MOVE_LIST = 400
@@ -93,12 +95,14 @@ function requireSandboxPolicy(policy) {
 function resolveOptions(exec, p, policy) {
   // 有策略时以它的 workspaceRoot 为基准（官方语义）；否则退回会话 cwd。
   const cwd = policy?.workspaceRoot ?? sessionCwd(exec)
-  return { ...(cwd !== undefined ? { cwd } : {}), signal: exec.signal }
+  // exec 可能缺席：面板路由触发的写回没有工具执行上下文（见 index.mjs 的 /review），
+  // 早期写法直接取 exec.signal，TypeError 被调用方的 catch 吞掉 → 写回静默失效。
+  return { ...(cwd !== undefined ? { cwd } : {}), signal: exec?.signal }
 }
 
 async function resolveRegularFile(ctx, exec, p, policy) {
   const target = await ctx.fs.resolve(p, resolveOptions(exec, p, policy))
-  const info = await ctx.fs.stat(target, exec.signal)
+  const info = await ctx.fs.stat(target, exec?.signal)
   if (info === undefined) throw new Error(`找不到文件：${p}`)
   if (info.type !== 'file') throw new Error(`不是普通文件：${p}`)
   return target
@@ -119,7 +123,7 @@ async function resolveWorkingFile(ctx, exec, p, policy) {
   const derivedPath = senseiPathFor(source.displayPath)
   if (derivedPath === source.displayPath) return { source, target: source, derived: false }
   const target = await ctx.fs.resolve(derivedPath, resolveOptions(exec, derivedPath, policy))
-  const info = await ctx.fs.stat(target, exec.signal)
+  const info = await ctx.fs.stat(target, exec?.signal)
   if (info === undefined || info.type !== 'file') return { source, target: source, derived: false }
   return { source, target, derived: true }
 }
@@ -752,8 +756,9 @@ function goDrawDiagram(ctx, cfg, cache, policy, diagram) {
       + '用途：回答"第 N 手改下 X 会怎样""这里连没连上"这类追问时，用图说明变化与要点。'
       + '变化图着法按 1-9、A-Z 逐手编号（起始颜色按局面自动推断，也可写成 "B:Q16" 显式指定）；'
       + '重点棋子用 triangle（三角形）/ square / circle / cross / label（字母或数字）标出。'
-      + 'territory=true 时叠加**领地显示**（简易形势判断：把只挨黑子/只挨白子的空点画成小黑块/小白块，'
-      + '并在图下写出简易点目），适合讲"这块地是谁的""现在谁领先"。'
+      + 'territory=true 时叠加**形势判断**（引擎归属图判出的黑地/白地，未定处留白，'
+      + '并在图下写出双方目数与领先），适合讲"这块地是谁的""现在谁领先"；'
+      + '该手还没有归属数据时会当场补算一次（要等几十秒），引擎不可用时如实说明、不出图。'
       + '**回答里必须原样粘贴返回的 markdown 行**，URL 不要改写或另编。',
     parameters: {
       type: 'object',
@@ -796,8 +801,10 @@ function goDrawDiagram(ctx, cfg, cache, policy, diagram) {
           marks: { type: 'array', items: { type: 'string' } },
           skipped: { type: 'array', items: { type: 'string' } },
           note: { type: 'string' },
-          // 叠加了领地显示时，把那行简易点目也带回给模型（免得它自己算）
+          // 叠加了领地显示时，把那行形势判断也带回给模型（免得它自己算）
           territory: { type: 'string' },
+          // 形势判断没能出图时的原因（引擎不可用、该手没有归属数据……）
+          territoryNote: { type: 'string' },
         },
         required: ['url', 'markdown', 'moveNumber', 'size', 'caption', 'numbered', 'marks', 'skipped'],
       },
@@ -809,8 +816,9 @@ function goDrawDiagram(ctx, cfg, cache, policy, diagram) {
         ]
         if (value.numbered.length > 0) lines.push(`变化：${value.numbered.join(' → ')}`)
         if (value.marks.length > 0) lines.push(`标注：${value.marks.join('；')}`)
-        // 领地显示的那行形势判断：模型应直接引用它，别自己另算一个数
-        if (value.territory !== undefined) lines.push(`形势判断：${value.territory}`)
+        // 形势判断的那行数字：模型应直接引用它，别自己另算一个数
+        if (value.territory !== undefined) lines.push(value.territory)
+        if (value.territoryNote !== undefined) lines.push(`⚠ ${value.territoryNote}`)
         if (value.skipped.length > 0) lines.push(`⚠ 已忽略无法解析的项：${value.skipped.join('、')}`)
         lines.push('把下面这一行**原样**放进回答正文（Markdown 图片语法），图片就会显示：', value.markdown)
         if (value.note !== undefined) lines.push(value.note)
@@ -856,15 +864,33 @@ function goDrawDiagram(ctx, cfg, cache, policy, diagram) {
       if (tokens.length > 0) params.set('seq', tokens.join(','))
       if (markTokens.length > 0) params.set('marks', markTokens.join(','))
       if (caption !== '') params.set('cap', caption)
-      // 领地显示：路由侧会照同一份算法把归属画到图上，并在图下附一行简易点目。
-      // 工具这里也算一份（同源函数、同一局面），好把那行数字如实回给模型。
+      // 形势判断：与面板**同一份引擎归属**（用户 2026-09-19 定案）——不再是启发式。
+      // 副本里已有 TP[] 就直接读（毫秒级）；没有就当场补算一次：跑引擎 → 写回副本，
+      // 与面板「形势判断」按钮同一条路径，算完以后这份棋谱永远秒开。
+      // 引擎不可用 / 补算失败时**不画**，如实说明原因 —— 不用启发式顶包。
       const wantTerritory = args.territory === true
       let territoryText
+      let territoryNote
       if (wantTerritory) {
-        params.set('territory', '1')
-        const grid = buildGrid(compactBoard(game), move)
-        const est = estimateTerritory(grid, size, { komi: game.info?.komi ?? 0 })
-        territoryText = territoryScoreText(est)
+        let hit = territoryOfMove(game, move)
+        if (hit === null) {
+          const { autoEngine } = await autoComputeIfNeeded(ctx, cfg, game, {
+            needTerritory: true,
+            signal: exec.signal,
+          })
+          if (autoEngine?.failed !== undefined) {
+            territoryNote = `形势判断没能出图：${autoEngine.failed}`
+          } else if (autoEngine !== undefined) {
+            await writeAnalysisBack(ctx, exec, policy(exec), game).catch(() => undefined)
+          }
+          hit = territoryOfMove(game, move)
+        }
+        if (hit !== null) {
+          params.set('territory', '1')
+          territoryText = hit.text
+        } else if (territoryNote === undefined) {
+          territoryNote = '这一手还没有归属数据，形势判断没能出图。请在面板上点开一次「形势判断」补算，或先跑一次 go_review_moves。'
+        }
       }
       if (args.width !== undefined && Number.isFinite(Number(args.width))) {
         params.set('w', String(Math.trunc(Number(args.width))))
@@ -889,6 +915,7 @@ function goDrawDiagram(ctx, cfg, cache, policy, diagram) {
         marks: markTexts,
         skipped,
         ...(territoryText !== undefined ? { territory: territoryText } : {}),
+        ...(territoryNote !== undefined ? { territoryNote } : {}),
         ...(total === 0 ? { note: '这盘棋没有着手，配图是空盘。' } : {}),
       }
     },
@@ -1255,7 +1282,10 @@ export async function autoComputeIfNeeded(ctx, cfg, game, opts = {}) {
   // 判据是「有没有可用的逐手胜率」，不是「有没有 analysis 对象」：只写了一般注释
   // 的棋谱也会产出 analysis，若按后者判定就会既跳过补算、又算不出问题手。
   const noAnalysisData = !hasWinrateData(game)
-  if (!engine.available || !noAnalysisData || game.info.size !== 19) {
+  // 「形势判断」要逐手归属图：老副本有 WV/DM/LZ、却没有 TP[]，同样得再跑一次引擎
+  // （用户 2026-09-19 明确要求）。判据用 hasTerritoryData —— 能力判据，不是结构判据。
+  const needTerritory = opts.needTerritory === true && !hasTerritoryData(game)
+  if (!engine.available || (!noAnalysisData && !needTerritory) || game.info.size !== 19) {
     return { autoEngine: undefined }
   }
   // 同一份棋谱只补算一次：模型刚算完、面板再打开同一盘棋（或反复开关棋盘）时
@@ -1316,7 +1346,12 @@ export async function autoComputeIfNeeded(ctx, cfg, game, opts = {}) {
       // 而指纹不覆盖 C[] 注释 —— 直接用缓存覆盖 moves 会把刚写回的讲解抹掉
       // （真机踩过：注释写回后，面板的 comments 恒为空）。
       byMove: game.moves
-        .map((m) => ({ number: m.number, analysis: m.analysis }))
+        .map((m) => ({
+          number: m.number,
+          analysis: m.analysis,
+          // 归属图也一并缓存：命中缓存时不必为了「形势判断」再跑一次引擎
+          ...(m.ownership !== undefined ? { ownership: m.ownership } : {}),
+        }))
         .filter((entry) => entry.analysis !== undefined),
       from,
       to,
@@ -1359,9 +1394,12 @@ export async function autoComputeIfNeeded(ctx, cfg, game, opts = {}) {
  * @param {object} game readGameFile 的返回值（含 _meta.text 原文与 _meta.sourcePath）
  * @returns {Promise<{moves: number, missing: number, path: string} | undefined>} 没有可写内容时 undefined
  */
-async function writeAnalysisBack(ctx, exec, sandboxPolicy, game) {
+export async function writeAnalysisBack(ctx, exec, sandboxPolicy, game) {
   const text = game?._meta?.text
   if (typeof text !== 'string' || text === '') return undefined
+  // 形势判断：有引擎归属图的手，就地算出三档图挂到 move 上 —— analysisEntriesOf 会
+  // 把它带进 entries，injectAnalysis 写成 TP[]。没有归属图的手（老副本、老棋谱）不动。
+  attachTerritory(game)
   const entries = analysisEntriesOf(game)
   if (entries.length === 0) return undefined
   // 真有内容要写时才要求策略：无策略即拒绝（调用方 go_review_moves 会吞掉这个错误
@@ -1373,12 +1411,36 @@ async function writeAnalysisBack(ctx, exec, sandboxPolicy, game) {
   // 都只落在同目录的 `-sensei.sgf` 里。副本已存在时读的就是它（resolveWorkingFile），
   // 所以这里的注入是在"上一版副本"基础上增量进行，不会抹掉先前写回的讲解。
   const target = await derivedTargetFor(ctx, exec, game._meta.sourcePath ?? game._meta.path, sandboxPolicy)
-  await ctx.fs.writeText(target, injected.text, undefined, exec.signal, sandboxPolicy)
+  await ctx.fs.writeText(target, injected.text, undefined, exec?.signal, sandboxPolicy)
   game._meta.text = injected.text
   game._meta.path = target.displayPath
   game._meta.derived = target.displayPath !== game._meta.sourcePath
   ctx.emit('fs/observed', target, { kind: 'present' }, exec)
   return { moves: injected.written.length, missing: injected.missing.length, path: target.displayPath }
+}
+
+/**
+ * 把引擎补算产出的逐手归属图算成三档图，挂到 `move.territory`（紧凑字符串）。
+ *
+ * 只有**这一条路**会把 TP[] 写进棋谱副本：从副本读回来时 `move.territory` 已存在，
+ * 而归属图（`move.ownership`）不会从文件里读回来 —— 所以日常读盘不会重算、也不会覆盖。
+ *
+ * @param {object} game readGameFile / 补算后的棋局
+ * @returns {number} 实际挂上的手数
+ */
+export function attachTerritory(game) {
+  const moves = game?.moves ?? []
+  const ownerships = moves.map((m) => (m?.ownership && m.ownership.length > 0 ? m.ownership : null))
+  if (!ownerships.some((o) => o !== null)) return 0
+  const series = estimateTerritorySeries(compactBoard(game), ownerships)
+  let count = 0
+  for (let i = 0; i < moves.length; i++) {
+    const item = series[i]
+    if (!item) continue
+    moves[i].territory = item.packed
+    count++
+  }
+  return count
 }
 
 /** 补算结果缓存的上限（条目数；每条是一份棋谱的逐手分析）。 */
@@ -1403,16 +1465,18 @@ export function mergeCachedAnalysis(game, byMove) {
   const table = new Map()
   for (const entry of byMove) {
     if (entry !== undefined && entry !== null && entry.analysis !== undefined) {
-      table.set(entry.number, entry.analysis)
+      table.set(entry.number, entry)
     }
   }
   let merged = 0
   for (const move of game?.moves ?? []) {
-    const analysis = table.get(move.number)
-    if (analysis === undefined) continue
+    const entry = table.get(move.number)
+    if (entry === undefined) continue
     // 先摊开新解析出的自有字段（comment 等），再盖上缓存的分析字段
     const own = move.analysis === undefined || move.analysis === null ? {} : move.analysis
-    move.analysis = { ...own, ...analysis }
+    move.analysis = { ...own, ...entry.analysis }
+    // 归属图也在缓存里（形势判断要用），一并并回
+    if (entry.ownership !== undefined) move.ownership = entry.ownership
     merged += 1
   }
   return merged

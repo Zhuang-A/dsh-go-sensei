@@ -57,6 +57,9 @@ export function buildKataJsonQuery(game, from, to, maxVisits) {
     moves: [],
     analyzeTurns: [],
     maxVisits,
+    // 一并请求归属图：「形势判断」要靠它判黑地/白地/未定。
+    // 代价是每手多 ~361 个浮点数（用户 2026-09-19 已确认接受）。
+    includeOwnership: true,
   }
   const handicap = info.handicap ?? 0
   const offset = handicap >= 2 ? handicap - 1 : 0
@@ -186,7 +189,7 @@ export function parseKataAnalysisOutput(stdout) {
  * @returns {object[]} { coord, visits, winratePer10000, prior, scoreMean, pv }
  */
 function toLzCandidates(moveInfos, maxCandidates = 3, opts = {}) {
-  const frame = opts.winrateFrame === 'mover' ? 'mover' : 'black'
+  const frame = opts.winrateFrame === 'white' ? 'white' : opts.winrateFrame === 'mover' ? 'mover' : 'black'
   // 该 turn 的行棋方 = 刚落子者的对手。LZ 约定里候选点的 winrate 记的是**该行棋方**视角
   // （实测：real-analysis.sgf 第 21 手节点头部黑方 1.1%，其首选候选 F16 记 98.9%，
   //  即该节点行棋方白方的胜率）。故引擎的固定黑方口径必须换算，否则同一手棋旁边
@@ -196,7 +199,8 @@ function toLzCandidates(moveInfos, maxCandidates = 3, opts = {}) {
   /** 引擎口径 → 该 turn 行棋方视角 */
   const toCandidateView = (w) => {
     if (w === undefined) return undefined
-    if (frame === 'mover') return w // 引擎已按行棋方（SELF）输出
+    if (frame === 'mover') return w // 引擎已按行棋方（SIDETOMOVE）输出
+    if (frame === 'white') return toMove === 'W' ? w : 1 - w // 引擎按固定白方输出
     return toMove === 'B' ? w : 1 - w // 引擎按固定黑方输出
   }
   /**
@@ -208,7 +212,11 @@ function toLzCandidates(moveInfos, maxCandidates = 3, opts = {}) {
    */
   const toCandidateScore = (s) => {
     if (s === undefined) return undefined
-    const v = frame === 'mover' ? s : (toMove === 'B' ? s : -s)
+    const v = frame === 'mover'
+      ? s
+      : frame === 'white'
+        ? (toMove === 'W' ? s : -s)
+        : (toMove === 'B' ? s : -s)
     return Object.is(v, -0) ? 0 : v
   }
   const out = []
@@ -251,9 +259,10 @@ function toLzCandidates(moveInfos, maxCandidates = 3, opts = {}) {
  * @param {{ winrateFrame: 'black'|'mover' }} [opts] 引擎输出口径
  */
 function toLzLikeAnalysis(mi, moveColor, opts = {}) {
-  const frame = opts.winrateFrame === 'mover' ? 'mover' : 'black'
+  const frame = opts.winrateFrame === 'white' ? 'white' : opts.winrateFrame === 'mover' ? 'mover' : 'black'
   // 引擎口径 → 落子者视角：
   //   frame='black'：mi.winrate 是黑方胜率，落子方为白时才取反；
+  //   frame='white'：mi.winrate 是白方胜率，落子方为黑时才取反；
   //   frame='mover'：mi.winrate 是该 turn 行棋方（= 落子者的**对手**）的胜率，一律取反。
   // 旧实现把 'mover' 也当黑方口径先取反一次、再按 moveColor 取反，等于对白方每一手
   // 取反两次 → 白方胜率被算回黑方视角。该分支只在配置未写 reportAnalysisWinratesAs
@@ -262,17 +271,24 @@ function toLzLikeAnalysis(mi, moveColor, opts = {}) {
     ? undefined
     : frame === 'mover'
       ? 1 - mi.winrate
-      : (moveColor === 'B' ? mi.winrate : 1 - mi.winrate)
+      : frame === 'white'
+        ? (moveColor === 'W' ? mi.winrate : 1 - mi.winrate)
+        : (moveColor === 'B' ? mi.winrate : 1 - mi.winrate)
   const lz = {
     engine: 'KataGo',
     winratePct: moverWinrate !== undefined ? Math.round(moverWinrate * 1000) / 10 : undefined,
     playouts: String(mi.visits ?? ''),
   }
   if (mi.scoreMean !== undefined) {
-    // scoreMean 与 winrate 同口径：黑方视角领先 → 换成对手视角。
+    // scoreMean 与 winrate 同口径（实测 2026-09-19：同一局面 BLACK 口径 -44.36、
+    // SIDETOMOVE 口径 +44.44）→ 换成「该 turn 行棋方」= 落子者的对手视角的领先。
     // 归一 -0：scoreMean 恰为 0 时 `-0` 不是合法 lossless JSON，工具返回值会被
     // 运行时整体拒收（同 review.js 的 round1）。
-    const lead = moveColor === 'B' ? -mi.scoreMean : mi.scoreMean
+    const lead = frame === 'mover'
+      ? mi.scoreMean
+      : frame === 'white'
+        ? (moveColor === 'W' ? -mi.scoreMean : mi.scoreMean)
+        : (moveColor === 'B' ? -mi.scoreMean : mi.scoreMean)
     lz.scoreLeadOpponent = Object.is(lead, -0) ? 0 : lead
   }
   if (mi.scoreStdev !== undefined) lz.stdev = mi.scoreStdev
@@ -290,7 +306,7 @@ function toLzLikeAnalysis(mi, moveColor, opts = {}) {
  *
  * @param {string} configText 配置文件原文（可为空）
  * @param {string} [override] 命令行 -override-config 片段（可选）
- * @returns {'black'|'mover'} 归一化口径（WHITE 按 mover 之外的固定视角处理见下）
+ * @returns {'black'|'white'|'mover'} 归一化口径：BLACK / WHITE / SIDETOMOVE（行棋方）
  */
 export function readWinrateFrame(configText, override) {
   const pick = (text) => {
@@ -299,9 +315,71 @@ export function readWinrateFrame(configText, override) {
     return m ? m[1].toUpperCase() : undefined
   }
   const value = pick(override) ?? pick(configText)
-  if (value === undefined) return 'mover' // KataGo 默认 SELF
+  if (value === undefined) return 'mover' // 未设置时 KataGo 默认 SIDETOMOVE（行棋方视角）
   if (value === 'BLACK') return 'black'
+  if (value === 'WHITE') return 'white'
+  // SIDETOMOVE（旧写法 SELF 不被 KataGo 接受：Could not parse config value）
   return 'mover'
+}
+
+/**
+ * 把引擎口径的归属图归一成**黑方视角**（正 = 黑）。
+ *
+ * 实测（2026-09-19，本机 KataGo v1.16.4，real-analysis.sgf 第 105 手之后）：
+ * ownership 的符号**跟着 reportAnalysisWinratesAs 走**，同一局面
+ *   BLACK 口径 → 左上角 -0.99（那里是白棋地盘）
+ *   SIDETOMOVE 口径（该局面轮到白方行棋）→ +0.99
+ * 胜率、scoreLead、moveInfo.scoreMean 同样如此。所以归属与胜率必须用同一套口径换算，
+ * 否则整盘黑白会画反（且只有在行棋方为白时才会显形，极难发现）。
+ *
+ * @param {ArrayLike<number>} ownership 引擎原样输出的归属数组
+ * @param {'black'|'white'|'mover'} frame reportAnalysisWinratesAs 归一化后的口径
+ * @param {string|undefined} currentPlayer 该局面的行棋方（'B'/'W'，SIDETOMOVE 口径必需）
+ * @returns {Float64Array} 黑方视角的归属（-1~1）
+ */
+export function toBlackOwnership(ownership, frame, currentPlayer) {
+  const n = ownership?.length ?? 0
+  const out = new Float64Array(n)
+  const flip = frame === 'white' ? true : frame === 'mover' ? currentPlayer === 'W' : false
+  for (let i = 0; i < n; i++) {
+    const v = Number(ownership[i])
+    const x = flip ? -v : v
+    // 归一 -0：-0 不是合法 lossless JSON
+    out[i] = Object.is(x, -0) ? 0 : x
+  }
+  return out
+}
+
+/**
+ * 从 kata-analyze 输出里取出每手的**原始**归属图（尚未归一化口径）。
+ *
+ * 归属数组与 moveInfos 在同一个响应对象里（顶层 `ownership`），
+ * 行棋方取自同一条响应的 `rootInfo.currentPlayer` —— 归一化 SIDETOMOVE 口径时要用它。
+ * 同一 turn 可能有多次增量响应，取数组更完整的那份。
+ *
+ * @param {string} stdout 引擎输出
+ * @returns {Map<number, { ownership: number[], currentPlayer: string|undefined }>}
+ */
+export function parseKataOwnershipOutput(stdout) {
+  const out = new Map()
+  for (const line of String(stdout).split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith('{')) continue
+    let obj
+    try {
+      obj = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    if (!obj || !Array.isArray(obj.ownership) || obj.ownership.length === 0) continue
+    const turn = obj.turnNumber
+    if (turn === null || turn === undefined) continue
+    const existing = out.get(turn)
+    if (existing === undefined || obj.ownership.length >= existing.ownership.length) {
+      out.set(turn, { ownership: obj.ownership, currentPlayer: obj.rootInfo?.currentPlayer })
+    }
+  }
+  return out
 }
 
 /**
@@ -362,7 +440,7 @@ export async function runKataAnalyze(spawn, opts) {
   const handicap = game.info?.handicap ?? 0
   const offset = handicap >= 2 ? handicap - 1 : 0
   // 胜率口径：由 analysis 配置的 reportAnalysisWinratesAs 决定（见 readWinrateFrame）。
-  // 读不到配置文件文本时按 KataGo 默认（SELF = 行棋方视角）。
+  // 读不到配置文件文本时按 KataGo 默认（SIDETOMOVE = 行棋方视角）。
   let frame = 'mover'
   try {
     const configText = configPath ? readFileSync(configPath, 'utf8') : ''
@@ -370,6 +448,8 @@ export async function runKataAnalyze(spawn, opts) {
   } catch {
     frame = 'mover'
   }
+  // 归属图与胜率同口径，必须一起归一化（见 toBlackOwnership）
+  const ownershipByTurn = parseKataOwnershipOutput(stdout)
   // 合成分析数据并复用 reviewGame 的问题手识别
   const merged = { ...game, moves: game.moves.map((m) => ({ ...m })) }
   for (const [turnNumber, moveInfos] of byMove) {
@@ -383,6 +463,10 @@ export async function runKataAnalyze(spawn, opts) {
     // 口径必须与该 turn 的行棋方一致（move.color 是刚落子者），见 toLzCandidates。
     analysis.lz.candidates = toLzCandidates(moveInfos, 3, { winrateFrame: frame, moveColor: move.color })
     move.analysis = analysis
+    const own = ownershipByTurn.get(turnNumber)
+    if (own !== undefined) {
+      move.ownership = toBlackOwnership(own.ownership, frame, own.currentPlayer)
+    }
   }
 
   const review = reviewGame(merged, {

@@ -6,13 +6,13 @@
 
 import Schema from '@deepseek-ai/schemastery'
 import { basename, dirname } from 'node:path'
-import { registerGoTools, autoComputeIfNeeded } from './src/tools.js'
+import { registerGoTools, autoComputeIfNeeded, writeAnalysisBack, attachTerritory } from './src/tools.js'
+import { resolveEngine } from './src/engine-resolve.js'
 import { ReviewCache } from './src/cache.js'
 import { RANKS, reviewGame, inferLevel, aiCandidatesByMove } from './src/review.js'
-import { parseGame, decodeBuffer, compactBoard, winrateForColor, scoreForColor, MAX_SGF_CHARS } from './src/sgf.js'
+import { parseGame, decodeBuffer, compactBoard, winrateForColor, scoreForColor, hasTerritoryData, territoryOfMove, territorySeriesOf, MAX_SGF_CHARS } from './src/sgf.js'
 import { senseiPathFor } from './src/derived.js'
 import { buildGrid, parseSequence, parseMarks, renderBoardSvg } from './src/diagram.js'
-import { estimateTerritory, territoryScoreText } from './src/territory.js'
 
 export const name = 'go-sensei'
 // 硬依赖：tools 注册工具、systemPrompt 挂人设段、fs 读写棋谱。
@@ -75,11 +75,11 @@ function buildPersona(cfg) {
 3. 水平自适应：按学生棋力调整术语密度（配置 level=auto 时依据棋谱双方段位自行判断）：18K~10K 用生活化比喻并解释基础概念（气、眼、断点、出头）；9K~1D 用常规术语；2D 以上可用职业级术语与全局构思。
 4. 变化图：以"第 N 手改下 X 会怎样"为单元，一次只展开一条主变，每手一句话讲清意图，不逐手复述整条 PV。
 5. 配图讲解：回答追问（尤其"第 N 手改下 X 会怎样""这里连没连上"）时，**必须**用 go_draw_diagram 生成配图，并在回答正文里用 Markdown 图片语法 \`![一句话说明](工具返回的 URL)\` 嵌入。图上的约定：变化着法按 1-9、A-Z 逐手编号（起始颜色由工具按局面自动定），关键棋子用 triangle（三角形）、square、circle、label（字母）标出；一张图只讲一个变化，图下配一句话说明。**绝不用文字描述代替配图，也绝不编造图片 URL**——URL 只能来自 go_draw_diagram 的返回值。
-6. 形势判断与领地显示：讲"这块地归谁""现在谁领先"时，用 go_draw_diagram 的 territory=true 叠加领地显示（把只挨黑子/只挨白子的空点画成黑/白小方块，图下附一行简易点目）。那行数字是**启发式估算**（不提死子、不判双活），口径与面板图例的「简易形势判断」一致；真正的目差与胜率仍以引擎数据（DM/胜率）为准，两者不要混着说。
+6. 形势判断：讲"这块地归谁""现在谁领先"时，用 go_draw_diagram 的 territory=true 叠加形势判断（**引擎归属图**判出的黑地/白地，未定处留白，图下附一行双方目数与领先）。判定口径照 Lizzieyzy：|归属| < 0.4 算未定、空点要过四邻过滤、落在对方地里的己方子按死子算，与面板的「形势判断」是同一份数据。该手若还没有归属数据，工具会当场补算一次（要等几十秒）；引擎不可用时它不出图并说明原因——此时就如实告诉学生"这次看不了形势判断"，不要改用估算糊弄。另外它与目差曲线（DM）不是同一个数：讲地盘归属用前者，讲领先多少目优先用后者，不要并排报两个数。
 7. 工具纪律：先 go_parse_sgf 了解棋谱，再 go_review_moves 找问题手，逐手讲解后调用 go_write_review 写回 SGF 注释，需要落盘报告时用 go_export_report；同一局重复复盘优先复用工具返回的缓存结果（cached=true 时不再重复获取全量数据）；单局讲解预算约 ${cfg.tokenBudget} tokens，用"先问后讲"与数据裁剪控制消耗。`
 }
 
-const TOOL_GUIDANCE = `围棋复盘工具（DeepGo Sensei）：go_parse_sgf 读棋谱，go_review_moves 找问题手，go_position_context 取某手前后局面与 AI 候选，go_draw_diagram 画讲解配图（变化图编号 1-9/A-Z + 三角形等重点棋子标注；territory=true 可叠加领地显示与简易形势判断，返回可在对话里直接用 Markdown 图片语法嵌入的 URL），go_write_review 把讲解写回 SGF 的 C[] 注释，go_export_report 落盘 Markdown 报告，go_engine_info 查看/说明当前使用的 KataGo 引擎与权重。**源棋谱只读**：讲解与分析数据（胜率/目差/AI 首选与变化图）都写进同目录的 \`<源名>-sensei.sgf\` 副本，源文件永不修改；读取同一盘棋时若副本已存在（工具与面板都一样）就直接读副本，因为那才是上一次复盘的成果。补算引擎默认用插件自带的 engine 目录（开箱即用），也可用配置 engineDir / kataGoPath / kataGoModel 换成用户自己的引擎与权重。路径参数支持绝对路径或相对当前会话工作区的相对路径。`
+const TOOL_GUIDANCE = `围棋复盘工具（DeepGo Sensei）：go_parse_sgf 读棋谱，go_review_moves 找问题手，go_position_context 取某手前后局面与 AI 候选，go_draw_diagram 画讲解配图（变化图编号 1-9/A-Z + 三角形等重点棋子标注；territory=true 可叠加形势判断——引擎归属图判出的黑地/白地（未定留白），图下附一行双方目数与领先；该手没有归属数据时会当场补算，引擎不可用则不出图并说明，返回可在对话里直接用 Markdown 图片语法嵌入的 URL），go_write_review 把讲解写回 SGF 的 C[] 注释，go_export_report 落盘 Markdown 报告，go_engine_info 查看/说明当前使用的 KataGo 引擎与权重。**源棋谱只读**：讲解与分析数据（胜率/目差/AI 首选与变化图）都写进同目录的 \`<源名>-sensei.sgf\` 副本，源文件永不修改；读取同一盘棋时若副本已存在（工具与面板都一样）就直接读副本，因为那才是上一次复盘的成果。补算引擎默认用插件自带的 engine 目录（开箱即用），也可用配置 engineDir / kataGoPath / kataGoModel 换成用户自己的引擎与权重。路径参数支持绝对路径或相对当前会话工作区的相对路径。`
 
 /** 配图 URL 的基地址（形如 http://127.0.0.1:3080）；由 webServer 挂载时填充。 */
 function createDiagramBase() {
@@ -239,6 +239,36 @@ function compactCurve(game) {
 
 /** 曲线最多带回多少手（正常一局 ≤ 400 手，防御性上限）。 */
 const MAX_PANEL_CURVE_MOVES = 400
+
+/**
+ * 面板用的逐手形势判断。
+ *
+ * 下发的是**已经判好的三档图**（`map`，packTerritory 的 base64）外加那几行数字 ——
+ * 客户端只画不算，因此不存在"两端算法漂移"的可能（v0.2.8 的启发式就是因为
+ * 宿主与客户端各写一份，才需要专门的探针逐点对拍）。
+ *
+ * 数字在宿主这边算，是因为面板浮窗要显示提子；提子要重放棋谱，客户端不必再实现一遍。
+ *
+ * @param {object} game parseGame 的返回值
+ * @returns {{ available: boolean, komi?: number, step?: Array<object|null> }}
+ */
+function compactTerritory(game) {
+  if (!hasTerritoryData(game)) return { available: false }
+  const step = territorySeriesOf(game).map((item) =>
+    item === null
+      ? null
+      : {
+          map: item.packed,
+          blackPoints: item.est.blackPoints,
+          whitePoints: item.est.whitePoints,
+          lead: item.est.lead,
+          capturedBlack: item.est.capturedBlack,
+          capturedWhite: item.est.capturedWhite,
+          deadBlack: item.est.deadBlack,
+          deadWhite: item.est.deadWhite,
+        })
+  return { available: true, komi: game?.info?.komi ?? 0, step }
+}
 
 /** 四舍五入到 1 位小数；非有限值返回 null（面板侧 null 表示缺口）。 */
 function round1(value) {
@@ -562,6 +592,74 @@ function registerPanelRoute(ctx, cfg, diagram) {
     return list
   }
 
+  /**
+   * 面板写回用的沙箱策略。
+   *
+   * 这条路由没有工具执行上下文，所以按请求带来的会话 id 反查会话对象再解析策略
+   * （与 tools.js 里 `resolve({ session })` 同一语义）；拿不到会话就退回不带会话的解析。
+   * 仍然拿不到策略时**不硬造**：这一次只把归属图随响应下发，不落盘。
+   *
+   * 为什么必须带策略：沙箱后端以写入携带的策略为越界判定的唯一依据，省略即退回服务
+   * 默认策略（在受限会话里表现为"偶发被拒"，无沙箱后端时则等于绕过工作区限制）。
+   *
+   * @returns {object|null} 可用的策略；拿不到时 null（调用方跳过写回）
+   */
+  function panelWritePolicy(ctx, sessionId) {
+    const notes = []
+    try {
+      const service = ctx.get('sandboxPolicy')
+      if (service === undefined || service === null || typeof service.resolve !== 'function') {
+        return { policy: null, reason: '没有 sandboxPolicy 服务' }
+      }
+      let session
+      if (typeof sessionId === 'string' && sessionId !== '') {
+        const sessions = ctx.get('sessions')
+        if (sessions === undefined || typeof sessions.get !== 'function') {
+          notes.push('没有 sessions 服务')
+        } else {
+          // 会话 id 的写法随 DSH 版本变过（有的带 `session-` 前缀、有的是裸 uuid），
+          // 两种都试一遍：拿不到会话就只能退回部署默认策略（本机是 read-only，写必被拒）。
+          const ids = [sessionId]
+          if (sessionId.startsWith('session-')) ids.push(sessionId.slice('session-'.length))
+          for (const id of ids) {
+            try {
+              const found = sessions.get(id)
+              if (found !== undefined && found !== null) {
+                session = found
+                notes.push(`sessions.get 命中（${id.slice(0, 18)}…）`)
+                break
+              }
+            } catch (error) {
+              notes.push(`sessions.get 抛错：${String(error?.message ?? error).slice(0, 60)}`)
+            }
+          }
+          if (session === undefined) notes.push('sessions.get 没查到该会话')
+        }
+      } else {
+        notes.push('请求没带 session 参数')
+      }
+      // 先按会话解析（模式取该会话的 sandbox/mode，root 取会话 cwd）；拿不到再退回部署默认
+      const attempts = session !== undefined && session !== null ? [{ session }, {}] : [{}]
+      for (const arg of attempts) {
+        try {
+          const policy = service.resolve(arg)
+          if (policy !== null && policy !== undefined) {
+            return {
+              policy,
+              reason: `${arg.session ? '按会话' : '按部署默认'}解析：mode=${policy.mode} root=${policy.workspaceRoot}（${notes.join('，')}）`,
+            }
+          }
+          notes.push(arg.session ? 'resolve(会话) 返回 null' : 'resolve(默认) 返回 null')
+        } catch (error) {
+          notes.push(`${arg.session ? 'resolve(会话)' : 'resolve(默认)'} 抛错：${String(error?.message ?? error).slice(0, 80)}`)
+        }
+      }
+      return { policy: null, reason: notes.join(' | ') }
+    } catch (error) {
+      return { policy: null, reason: `外层异常：${String(error?.message ?? error).slice(0, 80)}` }
+    }
+  }
+
   /** 请求里给的路径看起来是不是绝对路径（Windows 盘符 / UNC / POSIX 根）。 */
   function looksAbsolute(value) {
     const text = typeof value === 'string' ? value.trim() : ''
@@ -756,13 +854,12 @@ function registerPanelRoute(ctx, cfg, diagram) {
           )
           const rawWidth = Math.trunc(Number(url.searchParams.get('w')))
           const lastMove = move > 0 && board.moves[move - 1].x >= 0 ? board.moves[move - 1] : null
-          // 领地显示 / 形势判断（用户 2026-09-19 要求，照 Lizzieyzy 的做法）：
-          // ?territory=1 时算出每点归属并画成小方块，同时在盘下附一行简易点目。
-          // 算式是纯启发式（只按空块紧邻的棋子颜色归属），不是引擎的胜率/目差。
+          // 形势判断（用户 2026-09-19 定案，照 Lizzieyzy 的规则）：读棋谱副本里已有的
+          // 归属图（TP[]，与胜率/目差同一次补算产出），把它画成黑/白小方块并在盘下附一行。
+          // **这里不跑引擎**：补算由工具侧 autoComputeIfNeeded 或面板的「形势判断」按钮触发
+          // （那一步会把 TP[] 写回副本），所以这条路由始终是毫秒级、不阻塞图片加载。
           const wantTerritory = url.searchParams.get('territory') === '1'
-          const territoryEst = wantTerritory
-            ? estimateTerritory(grid, size, { komi: game.info?.komi ?? 0 })
-            : null
+          const territoryHit = wantTerritory ? territoryOfMove(game, move) : null
           const svg = renderBoardSvg({
             size,
             grid,
@@ -771,11 +868,8 @@ function registerPanelRoute(ctx, cfg, diagram) {
             lastMove,
             caption: (url.searchParams.get('cap') ?? '').slice(0, 120),
             // 形势判断附在图注之下（两行都在盘下，视口高度按两行一起加）
-            ...(territoryEst !== null
-              ? {
-                  territory: territoryEst.owner,
-                  footer: `简易形势判断：${territoryScoreText(territoryEst)}`,
-                }
+            ...(territoryHit !== null
+              ? { territory: territoryHit.est.cells, footer: territoryHit.text }
               : {}),
             // 黑方白方的名字直接画在盘上沿：配图在对话正文里，四周没有别的说明
             players: game.info?.players,
@@ -938,10 +1032,58 @@ function registerPanelRoute(ctx, cfg, diagram) {
             ;({ text } = decodeBuffer(bytes))
             game = parseGame(text)
           }
+          // 原文与写回目标必须挂在 game 上：writeAnalysisBack 第一件事就是取 `_meta.text`，
+          // 缺了它一律返回 undefined（表现为「点了形势判断、补算跑完，却什么都没写」——
+          // 真机踩过：策略解析完全正常，只是这一步没有原文可改）。与 tools.js 的
+          // readGameFile 同一形状：sourcePath 是源棋谱，写回目标永远由它推出（-sensei 副本）。
+          game._meta = {
+            path: target.displayPath,
+            sourcePath,
+            derived: target.displayPath !== sourcePath,
+            text,
+          }
           // 与 go_review_moves 共用同一条管线：无分析数据且已配置引擎时自动补算。
           // 早期这里直接调 reviewGame，绕过了工具的自动补算 —— 同一份棋谱在对话里
           // 复盘能出问题手、面板却显示「未发现问题手」。同一业务逻辑只保留一份。
-          const { autoEngine } = await autoComputeIfNeeded(ctx, cfg, game, {})
+          //
+          // ?territory=1 表示用户点了面板上的「形势判断」按钮（**明确的分析动作**）：
+          //   · 缺归属图时允许再跑一次引擎（老副本只有 WV/DM/LZ、没有 TP[]）
+          //   · 算完把归属图写回副本（与工具侧同一份 writeAnalysisBack），以后秒开
+          // 只读路径（不带这个参数）依旧不写盘 —— 写回只发生在明确的分析动作里。
+          const wantTerritory = url.searchParams.get('territory') === '1'
+          const { autoEngine } = await autoComputeIfNeeded(ctx, cfg, game, {
+            ...(wantTerritory ? { needTerritory: true } : {}),
+          })
+          let territorySaved = false
+          let territoryWrite
+          if (wantTerritory) {
+            // **先**把归属图算出来挂到棋局上：面板能不能看到地盘，与能不能落盘是两件事。
+            // 早期把这一步放进写回函数里，写回一失败响应里连数据都没有（真机踩过：
+            // 补算跑了 35 秒、结果 territory.available 还是 false）。
+            const attached = attachTerritory(game)
+            // 「有归属图就尝试落盘」——不能只在"本次真的跑了引擎"时才写：补算结果命中
+            // 内存缓存时同样要落盘（否则先打开棋谱触发的补算不写盘、再点形势判断又被
+            // 缓存接住，磁盘上永远没有 TP[]）。attachTerritory 返回 0 表示本来就没有
+            // 归属图可写，那就什么都不做。
+            if (attached > 0) {
+              const resolved = panelWritePolicy(ctx, sessionId)
+              territoryWrite = { reason: resolved.reason, attached }
+              if (resolved.policy === null) {
+                ctx.logger?.warn?.(`go-sensei：面板拿不到写回策略（${resolved.reason}），归属图只随本次响应下发`)
+              } else {
+                try {
+                  const written = await writeAnalysisBack(ctx, undefined, resolved.policy, game)
+                  territorySaved = written !== undefined
+                  territoryWrite.ok = territorySaved
+                  if (!territorySaved) territoryWrite.error = '没有可写内容'
+                } catch (error) {
+                  territoryWrite.ok = false
+                  territoryWrite.error = String(error?.message ?? error).slice(0, 300)
+                  ctx.logger?.warn?.(`go-sensei：面板写回归属图失败：${territoryWrite.error}`)
+                }
+              }
+            }
+          }
           const level = cfg.level === 'auto' ? inferLevel(game.info) : cfg.level
           const review = reviewGame(game, {
             winrateThreshold: cfg.winrateThreshold,
@@ -967,6 +1109,19 @@ function registerPanelRoute(ctx, cfg, diagram) {
               ai: compactAi(game, cfg),
               // 已写回棋谱的讲解：面板/整页/右侧栏都靠它显示"这一手怎么讲的"
               comments: compactComments(game),
+              // 形势判断：逐手三档图 + 双方目数/提子/领先（面板的浮窗与盘上色块都用它）
+              territory: compactTerritory(game),
+              // 「形势判断」按钮的可用性：引擎不可用且还没有归属数据时，客户端要禁用并说明原因
+              engineAvailable: (() => {
+                try {
+                  return resolveEngine(cfg).available === true
+                } catch {
+                  return false
+                }
+              })(),
+              // 这次补算出来的归属图有没有真的写回副本（没写回时下次打开会重算）
+              territorySaved,
+              ...(territoryWrite !== undefined ? { territoryWrite } : {}),
               // 棋盘表头要显示"谁跟谁下、结果如何"，这些是讲解时最常用的一句话背景
               ...(game.info.players ? { players: game.info.players } : {}),
               ...(game.info.result !== undefined ? { result: game.info.result } : {}),

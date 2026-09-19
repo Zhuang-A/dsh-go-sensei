@@ -369,22 +369,28 @@ export function renderBoardSvg(spec) {
     out.push(`<text x="${(PAD / 2).toFixed(2)}" y="${(pos(i) + 1.1).toFixed(2)}" font-size="2.8" fill="#111111" text-anchor="middle" font-family="sans-serif">${size - i}</text>`)
   }
 
-  // 领地显示（简易形势判断）：只画**空点**上的归属小方块——黑白都挨或都不挨的
-  // 单官不画（画了等于替棋手宣布中立点归谁）。方块比棋子小一圈，压在盘面棋子之下。
-  if (Array.isArray(spec.territory)) {
-    const side = step * 0.52
+  // 形势判断：把宿主判好的三档图（0 无 / 1 黑 / 2 白）画成小方块。
+  //   · 空点上的方块画在**棋子之前**（变化图、重点棋子的记号仍压在它上面）
+  //   · 死子上的方块画在**棋子之后**（见下面那一趟）—— 盖在子上才看得见
+  // 传进来的可能是 Uint8Array（宿主判定的产物），所以按"有 length 的数组"收。
+  const terrCells = spec.territory && typeof spec.territory.length === 'number' ? spec.territory : null
+  const terrSide = step * 0.52
+  /** 形势判断的小方块：空地上的与死子上的共用同一份画法。 */
+  const terrRect = (x, y, t, extraClass) => {
+    const black = t === 1
+    return `<rect class="dgs-terr${extraClass}" x="${(pos(x) - terrSide / 2).toFixed(2)}"`
+      + ` y="${(pos(y) - terrSide / 2).toFixed(2)}" width="${terrSide.toFixed(2)}" height="${terrSide.toFixed(2)}"`
+      + ` fill="${black ? 'rgba(20, 22, 26, 0.62)' : 'rgba(250, 250, 252, 0.82)'}"`
+      + (black ? '' : ' stroke="rgba(17, 17, 17, 0.35)" stroke-width="0.12"')
+      + '/>'
+  }
+  if (terrCells !== null) {
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
-        const t = spec.territory[y * size + x]
+        const t = terrCells[y * size + x]
         if (t !== 1 && t !== 2) continue
-        // 只标**空点**：owner 数组里棋子也记着自己的颜色，落子处不该再叠方块
-        if (grid[y * size + x] !== 0) continue
-        const black = t === 1
-        out.push(`<rect class="dgs-terr" x="${(pos(x) - side / 2).toFixed(2)}" y="${(pos(y) - side / 2).toFixed(2)}"`
-          + ` width="${side.toFixed(2)}" height="${side.toFixed(2)}"`
-          + ` fill="${black ? 'rgba(20, 22, 26, 0.62)' : 'rgba(250, 250, 252, 0.82)'}"`
-          + (black ? '' : ' stroke="rgba(17, 17, 17, 0.35)" stroke-width="0.12"')
-          + '/>')
+        if (grid[y * size + x] !== 0) continue // 棋子上的方块归下面那一趟管
+        out.push(terrRect(x, y, t, ''))
       }
     }
   }
@@ -399,6 +405,21 @@ export function renderBoardSvg(spec) {
         + ` fill="url(#${black ? 'bk' : 'wh'})"`
         + (black ? '' : ` stroke="#111111" stroke-width="${Math.max(0.12, RADIUS / 16).toFixed(3)}"`)
         + '/>')
+    }
+  }
+
+  // 形势判断里的死子：落在对方区域里的棋子，在**这颗子上**盖对方颜色的方块
+  // （Lizzieyzy 的画法）。画在棋子之后才看得见；方块比棋子小一圈，底下的子还认得出。
+  if (terrCells !== null) {
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const t = terrCells[y * size + x]
+        if (t !== 1 && t !== 2) continue
+        const stone = grid[y * size + x]
+        if (stone !== 1 && stone !== 2) continue
+        if ((stone === 1) === (t === 1)) continue // 自己人的方块不盖
+        out.push(terrRect(x, y, t, ' dgs-terr-dead'))
+      }
     }
   }
 

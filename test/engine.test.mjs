@@ -18,8 +18,10 @@ const GAME = parseGame('(;GM[1]FF[4]SZ[19]KM[7.5]RU[Chinese];B[pd];W[dp];B[qp];W
 test('readWinrateFrame: 解析 reportAnalysisWinratesAs', () => {
   assert.equal(readWinrateFrame('reportAnalysisWinratesAs = BLACK'), 'black')
   assert.equal(readWinrateFrame('reportAnalysisWinratesAs=SELF'), 'mover')
-  assert.equal(readWinrateFrame('reportAnalysisWinratesAs = WHITE'), 'mover')
-  assert.equal(readWinrateFrame(''), 'mover', '未设置时 KataGo 默认 SELF')
+  // WHITE 是固定白方视角，与 SIDETOMOVE 不是一回事（2026-09-19 起单独识别）
+  assert.equal(readWinrateFrame('reportAnalysisWinratesAs = WHITE'), 'white')
+  assert.equal(readWinrateFrame('reportAnalysisWinratesAs = SIDETOMOVE'), 'mover')
+  assert.equal(readWinrateFrame(''), 'mover', '未设置时 KataGo 默认 SIDETOMOVE（行棋方视角）')
   assert.equal(readWinrateFrame('# 没有该键\nfoo = 1'), 'mover')
 })
 

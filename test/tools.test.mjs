@@ -12,7 +12,7 @@ import { dirname, join, resolve, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { apply, Config } from '../index.mjs'
 import { parseGame, parseLz } from '../src/sgf.js'
-import { effectiveEngineConfig, compact, mergeCachedAnalysis } from '../src/tools.js'
+import { effectiveEngineConfig, compact, mergeCachedAnalysis, attachTerritory, writeAnalysisBack } from '../src/tools.js'
 import { resolveEngine } from '../src/engine-resolve.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -896,4 +896,33 @@ test('写盘契约: sandboxPolicy 服务解析出 null 时同样拒绝写入（f
     /sandboxPolicy/,
   )
   assert.equal(nullish.writes.length, writesBefore, '空策略不得放行写入')
+})
+
+// 面板路由触发的写回**没有工具执行上下文**（exec 缺席）。真机踩过的一次：
+// attachTerritory 被放在 writeAnalysisBack 里，而 writeAnalysisBack 又因为
+// `exec.signal` 抛 TypeError 被调用方静默吞掉 —— 补算实打实跑了 35 秒，
+// 响应里的 territory.available 却还是 false（连内存里的归属图都没生成）。
+// 所以这里钉两件事：① exec 缺席时写回不炸；② 只要拿到归属图就先算出三档图。
+test('写回: exec 缺席（面板路由）时也能落盘，且归属图先算出来再谈写不写', async () => {
+  const ctx = makeCtx(WORKSPACE)
+  apply(ctx, Config(CFG))
+  const game = {
+    info: { size: 9, komi: 0 },
+    setup: { black: [[1, 0], [0, 1]], white: [[0, 0]] },
+    moves: [{
+      number: 1, color: 'B', coord: 'ba', pass: false,
+      analysis: { lz: { winratePct: 50, scoreLeadOpponent: 0, candidates: [] } },
+    }],
+    _meta: { text: '(;GM[1]FF[4]SZ[9]KM[0];B[ba])', sourcePath: join(WORKSPACE, 'game.sgf'), path: join(WORKSPACE, 'game.sgf') },
+  }
+  game.moves[0].ownership = new Array(81).fill(0.9)
+
+  assert.equal(attachTerritory(game), 1, '有归属图就该先算出三档图（与写盘无关）')
+  assert.equal(typeof game.moves[0].territory, 'string')
+
+  const writesBefore = ctx.writes.length
+  const written = await writeAnalysisBack(ctx, undefined, { mode: 'workspace-write', workspaceRoot: WORKSPACE }, game)
+  assert.ok(written !== undefined && written.moves >= 1, 'exec 缺席也要能写出去')
+  assert.ok(ctx.writes.length > writesBefore, '确实落盘了（旧实现取 exec.signal 会 TypeError）')
+  assert.match(readFileSync(ctx.writes[ctx.writes.length - 1].path, 'utf8'), /TP\[/)
 })

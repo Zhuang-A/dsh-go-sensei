@@ -78,10 +78,33 @@ window.__ModuleLoader__.load({
       '[data-dgs] .dgs-ctl button { padding: 2px 6px; white-space: nowrap; flex: 0 0 auto; }',
       '[data-dgs] input[type=range] { flex: 1 1 90px; min-width: 80px; padding: 0; background: transparent; border: none; }',
       '[data-dgs] .dgs-note { font-size: 11px; color: var(--dsw-alias-label-secondary, #9aa4b2); margin-top: 4px; }',
-      // 形势判断（简易点目）：盘下的一行统计，比普通小字稍显眼，一眼能读到目数
-      '[data-dgs] .dgs-terrline { margin-top: 4px; font-size: 11px; line-height: 1.5;',
-      '  color: var(--dsw-alias-label-primary, #e8eaf0); }',
-      '[data-dgs] .dgs-terrline .dgs-terr-tag { color: var(--dsw-alias-label-secondary, #9aa4b2); }',
+      // 形势判断：浮窗与棋盘**并排**（用户选的摆法），盘外、可 × 关掉。
+      // 牌面照 Lizzieyzy 的形势判断窗口：领先一行 + 双方目数 + 提子 + 口径脚注。
+      '[data-dgs] .dgs-board-row { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; }',
+      // 棋盘吃掉剩下的宽度、浮窗固定宽：窄容器里浮窗会自动折到棋盘下方（而不是把棋盘压扁）
+      '[data-dgs] .dgs-board-row > .dgs-board { flex: 1 1 0; min-width: 200px; }',
+      '[data-dgs] .dgs-terr-wrap { margin-top: 6px; }',
+      '[data-dgs] .dgs-terr-btn { font-size: 11px; }',
+      '[data-dgs] .dgs-terr-on { background: var(--dsw-alias-bg-brand, #2f6fed); color: #fff; }',
+      '[data-dgs] .dgs-terr-card { flex: 0 0 168px; width: 168px; border-radius: 8px; padding: 8px 9px;',
+      '  background: var(--dsw-alias-bg-layer-1, rgba(24, 27, 33, .96));',
+      '  border: 1px solid var(--dsw-alias-border-l2, rgba(255, 255, 255, .16));',
+      '  color: var(--dsw-alias-label-primary, #e8eaf0); font-size: 11px; line-height: 1.6;',
+      '  box-shadow: 0 6px 18px rgba(0, 0, 0, .28); }',
+      '[data-dgs] .dgs-terr-head { display: flex; align-items: center; justify-content: space-between; }',
+      '[data-dgs] .dgs-terr-title { font-weight: 600; font-size: 12px; }',
+      '[data-dgs] .dgs-terr-close { border: none; background: transparent; cursor: pointer;',
+      '  color: var(--dsw-alias-label-secondary, #9aa4b2); font-size: 14px; line-height: 1; padding: 0 2px; }',
+      '[data-dgs] .dgs-terr-lead { margin-top: 2px; font-weight: 600; }',
+      '[data-dgs] .dgs-terr-komi { font-weight: 400; color: var(--dsw-alias-label-secondary, #9aa4b2); }',
+      '[data-dgs] .dgs-terr-row { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }',
+      '[data-dgs] .dgs-terr-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 104px; }',
+      '[data-dgs] .dgs-terr-num { flex: 0 0 auto; font-variant-numeric: tabular-nums; }',
+      '[data-dgs] .dgs-terr-body { color: var(--dsw-alias-label-secondary, #9aa4b2); }',
+      '[data-dgs] .dgs-terr-foot { margin-top: 4px; font-size: 10px;',
+      '  color: var(--dsw-alias-label-secondary, #9aa4b2); }',
+      // 死子：盖在棋子上的方块略微收一点，别把整颗子糊住
+      '[data-dgs] .dgs-terr-dead { opacity: .88; }',
       // 盘上标注的图例 + 开关：色样 + 名称的小胶囊，点一下开/关
       '[data-dgs] .dgs-key { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }',
       '[data-dgs] .dgs-keyitem { display: inline-flex; align-items: center; gap: 4px; font-size: 10px;',
@@ -101,6 +124,10 @@ window.__ModuleLoader__.load({
       '[data-dgs] .dgs-page-side { flex: 1 1 420px; min-width: 280px; max-width: 560px; display: flex;',
       '  flex-direction: column; gap: 6px; min-height: 0; }',
       '[data-dgs] .dgs-page-side .dgs-curves { margin-top: 0; }',
+      // 形势判断独占模式（用户 2026-09-20）：右列整块（曲线 + 问题手清单）让位给
+      // 地盘与数字浮窗，棋盘这一列放开长到窗口允许的最大宽度。
+      '[data-dgs] .dgs-page-body.dgs-terr-focus .dgs-page-board { flex: 1 1 auto;',
+      '  width: min(920px, max(360px, 100vh - 300px)); max-width: 920px; }',
       // 列表高度留出底部的讲解：曲线 + 列表合起来别高过棋盘那一列，讲解才不会掉出屏幕
       '[data-dgs] .dgs-page-list { min-width: 0; max-height: min(34vh, 340px); overflow-y: auto;',
       '  display: flex; flex-direction: column; gap: 6px; }',
@@ -406,92 +433,47 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 简易形势判断（领地估算）。
+     * 三档图解码：紧凑字符串（2 bit/点，base64）→ 逐点数组（0 无 / 1 黑方块 / 2 白方块）。
      *
-     * 与宿主 src/territory.js 的 estimateTerritory **逐字同口径** —— 那边是模块、
-     * 这边是零构建 bundle（不能 import），所以带一份对应实现（与 groupAt/playStone
-     * 同一处境的既有约定）。两边的单测各自把关键局面钉死。
-     *
-     * 算法：把空点按四连通切成「空块」，只看每块紧邻的棋子颜色：
-     * 只挨黑子＝黑地、只挨白子＝白地、都挨或都不挨＝单官；再按数子法合计
-     * （黑＝黑子＋黑地，白＝白子＋白地＋贴目，正数＝黑领先）。**启发式估算**，
-     * 不提死子、不判双活 —— 界面上一律写成「简易形势判断」。
-     *
-     * @param {number[]} grid 盘面网格（0 空 / 1 黑 / 2 白，下标 = y*size+x）
-     * @param {number} size 棋盘路数
-     * @param {number} [komi] 贴目（数子法里算给白方）
-     * @returns {{ owner: number[], size: number, blackStones: number, whiteStones: number,
-     *   blackTerritory: number, whiteTerritory: number, dame: number,
-     *   blackTotal: number, whiteTotal: number, lead: number, komi: number }}
+     * 客户端**只画不算**：判定（阈值 0.4、四邻过滤、死子）全在宿主 src/territory.js
+     * 做一次、随数据路由下发。v0.2.8 那套是两端各写一份判定再逐点对拍 ——
+     * 这次直接让漂移不可能发生。
      */
-    function estimateTerritory(grid, size, komi) {
-      var n = size
-      var area = n * n
-      var owner = new Array(area)
-      var visited = new Array(area)
-      var i
-      for (i = 0; i < area; i++) visited[i] = false
-      var blackStones = 0
-      var whiteStones = 0
-      for (i = 0; i < area; i++) {
-        var v = grid[i]
-        if (v === 1) { owner[i] = 1; blackStones++ }
-        else if (v === 2) { owner[i] = 2; whiteStones++ }
-        else owner[i] = 0
+    function unpackTerritory(text, n) {
+      if (typeof text !== 'string' || text === '') return null
+      var binary
+      try { binary = atob(text) } catch (e) { return null }
+      if (binary.length < Math.ceil(n / 4)) return null
+      var cells = new Array(n)
+      for (var i = 0; i < n; i++) {
+        cells[i] = (binary.charCodeAt(i >> 2) >> ((i & 3) * 2)) & 3
       }
-      var blackTerritory = 0
-      var whiteTerritory = 0
-      var dame = 0
-      var stack = []
-      for (var start = 0; start < area; start++) {
-        // 只从「没走过、且不是棋子」的点起块：0/undefined/畸形值一律当空点，
-        // 与宿主 src/territory.js 的归一化同一口径。
-        if (visited[start]) continue
-        if (grid[start] === 1 || grid[start] === 2) continue
-        stack.length = 0
-        stack.push(start)
-        visited[start] = true
-        var touchBlack = false
-        var touchWhite = false
-        var region = []
-        while (stack.length > 0) {
-          var p = stack.pop()
-          region.push(p)
-          var x = p % n
-          var y = (p - x) / n
-          if (x + 1 < n) look(p + 1)
-          if (x > 0) look(p - 1)
-          if (y + 1 < n) look(p + n)
-          if (y > 0) look(p - n)
-        }
-        var who = touchBlack && !touchWhite ? 1 : touchWhite && !touchBlack ? 2 : 0
-        for (var r = 0; r < region.length; r++) owner[region[r]] = who
-        if (who === 1) blackTerritory += region.length
-        else if (who === 2) whiteTerritory += region.length
-        else dame += region.length
-      }
-      var k = Number(komi)
-      if (!isFinite(k)) k = 0
-      var blackTotal = blackStones + blackTerritory
-      var whiteTotal = whiteStones + whiteTerritory + k
-      var lead = blackTotal - whiteTotal
-      return {
-        owner: owner, size: n,
-        blackStones: blackStones, whiteStones: whiteStones,
-        blackTerritory: blackTerritory, whiteTerritory: whiteTerritory, dame: dame,
-        blackTotal: blackTotal, whiteTotal: whiteTotal,
-        lead: lead === 0 ? 0 : lead,
-        komi: k,
-      }
+      return cells
+    }
 
-      /** 处理一个邻点：记颜色或入栈（只在本次空块内有效）。 */
-      function look(q) {
-        var nv = grid[q]
-        if (nv === 1) { touchBlack = true; return }
-        if (nv === 2) { touchWhite = true; return }
-        if (visited[q]) return
-        visited[q] = true
-        stack.push(q)
+    /**
+     * 当前局面的形势判断（引擎归属图判出的三档图 + 那几行数字）；没有数据返回 null。
+     * 三处视图共用：盘上色块与浮窗里的数字都来自它。
+     */
+    function territoryAt(data, upto) {
+      var t = data && data.territory
+      if (!t || t.available !== true || !Array.isArray(t.step)) return null
+      if (!(upto >= 1)) return null
+      var size = data.board && data.board.size ? data.board.size : 19
+      var item = t.step[upto - 1]
+      if (!item) return null
+      var cells = unpackTerritory(item.map, size * size)
+      if (cells === null) return null
+      return {
+        cells: cells,
+        blackPoints: item.blackPoints,
+        whitePoints: item.whitePoints,
+        lead: item.lead,
+        capturedBlack: item.capturedBlack,
+        capturedWhite: item.capturedWhite,
+        deadBlack: item.deadBlack,
+        deadWhite: item.deadWhite,
+        komi: t.komi,
       }
     }
 
@@ -504,26 +486,29 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 一句话形势判断（与宿主 src/territory.js 的 territoryScoreText 同口径）：
-     * 如 `黑 45 目 · 白 38.5 目（含贴目 7.5）· 黑领先 6.5 目`。
+     * 浮窗里的那几行数字（照 Lizzieyzy 的形势判断窗口逐项）。
+     *
+     * 目数 = 子 + 地（数子法），未定不计；领先 = 黑目 − 白目 − 贴目；
+     * 提子只作展示（吃掉的 + 判死的）——数子法里它已经体现在盘面上，不重复计入目数。
      */
-    function territoryText(est) {
-      var lead = Number(est && est.lead) || 0
-      var tail = lead === 0
-        ? '盘面两分'
-        : (lead > 0 ? '黑领先 ' : '白领先 ') + terrNum(Math.abs(lead)) + ' 目'
-      return '黑 ' + terrNum(est && est.blackTotal) + ' 目 · 白 ' + terrNum(est && est.whiteTotal)
-        + ' 目（含贴目 ' + terrNum(est && est.komi) + '）· ' + tail
-    }
-
-    /**
-     * 当前局面的形势判断（含领地归属）；没有棋谱时返回 null。
-     * 三处视图共用：盘上领地色块与盘下那行文字都来自它。
-     */
-    function territoryAt(data, upto) {
-      var board = data && data.board && Array.isArray(data.board.moves) ? data.board : null
-      if (board === null) return null
-      return estimateTerritory(boardAt(board, upto), board.size, board.komi)
+    function territoryPeek(est, players) {
+      if (!est) return null
+      var lead = Number(est.lead) || 0
+      var komi = Number(est.komi) || 0
+      var names = players || {}
+      return {
+        leadText: lead === 0
+          ? '双方持平'
+          : (lead > 0 ? '黑领先 ' : '白领先 ') + terrNum(Math.abs(lead)) + ' 目',
+        komiText: komi === 0 ? '不贴目' : '含贴目 ' + terrNum(komi),
+        blackName: names.black || '黑方',
+        whiteName: names.white || '白方',
+        blackPoints: terrNum(est.blackPoints),
+        whitePoints: terrNum(est.whitePoints),
+        // 黑方提子 = 吃掉的白子 + 被判死的白子
+        blackCaptures: (Number(est.capturedWhite) || 0) + (Number(est.deadWhite) || 0),
+        whiteCaptures: (Number(est.capturedBlack) || 0) + (Number(est.deadBlack) || 0),
+      }
     }
 
     /**
@@ -536,10 +521,10 @@ window.__ModuleLoader__.load({
      * @param {string} [opts.hintLabel] 首选点旁的信息文本（胜率等）
      * @param {{black?:string,white?:string,blackRank?:string,whiteRank?:string}} [opts.players] 棋手
      *        ——名字与段位画在棋盘上沿（用户 2026-09-15：所有棋盘都要有黑方白方的名字）
-     * @param {boolean} [opts.showTerritory] 是否叠加领地显示（默认叠加；false 时整层不画）
-     * @param {object} [opts.territory] 预算好的领地归属（estimateTerritory 的返回值）；
-     *        省略时按 opts.komi 现算 —— 三处视图传入共享的那一份，省一次重算
-     * @param {number} [opts.komi] 贴目（现算领地时要用；数子法里算给白方）
+     * @param {boolean} [opts.showTerritory] 是否叠加形势判断的地盘色块（默认叠加；
+     *        false 时整层不画；死子方块同属这一层）
+     * @param {object} [opts.territory] 宿主判好的三档图（territoryAt 的返回值）；
+     *        缺省时整层不画 —— 客户端**没有**自己的判定算法，不做任何估算
      * @param {function} [opts.onPick] 点击交叉点回调 (x, y)
      * @returns {object} React 元素
      */
@@ -615,21 +600,19 @@ window.__ModuleLoader__.load({
         }, String(size - i)))
       }
 
-      // 领地显示（简易形势判断，Lizzieyzy 的领地视图同款做法）：只标空点——
-      // 只挨黑子/只挨白子的空点各画一个小方块，单官不画。画在棋子之前，
-      // 这样变化图、问题手那些记号仍然压在它上面。showTerritory=false 时整层不画。
-      if (opts.showTerritory !== false) {
-        var est = opts.territory;
-        if (est === null || est === undefined) {
-          est = estimateTerritory(grid, size, opts.komi);
-        }
-        var terrSide = step * 0.52;
+      // 形势判断（引擎归属图判出的三档图，Lizzieyzy 的画法）：空点上画 1/2 格宽的
+      // 小方块（黑地深色、白地浅色），未定处留白。画在棋子之前，这样变化图、
+      // 问题手那些记号仍然压在它上面。死子（棋子落在对方区域里）另有一趟，
+      // 画在**棋子之后**——要盖在那颗子上才看得见（见下面的死子趟）。
+      var terrCells = opts.showTerritory !== false && opts.territory ? opts.territory.cells : null;
+      var terrSide = step * 0.52;
+      if (terrCells) {
         for (var ty = 0; ty < size; ty++) {
           for (var tx = 0; tx < size; tx++) {
-            var tv = est.owner[ty * size + tx];
+            var ti = ty * size + tx;
+            var tv = terrCells[ti];
             if (tv !== 1 && tv !== 2) continue;
-            // 只标**空点**：owner 数组里棋子也记着自己的颜色，落子处不该再叠方块
-            if (grid[ty * size + tx] !== 0) continue;
+            if (grid[ti] !== 0) continue; // 棋子上的方块归死子那一趟管
             var tBlack = tv === 1;
             kids.push(React.createElement('rect', {
               key: 'terr' + tx + '_' + ty,
@@ -659,6 +642,32 @@ window.__ModuleLoader__.load({
             stroke: isBlack ? 'none' : '#111111',
             strokeWidth: isBlack ? 0 : Math.max(0.12, radius / 16),
           }))
+        }
+      }
+
+      // 死子（Lizzieyzy 的做法）：棋子落在对方区域里时，在**这颗子上**盖对方颜色的
+      // 小方块。方块比棋子小一圈，底下那颗子还看得见 —— 一眼就知道"这颗被吃了"。
+      if (terrCells) {
+        for (var dy = 0; dy < size; dy++) {
+          for (var dx = 0; dx < size; dx++) {
+            var di = dy * size + dx;
+            var dv = terrCells[di];
+            var dStone = grid[di];
+            if (dStone !== 1 && dStone !== 2) continue;
+            if (dv !== 1 && dv !== 2) continue;
+            if ((dStone === 1) === (dv === 1)) continue; // 自己人的方块不盖
+            var dBlack = dv === 1;
+            kids.push(React.createElement('rect', {
+              key: 'dead' + dx + '_' + dy,
+              className: 'dgs-terr dgs-terr-dead',
+              x: pos(dx) - terrSide / 2, y: pos(dy) - terrSide / 2,
+              width: terrSide, height: terrSide,
+              fill: dBlack ? TERR_BLACK : TERR_WHITE,
+              stroke: dBlack ? 'none' : TERR_WHITE_STROKE,
+              strokeWidth: dBlack ? 0 : 0.12,
+              pointerEvents: 'none',
+            }));
+          }
         }
       }
 
@@ -1050,23 +1059,180 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 盘下的「简易形势判断」一行（三处视图共用）。
-     *
-     * 领地显示关掉时整行也不显示 —— 盘上已经没色块了，留一行孤立数字只会让人
-     * 以为哪里漏画了。空盘（一颗子都没有）同样不显示：那时全是单官，没有形势可言。
-     *
-     * @param {object} data /go-sensei/review 的 data
-     * @param {number} upto 当前手数
-     * @returns {object|null} React 元素；没有棋谱或该层关掉时 null
+     * 「形势判断」是**独占模式**（用户 2026-09-19 定案）：
+     *   · 默认什么都不显示（地盘与浮窗都关着）
+     *   · 按下控制条上的按钮 → 只留地盘 + 浮窗，讲解点 / 恶手标记全部隐去
+     *   · × 掉浮窗（或再按一次按钮）→ 恢复到**按下按钮之前**的显示状态
+     * 所以进模式时把三个图例开关存进 territoryPrev，退出时原样放回。
      */
-    function territoryLine(data, upto) {
-      if (senseiStore.showTerritory === false) return null
-      var est = territoryAt(data, upto)
-      if (est === null) return null
-      if (est.blackStones + est.whiteStones === 0) return null
-      return React.createElement('div', { className: 'dgs-terrline' },
-        React.createElement('span', { className: 'dgs-terr-tag' }, '简易形势判断：'),
-        React.createElement('span', null, territoryText(est)))
+    function enterTerritory(data, apply) {
+      senseiPatch({
+        territory: true,
+        territoryPrev: {
+          showProblem: senseiStore.showProblem !== false,
+          showNote: senseiStore.showNote !== false,
+          showHint: senseiStore.showHint !== false,
+        },
+        showProblem: false,
+        showNote: false,
+        showHint: false,
+        territoryError: '',
+      })
+      var t = data && data.territory
+      if (!t || t.available !== true) refreshTerritory(data, apply)
+    }
+
+    /** 退出独占模式并把显示状态还原（× 与「再按一次」都走这里）。 */
+    function exitTerritory() {
+      var prev = senseiStore.territoryPrev
+      var fallback = prev === null || prev === undefined
+      senseiPatch({
+        territory: false,
+        territoryPrev: null,
+        territoryBusy: false,
+        territoryError: '',
+        showProblem: fallback ? true : prev.showProblem,
+        showNote: fallback ? true : prev.showNote,
+        showHint: fallback ? true : prev.showHint,
+      })
+    }
+
+    function toggleTerritory(data, apply) {
+      if (senseiStore.territory === true) exitTerritory()
+      else enterTerritory(data, apply)
+    }
+
+    /**
+     * 按需补算并刷新形势判断（带 territory=1 再取一次数据路由）。
+     *
+     * 宿主缺归属图时会当场跑一次引擎（几十秒）再返回 —— 与工具侧 go_draw_diagram
+     * 的 territory 是同一条路径，算完写回副本，以后打开秒出。
+     *
+     * **数据从哪来、回哪去必须跟着调用视图走**：三处视图存放棋谱的位置并不相同 ——
+     * 整页棋盘用共享 store，右侧栏文档预览与对话下方面板各自用 useState。只认 store
+     * 的写法会让后两处报「还没有载入棋谱」（真机踩过：旧棋谱在右侧栏打开、一按按钮
+     * 就出这句），而且就算取到了数据，把响应写回 store 那边也不会重绘。
+     *
+     * @param {object} [data]  调用方自己那份棋谱数据（缺省退回 store）
+     * @param {Function} [apply] 回应数据时怎么交回调用方（缺省写 store）
+     */
+    function refreshTerritory(data, apply) {
+      var current = data || senseiStore.data
+      var target = current && current.path ? current.path : senseiStore.path
+      if (!target) {
+        // 早退也要把 busy 收干净：否则浮窗会永远停在「正在补算…」
+        senseiPatch({ territoryBusy: false, territoryError: '还没有载入棋谱：先读一盘棋再用形势判断。' })
+        return
+      }
+      senseiPatch({ territoryBusy: true, territoryError: '' })
+      fetch('/go-sensei/review?path=' + encodeURIComponent(target) + '&territory=1'
+        + (senseiStore.sessionId ? '&session=' + encodeURIComponent(senseiStore.sessionId) : ''))
+        .then(function (response) { return response.json().catch(function () { return {} }) })
+        .then(function (body) {
+          if (!body || body.ok !== true || !body.data) throw new Error('数据路由没有返回内容')
+          var next = body.data
+          var ok = next.territory && next.territory.available === true
+          var why = next.autoEngine && next.autoEngine.failed
+            ? '补算失败：' + next.autoEngine.failed
+            : '引擎没能给出归属图（未安装引擎，或补算失败）。'
+          if (typeof apply === 'function') apply(next)
+          else senseiPatch({ data: next })
+          senseiPatch({
+            territoryBusy: false,
+            territoryError: ok ? '' : why,
+          })
+        })
+        .catch(function (error) {
+          senseiPatch({
+            territoryBusy: false,
+            territoryError: String(error && error.message ? error.message : error),
+          })
+        })
+    }
+
+    /**
+     * 控制条上的「形势判断」按钮（三处视图共用）。
+     *
+     * 引擎不可用**且**还没有归属数据时禁用并说明原因 —— 不用启发式顶包（用户定案）。
+     */
+    function territoryButton(data, apply) {
+      var t = data && data.territory
+      var hasData = !!(t && t.available === true)
+      var engineReady = !(data && data.engineAvailable === false)
+      var disabled = senseiStore.territory !== true && !hasData && !engineReady
+      var title = senseiStore.territory === true
+        ? '退出形势判断，恢复按下按钮之前的显示'
+        : disabled
+          ? '引擎不可用，无法做形势判断（需要本地 KataGo）'
+          : hasData
+            ? '形势判断：盘上标出黑地/白地（未定留白），并开出数字窗口'
+            : '形势判断：这盘棋还没有归属数据，点开后会当场补算一次（要等几十秒）'
+      return React.createElement('button', {
+        key: 'territory',
+        className: senseiStore.territory === true ? 'dgs-terr-btn dgs-terr-on' : 'dgs-terr-btn',
+        disabled: disabled,
+        title: title,
+        onClick: function () { toggleTerritory(data, apply) },
+      }, '形势判断')
+    }
+
+    /**
+     * 「形势判断」浮窗：盘外、与棋盘**并排**（用户选的摆法），可 × 关掉。
+     * 里面照 Lizzieyzy 的窗口逐项：双方名与目数、双方提子、领先、贴目注明。
+     */
+    /**
+     * 形势判断数字浮窗。
+     *
+     * @param {object} data 调用方（视图）自己那份棋谱数据
+     * @param {number} [upto] 该视图当前看到的手数；缺省才退回共享 store
+     *   —— 右侧栏文档视图与对话下方面板的手数是各自的 useState，
+     *   只读 store 会取到另一手（表现成「盘上有色块、浮窗却说没有归属数据」）。
+     */
+    function territoryCard(data, upto) {
+      if (senseiStore.territory !== true) return null
+      var children = [
+        React.createElement('div', { className: 'dgs-terr-head', key: 'head' },
+          React.createElement('span', { className: 'dgs-terr-title' }, '形势判断'),
+          React.createElement('button', {
+            className: 'dgs-terr-close',
+            title: '关闭（恢复到按下按钮之前的显示）',
+            onClick: function () { exitTerritory() },
+          }, '×')),
+      ]
+      var wrap = function () { return React.createElement('div', { className: 'dgs-terr-card' }, children) }
+      if (senseiStore.territoryBusy === true) {
+        children.push(React.createElement('div', { className: 'dgs-terr-body', key: 'busy' },
+          '正在补算归属图…首次要几十秒（算完写进棋谱，以后秒开）'))
+        return wrap()
+      }
+      if (senseiStore.territoryError) {
+        children.push(React.createElement('div', { className: 'dgs-terr-body', key: 'err' },
+          String(senseiStore.territoryError)))
+        return wrap()
+      }
+      var at = upto === null || upto === undefined ? senseiStore.upto : upto
+      var peek = territoryPeek(territoryAt(data, at), data && data.players)
+      if (!peek) {
+        children.push(React.createElement('div', { className: 'dgs-terr-body', key: 'none' },
+          '这一手还没有归属数据。'))
+        return wrap()
+      }
+      children.push(React.createElement('div', { className: 'dgs-terr-lead', key: 'lead' },
+        peek.leadText,
+        React.createElement('span', { className: 'dgs-terr-komi' }, '（' + peek.komiText + '）')))
+      children.push(React.createElement('div', { className: 'dgs-terr-row', key: 'b' },
+        React.createElement('span', { className: 'dgs-terr-name' }, peek.blackName + '（黑）'),
+        React.createElement('span', { className: 'dgs-terr-num' }, String(peek.blackPoints) + ' 目')))
+      children.push(React.createElement('div', { className: 'dgs-terr-row', key: 'w' },
+        React.createElement('span', { className: 'dgs-terr-name' }, peek.whiteName + '（白）'),
+        React.createElement('span', { className: 'dgs-terr-num' }, String(peek.whitePoints) + ' 目')))
+      children.push(React.createElement('div', { className: 'dgs-terr-row', key: 'cap' },
+        React.createElement('span', { className: 'dgs-terr-name' }, '提子'),
+        React.createElement('span', { className: 'dgs-terr-num' },
+          '黑 ' + peek.blackCaptures + ' · 白 ' + peek.whiteCaptures)))
+      children.push(React.createElement('div', { className: 'dgs-terr-foot', key: 'foot' },
+        '目数＝活子＋地；提子含吃掉的与判死的，不重复计入目数'))
+      return wrap()
     }
 
     /**
@@ -1119,12 +1285,19 @@ window.__ModuleLoader__.load({
       // 再切回来时 dock 是重新挂载的——不共享的话用户每次回来都要再点一次「展开」。
       open: false,
       follow: true,
-      // 盘上标注的开关（三处视图共享）：问题手色点 / 讲解小方点 / AI 首选与变化图 /
-      // 领地显示（简易形势判断）。四个都默认开 —— 它们是讲解的主体；关掉是为了让盘面干净地看棋形。
+      // 盘上标注的开关（三处视图共享）：问题手色点 / 讲解小方点 / AI 首选与变化图。
+      // 三个都默认开 —— 它们是讲解的主体；关掉是为了让盘面干净地看棋形。
       showProblem: true,
       showNote: true,
       showHint: true,
-      showTerritory: true,
+      // 形势判断是**独占模式**（默认关）：开着时只留地盘＋浮窗，上面三个开关被临时
+      // 压成 false，退出时按 territoryPrev 原样还原（用户 2026-09-19 定案）。
+      territory: false,
+      territoryPrev: null,
+      territoryBusy: false,
+      territoryError: '',
+      // 当前会话 id（形势判断按需补算时要带上：宿主的路由按会话校验来源）
+      sessionId: '',
       // 两条曲线（胜率 / 目差，统一黑方视角）的展开态：三处视图同步，
       // 缺省展开（曲线本身就是这次新增的主角，收起只是"想让面板短一点"时的选择）。
       curveWinrate: true,
@@ -1182,13 +1355,6 @@ window.__ModuleLoader__.load({
         return React.createElement('svg', common,
           React.createElement('circle', { cx: 5, cy: 5, r: 3.4, fill: 'none', stroke: color, strokeWidth: 1.6 }))
       }
-      // 领地：黑地/白地各半的小方块（一个色样要同时说清两种归属）
-      if (kind === 'terr') {
-        return React.createElement('svg', common,
-          React.createElement('rect', { x: 1.6, y: 2, width: 3.4, height: 6, fill: TERR_BLACK }),
-          React.createElement('rect', { x: 5, y: 2, width: 3.4, height: 6, fill: TERR_WHITE,
-            stroke: TERR_WHITE_STROKE, strokeWidth: 0.6 }))
-      }
       return React.createElement('svg', common,
         React.createElement('circle', { cx: 5, cy: 5, r: 3.4, fill: color }))
     }
@@ -1208,8 +1374,6 @@ window.__ModuleLoader__.load({
         hint: '棋谱写回注释的手（左上角小方点），只标已经下到的' },
       { key: 'showHint', kind: 'ring', color: BEST_RING, label: 'AI 首选 / 变化图',
         hint: '每一手（含讲解点）改下哪里：青圆蓝圈＝首选，橙底数字＝它的胜率，之后每手一颗半透明棋子、正中是它在这条变化里的序号（2、3…，黑棋白字）' },
-      { key: 'showTerritory', kind: 'terr', color: TERR_BLACK, label: '领地 / 形势判断',
-        hint: '简易形势判断：只挨黑子/只挨白子的空点各画一个小方块（黑地深色、白地浅色），盘下给出简易点目。是启发式估算（不提死子、不判双活），不是引擎的目差' },
     ]
 
     function markerKeyRow() {
@@ -1438,6 +1602,17 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 曲线在**独占模式的形势判断**开着时让位（用户 2026-09-20 要求）。
+     *
+     * 形势判断的棋盘 + 数字浮窗要占横向空间，与右列的曲线互相挤；这时候把两条曲线
+     * 收起来，专看地盘与数字。× 掉浮窗即恢复（三处视图共用这一个开关）。
+     */
+    function curvesForView(data, cur, onSeek) {
+      if (senseiStore.territory === true) return null
+      return curvesView(data, cur, onSeek)
+    }
+
+    /**
      * 两条曲线（胜率 + 目差）。宿主没给 curve 数据（老版本/纯棋理）时返回 null。
      * @param {object} data /go-sensei/review 的 data
      * @param {number} cur 当前手数
@@ -1601,6 +1776,8 @@ window.__ModuleLoader__.load({
             senseiPatch({
               data: next, path: wanted,
               upto: worst > 0 ? Math.min(worst, nextTotal) : nextTotal,
+              // 记下会话 id：形势判断按需补算时要带上它，宿主才能按会话解析写回的沙箱策略
+              ...(pageSessionId ? { sessionId: pageSessionId } : {}),
             })
           })
           .catch(function () { /* 下一轮再试 */ })
@@ -1670,6 +1847,7 @@ window.__ModuleLoader__.load({
       }
 
       var ctl = React.createElement('div', { className: 'dgs-ctl' },
+        territoryButton(data),
         React.createElement('button', { onClick: function () { senseiPatch({ upto: 0 }) }, title: '回到开局' }, '⏮'),
         React.createElement('button', { onClick: function () { senseiPatch({ upto: Math.max(0, cur - 1) }) }, title: '上一手' }, '◀'),
         React.createElement('button', { onClick: function () { senseiPatch({ upto: Math.min(total, cur + 1) }) }, title: '下一手' }, '▶'),
@@ -1734,17 +1912,22 @@ window.__ModuleLoader__.load({
         )
       })
 
+      // 形势判断独占模式：右列（曲线 + 问题手清单）整块让位，把横向空间交给
+      // 地盘与数字浮窗（用户 2026-09-20 要求）。× 掉浮窗即恢复原样。
+      var terrFocus = senseiStore.territory === true
+
       return React.createElement('div', { className: 'dgs-page', 'data-dgs': '' }, head,
         copied === '' ? null : React.createElement('div', { className: 'dgs-ok' }, copied),
-        React.createElement('div', { className: 'dgs-page-body' },
+        React.createElement('div', { className: terrFocus ? 'dgs-page-body dgs-terr-focus' : 'dgs-page-body' },
           React.createElement('div', { className: 'dgs-page-board' },
+            React.createElement('div', { className: 'dgs-board-row' },
             renderBoard({
               board: board, upto: cur, problem: problemPointOf(problem, curMove),
               players: data.players,
               marks: problemMarks, pv: pvPoints,
               noteMoves: noteMoves, showProblem: senseiStore.showProblem, showNote: senseiStore.showNote, showHint: senseiStore.showHint,
-              // 领地显示（简易形势判断）：与盘下那行文字同源，一份算、两处用
-              showTerritory: senseiStore.showTerritory,
+              // 形势判断：独占模式下才有色块；数据由宿主判好，这边只画
+              showTerritory: senseiStore.territory === true,
               territory: territoryAt(data, cur),
               hintLabel: hint && hint.label ? hint.label : '',
               // 整页也没有输入框：点击交叉点改为复制追问语（与右侧栏一致）
@@ -1757,9 +1940,11 @@ window.__ModuleLoader__.load({
                   function () { setCopied('复制失败：请手动选中') })
               },
             }),
+            // 形势判断浮窗：盘外、与棋盘并排（用户选的摆法）；没开时是 null，不占位
+            // 手数必须用**这个视图**的（整页用 store、文档/面板用各自的 useState）
+            territoryCard(data, cur)),
             // 控件条贴着棋盘下沿（打谱软件的习惯），不再占掉顶部一整行
             ctl,
-            territoryLine(data, cur),
             React.createElement('div', { className: 'dgs-note' },
               problem !== null
                 // 停在一处问题手上：把"实战下在哪、AI 想下哪、之后怎么走"一次念全
@@ -1781,8 +1966,8 @@ window.__ModuleLoader__.load({
                     ? '● 盘上色点＝问题手（紫＞红＞橙）：点右边任意一行跳过去'
                     : '未发现明显问题手'),
           ),
-          React.createElement('div', { className: 'dgs-page-side' },
-            curvesView(data, cur, function (n) { senseiPatch({ upto: n }) }),
+          terrFocus ? null : React.createElement('div', { className: 'dgs-page-side' },
+            curvesForView(data, cur, function (n) { senseiPatch({ upto: n }) }),
             React.createElement('div', { className: 'dgs-page-list' },
               list.length === 0
                 ? React.createElement('div', { className: 'dgs-sub' }, '这盘棋没有发现问题手')
@@ -1910,6 +2095,8 @@ window.__ModuleLoader__.load({
             setBusy(false)
             if (body && body.ok === true) {
               setData(body.data)
+              // 记下会话 id：形势判断按需补算时要带上它（宿主按会话解析写回的沙箱策略）
+              if (sessionId) senseiPatch({ sessionId: sessionId })
               // 载入后停在哪一手：有问题手就停在**最严重的那一手**（讲解时最想看的就是
               // 它，盘上的标记也才立即可见），没有问题手才停在末手。
               var board = body.data && body.data.board ? body.data.board : null
@@ -2071,9 +2258,12 @@ window.__ModuleLoader__.load({
         kids.push(React.createElement('div', { className: 'dgs-err', key: 'follownote' }, followNote))
       }
 
-      // 形势判断也在这块面板露一行：这里没有棋盘（棋盘在左侧栏整页），
-      // 但"现在谁领先、大概多少"是一眼就想知道的事。
-      kids.push(territoryLine(data, cur))
+      // 形势判断：按钮 + （开着时的）数字浮窗。
+      // 这块面板没有棋盘（棋盘在左侧栏整页／右侧栏），所以这里只有按钮与数字；
+      // 一旦按下，三处视图同步进入独占模式、棋盘那边就出地盘色块。
+      kids.push(React.createElement('div', { className: 'dgs-terr-wrap', key: 'terr' },
+        territoryButton(data, setData),
+        territoryCard(data, cur)))
 
       if (board === null && data === null) {
         kids.push(React.createElement('div', { className: 'dgs-sub', key: 'noboard' },
@@ -2100,7 +2290,8 @@ window.__ModuleLoader__.load({
 
         // 曲线与棋盘都在左侧栏「Sensei 棋盘」整页里看；这里也给两条曲线，
         // 因为"这盘棋大势怎么走的"是一眼就该看到的东西（点图可定位到那一手）。
-        var curves = curvesView(data, cur, function (n) { setUpto(n) })
+        // 独占模式的形势判断开着时让位（见 curvesForView）。
+        var curves = curvesForView(data, cur, function (n) { setUpto(n) })
         if (curves !== null) kids.push(React.createElement('div', { key: 'curves' }, curves))
 
         var listEl = null
@@ -2266,6 +2457,8 @@ window.__ModuleLoader__.load({
             var worst = list.length > 0 && typeof list[0].moveNumber === 'number' ? list[0].moveNumber : 0
             setData(next)
             setUpto(worst > 0 ? Math.min(worst, total) : total)
+            // 记下会话 id：形势判断按需补算时要带上它（宿主按会话解析写回的沙箱策略）
+            if (sessionId) senseiPatch({ sessionId: sessionId })
           })
           .catch(function (error) {
             if (!alive) return
@@ -2407,14 +2600,15 @@ window.__ModuleLoader__.load({
               marks: problemMarks,
               pv: pvPoints,
               noteMoves: noteMoves, showProblem: senseiStore.showProblem, showNote: senseiStore.showNote, showHint: senseiStore.showHint,
-              // 领地显示（简易形势判断）：与盘下那行文字同源
-              showTerritory: senseiStore.showTerritory,
+              // 形势判断：独占模式下才有色块；数据由宿主判好，这边只画
+              showTerritory: senseiStore.territory === true,
               territory: territoryAt(data, cur),
               hintLabel: hint && hint.label ? hint.label : '',
               onPick: askPointDoc,
             })),
         ]
         var ctl = React.createElement('div', { className: 'dgs-ctl', key: 'ctl' },
+          territoryButton(data, setData),
           React.createElement('button', { onClick: function () { setUpto(0) }, title: '回到开局' }, '⏮'),
           React.createElement('button', { onClick: function () { setUpto(Math.max(0, cur - 1)) }, title: '上一手' }, '◀'),
           React.createElement('button', { onClick: function () { setUpto(Math.min(total, cur + 1)) }, title: '下一手' }, '▶'),
@@ -2448,11 +2642,14 @@ window.__ModuleLoader__.load({
             onChange: function (event) { setUpto(Number(event.target.value)) },
           }))
         main.push(ctl)
-        main.push(territoryLine(data, cur))
         // 胜率 / 目差曲线（可折叠）＝右列：右侧栏够宽就与棋盘并排，
         // 拖窄了自动折回棋盘下方（用户 2026-09-14 选的方案 A）
-        var docCurves = curvesView(data, cur, function (n) { setUpto(n) })
+        var docCurves = curvesForView(data, cur, function (n) { setUpto(n) })
         var inner = [React.createElement('div', { className: 'dgs-doc-main', key: 'main' }, main)]
+        // 形势判断浮窗：盘外、与棋盘并排；没开时不占位。
+        // 手数用本视图的 cur（右侧栏文档视图的手数是自己的 useState，不跟共享 store）
+        var docTerritory = territoryCard(data, cur)
+        if (docTerritory !== null) inner.push(docTerritory)
         if (docCurves !== null) inner.push(docCurves)
         kids.push(React.createElement('div', { className: 'dgs-doc-inner', key: 'inner' }, inner))
         // AI 首选与变化图：问题手要说，讲解点（未必是问题手）同样要说
@@ -2593,10 +2790,13 @@ window.__ModuleLoader__.load({
       curveDomain: curveDomain,
       curveValueText: curveValueText,
       curvesView: curvesView,
-      // 简易形势判断（领地估算）：与宿主 src/territory.js 同口径，单测两边都钉住
-      estimateTerritory: estimateTerritory,
-      territoryText: territoryText,
+      // 形势判断：客户端只解码宿主判好的三档图（判定算法不在这一端，漂移无从发生）
+      unpackTerritory: unpackTerritory,
       territoryAt: territoryAt,
+      territoryPeek: territoryPeek,
+      territoryButton: territoryButton,
+      territoryCard: territoryCard,
+      toggleTerritory: toggleTerritory,
       focusPointer: focusPointer,
       // 两份 UI 的共享状态：单测直接摆好它再渲染整页棋盘
       //（React 桩把 useEffect 实现成空操作，所以发布/订阅在测试里不参与）

@@ -9,11 +9,12 @@
 //   4. 服务端 /go-sensei/review 路由：正常返回、相对路径、缺参/缺失/目录拒绝。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, rmSync, mkdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { apply, Config } from '../index.mjs'
-import { injectComments } from '../src/sgf.js'
+import { injectComments, injectAnalysis, parseGame, decodeBuffer, compactBoard } from '../src/sgf.js'
+import { packTerritory, estimateTerritorySeries, replayTo } from '../src/territory.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const fixture = (name) => join(here, 'fixtures', name)
@@ -372,9 +373,11 @@ test('client: 整页排版——棋盘在左、曲线与列表在右、讲解整
   assert.ok(body && foot, '主体与底部分成两块')
   assert.deepEqual(kids(body).map(cls), ['dgs-page-board', 'dgs-page-side'], '左＝棋盘列、右＝曲线+问题手列')
 
-  // 左列：棋盘 + 控件条 + 状态行；讲解不再挤在这一列里
+  // 左列：棋盘（与形势判断浮窗并排一行）+ 控件条 + 状态行；讲解不再挤在这一列里
   const boardCol = kids(body)[0]
-  assert.ok(kids(boardCol).some((n) => n.type === 'svg' && cls(n) === 'dgs-board'), '左列是棋盘')
+  const boardRow = pick(kids(boardCol), 'dgs-board-row')
+  assert.ok(boardRow, '棋盘与形势判断浮窗并排一行')
+  assert.ok(kids(boardRow).some((n) => n.type === 'svg' && cls(n) === 'dgs-board'), '左列是棋盘')
   assert.ok(pick(kids(boardCol), 'dgs-ctl'), '控件条贴着棋盘下沿')
   assert.ok(pick(kids(boardCol), 'dgs-note'), '实战/AI 首选/后续状态行')
   assert.ok(!pick(walk(boardCol), 'dgs-comment'), '讲解不能挤在棋盘那一列')
@@ -585,11 +588,16 @@ function makeFsStub() {
       const { readFileSync } = await import('node:fs')
       return readFileSync(target.displayPath)
     },
+    // 面板路由的「形势判断」会把归属图写回副本，桩里得真写盘，否则测不到落盘那条路
+    async writeText(target, content) {
+      const { writeFileSync } = await import('node:fs')
+      writeFileSync(target.displayPath, content, 'utf8')
+    },
   }
 }
 
 /** 路由测试用的完整 ctx 桩：apply() 需要 systemPrompt/tools/fs/on，路由需要 webServer。 */
-function makeRouteCtx({ withWebServer = true, sessions = null, connection = { requestRejection: () => undefined } } = {}) {
+function makeRouteCtx({ withWebServer = true, sessions = null, connection = { requestRejection: () => undefined }, services = {} } = {}) {
   const routes = []
   const registered = new Map()
   const sections = []
@@ -642,6 +650,8 @@ function makeRouteCtx({ withWebServer = true, sessions = null, connection = { re
       // 准入闸门：面板路由与 GUI 的 /api 共用 connection.requestRejection()。
       // 路由行为用例默认放行；闸门本身的行为见 test/panel-guard.test.mjs。
       if (name === 'connection') return connection
+      // 额外服务（subprocess / sandboxPolicy …）：按需注入，不注入就是"服务缺席"
+      if (Object.prototype.hasOwnProperty.call(services, name)) return services[name]
       return undefined
     },
   }
@@ -2012,10 +2022,12 @@ test('client: 右侧栏：控件与棋盘同容器（不偏移）、点交叉点
 })
 
 // ---------------------------------------------------------------------------
-// 领地显示 / 简易形势判断（用户 2026-09-19：参考 Lizzieyzy 加形势判断与领地显示）
+// 形势判断（用户 2026-09-19 定案：引擎归属图 + 照 Lizzieyzy 的判定规则）
 //
-// 分两层钉住：① 纯函数与宿主 src/territory.js 同口径（只挨单色才算地、单官中立）；
-// ② 整页棋盘上画出色块、盘下给出一行点目，且图例开关能整层关掉。
+// 客户端**只解码、只画**：判定（阈值 0.4 / 四邻过滤 / 死子）与那几行数字都由宿主
+// 算好随数据路由下发。所以这里钉四件事：
+//   ① 解码与宿主 packTerritory 对齐；② 独占模式的进出与恢复；
+//   ③ 盘上色块与浮窗真的按数据画出来；④ 没有数据时不做任何估算。
 // ---------------------------------------------------------------------------
 
 /** 9 路「黑圈围住 (1,1) + 白圈围住 (5,5)」的盘面数据（摆子形式，不用手顺摆）。 */
@@ -2030,176 +2042,529 @@ const RING_BOARD_9 = {
   },
 }
 
-test('client: 简易形势判断与宿主同口径（只挨单色才算地、单官中立）', () => {
+/** 三档图（0 无 / 1 黑 / 2 白）：黑地 (1,1)、白地 (5,5)。 */
+function cells9() {
+  const cells = new Uint8Array(81)
+  cells[1 * 9 + 1] = 1
+  cells[5 * 9 + 5] = 2
+  return cells
+}
+
+/** 数据路由下发的 territory 形状（宿主 compactTerritory 的产物）。 */
+function territoryPayload(cells, extra) {
+  return {
+    available: true,
+    komi: 0,
+    step: [{
+      map: packTerritory(cells),
+      blackPoints: 9,
+      whitePoints: 10,
+      lead: -1,
+      capturedBlack: 0,
+      capturedWhite: 2,
+      deadBlack: 0,
+      deadWhite: 1,
+      ...(extra || {}),
+    }],
+  }
+}
+
+test('client: 形势判断解码宿主的三档图，浮窗数字含吃掉的与判死的', () => {
   const { plugin } = loadClient()
-  const { estimateTerritory, territoryText, territoryAt } = plugin.__internals
-  assert.equal(typeof estimateTerritory, 'function', '__internals 应暴露 estimateTerritory')
+  const { unpackTerritory, territoryAt, territoryPeek } = plugin.__internals
+  const cells = cells9()
+  const decoded = unpackTerritory(packTerritory(cells), 81)
+  assert.equal(decoded[1 * 9 + 1], 1, '黑地解回来还是黑地')
+  assert.equal(decoded[5 * 9 + 5], 2, '白地解回来还是白地')
+  assert.equal(unpackTerritory('', 81), null, '空串解不出来（调用方据此不画）')
 
-  const size = 9
-  const grid = new Array(size * size).fill(0)
-  const ring = (cx, cy, color) => {
-    for (const [dx, dy] of [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]) {
-      grid[(cy + dy) * size + (cx + dx)] = color
-    }
+  const data = {
+    board: RING_BOARD_9,
+    territory: territoryPayload(cells),
+    players: { black: '甲', white: '乙' },
   }
-  ring(1, 1, 1)
-  ring(5, 5, 2)
-  const est = estimateTerritory(grid, size, 0)
-  assert.equal(est.owner[1 * size + 1], 1, '只挨黑子的空点＝黑地')
-  assert.equal(est.owner[5 * size + 5], 2, '只挨白子的空点＝白地')
-  assert.equal(est.owner[3 * size + 3], 0, '黑白都挨的空点＝单官')
-  assert.equal(est.owner[0], 1, '棋子记自己的颜色（黑子）')
-  assert.equal(est.blackTerritory, 1)
-  assert.equal(est.whiteTerritory, 1)
-  assert.equal(est.dame, size * size - 16 - 2)
-  assert.equal(territoryText(est), '黑 9 目 · 白 9 目（含贴目 0）· 盘面两分')
-  // 贴目算给白方：白一领先就写成"白领先"
-  assert.equal(territoryText(estimateTerritory(grid, size, 7.5)),
-    '黑 9 目 · 白 16.5 目（含贴目 7.5）· 白领先 7.5 目')
-  // 空盘没有形势可言 → territoryAt 仍返回对象，但调用方（territoryLine）不显示
-  assert.equal(territoryAt({ board: { size: 19, komi: 0, moves: [], setup: {} } }, 0).blackStones, 0)
-  assert.equal(territoryAt(null, 0), null, '没有棋谱时返回 null')
+  const at = territoryAt(data, 1)
+  assert.equal(at.cells[1 * 9 + 1], 1)
+  assert.equal(territoryAt(data, 0), null, '开局（第 0 手）没有归属数据')
+  assert.equal(territoryAt({ board: RING_BOARD_9 }, 1), null, '没有 territory 字段时返回 null')
+  assert.equal(territoryAt(null, 1), null, '没有棋谱时返回 null')
+
+  const peek = territoryPeek(at, data.players)
+  assert.equal(peek.leadText, '白领先 1 目')
+  assert.equal(peek.komiText, '不贴目')
+  assert.equal(peek.blackName, '甲')
+  assert.equal(peek.whiteName, '乙')
+  assert.equal(peek.blackPoints, 9)
+  // 黑方提子 = 吃掉的 2 + 判死的 1；白方一项都没有
+  assert.equal(peek.blackCaptures, 3)
+  assert.equal(peek.whiteCaptures, 0)
+  assert.equal(territoryPeek(null, null), null, '没有数据时不编数字')
 })
 
-test('client: 整页棋盘——领地色块 + 盘下形势判断，图例开关能整层关掉', () => {
-  const loaded = loadClient()
-  const { senseiPatch } = loaded.plugin.__internals
-  const page = boardPageOf(loaded)
+test('client: 形势判断是独占模式——按下只留地盘与浮窗，× 掉恢复按下前的显示', () => {
+  const { plugin } = loadClient()
+  const { senseiPatch, senseiStore, toggleTerritory, territoryButton } = plugin.__internals
   senseiPatch({
-    data: {
-      path: 'ring.sgf', mode: 'analysis', level: '18K', moveCount: 0, variations: 0,
-      candidates: [], board: RING_BOARD_9,
-    },
-    upto: 0,
-    showTerritory: true,
+    data: { board: RING_BOARD_9, territory: territoryPayload(cells9()) },
+    upto: 1,
+    showProblem: true,
+    showNote: false,
+    showHint: true,
   })
-  const render = () => { loaded.react.reset(); return page({}) }
-  let tree = render()
-  let nodes = walk(tree)
-  let boardSvg = nodes.find((n) => n.type === 'svg' && String(n.props.className || '').includes('dgs-board'))
-  assert.ok(boardSvg, '应画出棋盘')
-  const inBoard = walk(boardSvg)
-  const terrRects = inBoard.filter((n) => n.type === 'rect' && n.props.className === 'dgs-terr')
-  assert.equal(terrRects.length, 2, '两处领地各一个色块（单官不画）')
-  assert.equal(terrRects.filter((n) => n.props.fill === 'rgba(20, 22, 26, 0.62)').length, 1, '一个黑地色块')
-  assert.equal(terrRects.filter((n) => n.props.fill === 'rgba(250, 250, 252, 0.82)').length, 1, '一个白地色块')
-  assert.equal(
-    inBoard.filter((n) => n.type === 'rect' && n.props.className === 'dgs-terr'
-      && n.props.key === 'terr1_1').length,
-    1,
-    '黑地落在被围住的 (1,1)',
-  )
-  let text = texts(nodes).join('|')
-  assert.ok(text.includes('简易形势判断：'), text)
-  assert.ok(text.includes('黑 9 目 · 白 9 目（含贴目 0）· 盘面两分'), text)
+  toggleTerritory()
+  assert.equal(senseiStore.territory, true)
+  assert.equal(senseiStore.showProblem, false, '进模式后问题手色点隐去')
+  assert.equal(senseiStore.showNote, false)
+  assert.equal(senseiStore.showHint, false, 'AI 首选 / 变化图也隐去')
+  assert.deepEqual(senseiStore.territoryPrev, { showProblem: true, showNote: false, showHint: true })
 
-  // 图例开关：关掉后盘上色块与盘下那行一起消失（不留"漏画了"的错觉）
-  const chip = walk(tree).find((n) => n.type === 'button'
-    && String(n.props.className || '').includes('dgs-keyitem')
-    && texts(walk(n)).join('|').includes('领地 / 形势判断'))
-  assert.ok(chip, '图例里应有「领地 / 形势判断」开关')
-  chip.props.onClick()
-  tree = render()
-  nodes = walk(tree)
-  boardSvg = nodes.find((n) => n.type === 'svg' && String(n.props.className || '').includes('dgs-board'))
-  assert.equal(walk(boardSvg).filter((n) => n.props.className === 'dgs-terr').length, 0, '关掉后不画色块')
-  assert.ok(!texts(nodes).join('|').includes('简易形势判断：'), '关掉后也不留那行数字')
+  // 按钮此时是"已按下"态；再点一次等于退出
+  const btn = territoryButton(senseiStore.data)
+  assert.equal(btn.props.disabled, false)
+  assert.ok(String(btn.props.className).includes('dgs-terr-on'))
+  toggleTerritory()
+  assert.equal(senseiStore.territory, false)
+  assert.equal(senseiStore.showProblem, true, '恢复按下按钮之前：本来是开的')
+  assert.equal(senseiStore.showNote, false, '恢复按下按钮之前：本来是关的')
+  assert.equal(senseiStore.showHint, true)
+  assert.equal(senseiStore.territoryPrev, null)
 
-  // 再点回来能恢复
-  const chipAgain = walk(tree).find((n) => n.type === 'button'
-    && String(n.props.className || '').includes('dgs-keyitem')
-    && texts(walk(n)).join('|').includes('领地 / 形势判断'))
-  chipAgain.props.onClick()
-  tree = render()
-  assert.equal(
-    walk(tree).filter((n) => n.props.className === 'dgs-terr').length,
-    2,
-    '再点一次应重新显示领地',
-  )
-
-  senseiPatch({ data: null, upto: 0, showTerritory: true })
+  // 引擎不可用且还没有归属数据 → 按钮禁用（用户定案：不用启发式顶包）
+  const off = territoryButton({ board: RING_BOARD_9, territory: { available: false }, engineAvailable: false })
+  assert.equal(off.props.disabled, true)
+  assert.ok(String(off.props.title).includes('引擎不可用'))
 })
 
-test('client: renderBoard 的 showTerritory=false 整层不画（老调用方行为不变）', () => {
-  const { plugin, react } = loadClient()
-  const { renderBoard, estimateTerritory } = plugin.__internals
-  const grid = new Array(9 * 9).fill(0)
-  for (const [dx, dy] of [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]) {
-    grid[(1 + dy) * 9 + (1 + dx)] = 1
+// 真机回归（2026-09-20）：旧棋谱在**右侧栏文档预览**里打开时，一按「形势判断」就报
+// 「还没有载入棋谱」。根因是按钮收下了视图自己的数据，点击却去共享 store 里找棋谱 ——
+// 而右侧栏与对话下方面板各自用 useState 存数据，store 里是空的。修法是让按钮把
+// 「这份数据 + 交回这份数据的回调」一起带进独占模式与补算请求。
+test('client: 形势判断跟着调用视图的数据走（store 空着也要能用）', async () => {
+  const { plugin } = loadClient()
+  const { toggleTerritory, senseiPatch, senseiStore } = plugin.__internals
+  senseiPatch({
+    data: null, path: '', upto: 0,
+    territory: false, territoryPrev: null, territoryError: '', territoryBusy: false,
+  })
+
+  // ① 真的没有棋谱时：如实提示，并且不要把 busy 卡在 true
+  toggleTerritory()
+  assert.equal(senseiStore.territoryError.includes('还没有载入棋谱'), true)
+  assert.equal(senseiStore.territoryBusy, false, '早退也要收干净 busy')
+  toggleTerritory() // 退出独占模式，回到干净状态
+
+  // ② store 里仍然没有棋谱，但调用方（右侧栏文档视图）自己有一份
+  const viewData = {
+    path: 'C:/w/old.sgf', board: RING_BOARD_9, moveCount: 1,
+    territory: { available: false }, engineAvailable: true,
   }
-  grid[8 * 9 + 8] = 2
-  const est = estimateTerritory(grid, 9, 0)
+  const seen = []
+  globalThis.fetch = async (url) => {
+    seen.push(String(url))
+    return { ok: true, json: async () => ({ ok: true, data: { ...viewData, territory: territoryPayload(cells9()) } }) }
+  }
+  let applied = null
+  toggleTerritory(viewData, (next) => { applied = next })
+  assert.equal(senseiStore.territory, true, '进独占模式')
+  await new Promise((r) => setTimeout(r, 20))
+
+  assert.equal(seen.length, 1, '要发一次补算请求')
+  assert.ok(seen[0].includes(encodeURIComponent('C:/w/old.sgf')), `请求要用视图自己的路径：${seen[0]}`)
+  assert.ok(seen[0].includes('territory=1'))
+  assert.ok(applied !== null && applied.territory.available === true, '响应必须交回调用方自己那份')
+  assert.equal(senseiStore.data, null, '不该往没人看的 store 里塞')
+  assert.equal(senseiStore.territoryError, '', '这条路不该报「还没有载入棋谱」')
+  assert.equal(senseiStore.territoryBusy, false)
+})
+
+// 同类回归第二例（2026-09-20）：盘上已经铺满归属色块，浮窗却说「这一手还没有归属数据」。
+// 根因一样是"只认共享 store"——浮窗用 senseiStore.upto 取局面，而右侧栏文档视图的当前
+// 手数是它自己的 useState，于是取到了另一手（那一手没有数据）。棋盘那边用的是 cur，正常。
+test('client: 浮窗用调用视图的当前手数（盘上有色块、数字也得跟上）', () => {
+  const { plugin } = loadClient()
+  const { senseiPatch, senseiStore, territoryCard } = plugin.__internals
+  const data = {
+    board: { size: 9, moves: [], setup: [] },
+    territory: territoryPayload(cells9()),
+    players: { black: '甲', white: '乙' },
+  }
+  // 共享 store 停在开局，而调用视图看到的是第 1 手（归属数据只在第 1 手之后）
+  senseiPatch({
+    data: null, upto: 0,
+    territory: true, territoryPrev: null, territoryError: '', territoryBusy: false,
+  })
+
+  const viaStore = JSON.stringify(territoryCard(data))
+  assert.ok(viaStore.includes('还没有归属数据'), '只读 store 就会取到没数据的那一手（本次 bug 形态）')
+
+  const viaView = JSON.stringify(territoryCard(data, 1))
+  assert.ok(!viaView.includes('还没有归属数据'), '用视图自己的手数就该出数字')
+  assert.ok(viaView.includes('9 目'), '黑 9 目（夹具里的固定数字）')
+  assert.ok(viaView.includes('提子'), '提子那行也在')
+})
+
+test('client: 整页棋盘在形势判断模式下画地盘色块与浮窗', () => {
+  const loaded = loadClient()
+  const { senseiPatch, senseiStore, toggleTerritory } = loaded.plugin.__internals
+  const page = boardPageOf(loaded)
+  // 摆子盘 + 一手（好让"第 1 手之后"有局面可取）
   const board = {
     size: 9,
     komi: 0,
-    moves: [],
-    setup: {
-      black: [[0, 0], [1, 0], [2, 0], [0, 1], [2, 1], [0, 2], [1, 2], [2, 2]],
-      white: [[8, 8]],
+    handicap: 0,
+    moves: [{ c: 'B', x: 0, y: 8 }],
+    setup: RING_BOARD_9.setup,
+  }
+  senseiPatch({
+    data: {
+      path: 'ring.sgf', mode: 'analysis', level: '18K', moveCount: 1, variations: 0,
+      candidates: [], board,
+      territory: territoryPayload(cells9()),
+      players: { black: '甲', white: '乙' },
+      engineAvailable: true,
     },
+    upto: 1,
+    showProblem: true,
+    showNote: true,
+    showHint: true,
+  })
+  loaded.react.reset()
+  let tree = page({})
+  let nodes = walk(tree)
+  // 还没按按钮：盘上不该有色块、也不该有浮窗
+  let boardSvg = nodes.find((n) => n.type === 'svg' && String(n.props.className || '').includes('dgs-board'))
+  assert.ok(boardSvg, '应画出棋盘')
+  assert.equal(walk(boardSvg).filter((n) => n.props.className === 'dgs-terr').length, 0, '默认不显示地盘')
+
+  // 按控制条上的「形势判断」
+  const btn = nodes.find((n) => n.type === 'button'
+    && String(n.props.className || '').includes('dgs-terr-btn'))
+  assert.ok(btn, '控制条里应有「形势判断」按钮')
+  btn.props.onClick()
+  loaded.react.reset()
+  tree = page({})
+  nodes = walk(tree)
+  boardSvg = nodes.find((n) => n.type === 'svg' && String(n.props.className || '').includes('dgs-board'))
+  const terrRects = walk(boardSvg).filter((n) => n.props.className === 'dgs-terr')
+  assert.equal(terrRects.length, 2, '两处地各一个色块')
+  assert.equal(terrRects.filter((n) => n.props.fill === 'rgba(20, 22, 26, 0.62)').length, 1, '一处黑地')
+  assert.equal(terrRects.filter((n) => n.props.fill === 'rgba(250, 250, 252, 0.82)').length, 1, '一处白地')
+  const text = texts(nodes).join('|')
+  assert.ok(text.includes('形势判断'), text)
+  assert.ok(text.includes('白领先 1 目') && text.includes('不贴目'), text)
+  assert.ok(text.includes('提子') && text.includes('黑 3 · 白 0'), text)
+
+  // 浮窗上的 × 关掉 → 回到按下按钮之前的显示状态
+  const close = nodes.find((n) => n.type === 'button'
+    && String(n.props.className || '').includes('dgs-terr-close'))
+  assert.ok(close, '浮窗上要有 ×')
+  close.props.onClick()
+  assert.equal(senseiStore.territory, false)
+  assert.equal(senseiStore.showProblem, true)
+  loaded.react.reset()
+  tree = page({})
+  nodes = walk(tree)
+  boardSvg = nodes.find((n) => n.type === 'svg' && String(n.props.className || '').includes('dgs-board'))
+  assert.equal(walk(boardSvg).filter((n) => n.props.className === 'dgs-terr').length, 0, '关掉后不画地盘')
+  assert.ok(!texts(nodes).join('|').includes('白领先 1 目'), '关掉后浮窗也收起来')
+
+  senseiPatch({ data: null, upto: 0, territory: false, territoryPrev: null, territoryError: '' })
+})
+
+// 用户 2026-09-20 要求：形势判断框出来时，右列的曲线（与问题手清单）让位给地盘与浮窗。
+test('client: 形势判断开着时右列让位（曲线与问题手清单收起，浮窗关上就回来）', () => {
+  const loaded = loadClient()
+  const { senseiPatch, senseiStore } = loaded.plugin.__internals
+  const page = boardPageOf(loaded)
+  const data = {
+    path: 'ring.sgf', mode: 'analysis', level: '18K', moveCount: 1, variations: 0,
+    candidates: [], board: { size: 9, komi: 0, handicap: 0, moves: [{ c: 'B', x: 0, y: 8 }], setup: RING_BOARD_9.setup },
+    territory: territoryPayload(cells9()),
+    curve: { winrate: [50, 52], score: [0, -0.5] },
+    players: { black: '甲', white: '乙' },
+    engineAvailable: true,
+  }
+  senseiPatch({ data, upto: 1, territory: false, territoryPrev: null, territoryError: '', territoryBusy: false })
+
+  // 平时：右列在（曲线 + 问题手清单），页面主体不是独占布局
+  loaded.react.reset()
+  let nodes = walk(page({}))
+  const bodyBefore = nodes.find((n) => String(n.props.className || '').includes('dgs-page-body'))
+  assert.ok(bodyBefore, '应有页面主体')
+  assert.ok(!String(bodyBefore.props.className).includes('dgs-terr-focus'))
+  assert.ok(nodes.some((n) => String(n.props.className || '').includes('dgs-page-side')), '平时右列在')
+  assert.ok(nodes.some((n) => String(n.props.className || '').includes('dgs-curves')), '平时曲线在')
+
+  // 进入形势判断：右列整块收起，主体换成独占布局
+  senseiPatch({ territory: true })
+  loaded.react.reset()
+  nodes = walk(page({}))
+  const bodyAfter = nodes.find((n) => String(n.props.className || '').includes('dgs-page-body'))
+  assert.ok(String(bodyAfter.props.className).includes('dgs-terr-focus'), '主体要标出独占布局')
+  assert.ok(!nodes.some((n) => String(n.props.className || '').includes('dgs-page-side')), '右列收起')
+  assert.ok(!nodes.some((n) => String(n.props.className || '').includes('dgs-curves')), '曲线收起')
+  assert.ok(texts(nodes).join('|').includes('形势判断'), '浮窗还在')
+
+  // 关掉浮窗：右列与曲线都回来
+  senseiPatch({ territory: false })
+  loaded.react.reset()
+  nodes = walk(page({}))
+  assert.ok(nodes.some((n) => String(n.props.className || '').includes('dgs-page-side')), '关掉后右列回来')
+  assert.ok(nodes.some((n) => String(n.props.className || '').includes('dgs-curves')), '关掉后曲线回来')
+  senseiPatch({ data: null, upto: 0, territory: false, territoryPrev: null, territoryError: '' })
+})
+
+test('client: renderBoard 没给 territory 就整层不画（客户端不做任何估算）', () => {
+  const { plugin, react } = loadClient()
+  const { renderBoard } = plugin.__internals
+  const board = {
+    size: 9,
+    komi: 0,
+    moves: [{ c: 'B', x: 0, y: 8 }],
+    setup: RING_BOARD_9.setup,
   }
   react.reset()
+  const none = renderBoard({ board, upto: 1, problem: null, pv: [], onPick: null })
+  assert.equal(walk(none).filter((n) => n.props.className === 'dgs-terr').length, 0, '没有数据不画')
+
+  react.reset()
   const off = renderBoard({
-    board, upto: 0, problem: null, pv: [], territory: est, showTerritory: false, onPick: null,
+    board, upto: 1, problem: null, pv: [],
+    territory: { cells: cells9() }, showTerritory: false, onPick: null,
   })
-  assert.equal(walk(off).filter((n) => n.props.className === 'dgs-terr').length, 0, '关掉就不画')
+  assert.equal(walk(off).filter((n) => n.props.className === 'dgs-terr').length, 0, '整层关掉也不画')
+
   react.reset()
   const on = renderBoard({
-    board, upto: 0, problem: null, pv: [], territory: est, onPick: null,
+    board, upto: 1, problem: null, pv: [],
+    territory: { cells: cells9() }, onPick: null,
   })
   const rects = walk(on).filter((n) => n.props.className === 'dgs-terr')
-  assert.equal(rects.length, 1, '默认叠加：只画被围住的 (1,1) 那一处')
+  assert.equal(rects.length, 2, '两处地各一个色块')
   assert.ok(Math.abs(rects[0].props.x - (8 + 1 * (84 / 8) - (84 / 8) * 0.52 / 2)) < 1e-9,
     '色块画在交叉点上（实际 ' + rects[0].props.x + '）')
 })
 
-test('路由: /go-sensei/diagram?territory=1 叠加领地显示与简易形势判断', async () => {
-  const ctx = makeRouteCtx()
-  apply(ctx, Config(NO_ENGINE_CFG))
-  const route = ctx.routes.find((r) => r.path === '/go-sensei/diagram')
-  const query = '/go-sensei/diagram?path=' + encodeURIComponent(fixture('real-analysis.sgf'))
-    + '&move=106&territory=1'
-  const res = {
-    statusCode: 200,
-    headers: {},
-    setHeader(k, v) { this.headers[k] = v },
-    end(chunk) { this.body = chunk },
+// 造一份**带归属图**的棋谱：把真实棋谱第 106 手的归属判成三档图写进 TP[]，
+// 供路由与工具两条只读路径使用（真实补算要跑引擎，测试里不跑）。
+const TP_FIXTURE = join(here, 'fixtures', '_tmp-territory.sgf')
+function makeTerritoryFixture() {
+  const text = decodeBuffer(readFileSync(fixture('real-analysis.sgf'))).text
+  const game = parseGame(text)
+  const compact = compactBoard(game)
+  const { board } = replayTo(compact, 106)
+  const size = game.info.size
+  // 合成的归属：棋子按自己的颜色，空点左半归黑、右半归白（交界处会被四邻过滤掉）
+  const ownership = new Array(size * size)
+  for (let i = 0; i < size * size; i++) {
+    const x = i % size
+    if (board[i] === 1) ownership[i] = 0.9
+    else if (board[i] === 2) ownership[i] = -0.9
+    else ownership[i] = x < size / 2 ? 0.9 : -0.9
   }
-  await route.handler({ url: query, headers: { host: '127.0.0.1:3080' } }, res)
-  assert.equal(res.statusCode, 200)
-  assert.ok(res.body.includes('简易形势判断：'), '盘下要附一行形势判断')
-  assert.ok(/简易形势判断：黑 [\d.]+ 目 · 白 [\d.]+ 目/.test(res.body), res.body.slice(-220))
-  // 该局第 106 手实测有 1 处黑地 + 2 处白地：背景之外至少 3 个领地方块
-  assert.ok((res.body.match(/<rect /g) || []).length >= 4, '盘上要画出领地方块')
-  assert.ok(res.body.includes('rgba(20, 22, 26, 0.62)') || res.body.includes('rgba(250, 250, 252, 0.82)'),
-    '领地方块的配色')
-  // 不传 territory：输出里不该有形势判断
-  const plainRes = {
-    statusCode: 200, headers: {}, setHeader() {}, end(chunk) { this.body = chunk },
+  const series = estimateTerritorySeries(compact, ownership.map((v, i) => (i === 105 ? ownership : null)))
+  const injected = injectAnalysis(text, [{ moveNumber: 106, territory: series[105].packed }])
+  writeFileSync(TP_FIXTURE, injected.text, 'utf8')
+}
+
+test('路由: /go-sensei/diagram?territory=1 读副本里的归属图并画出地盘', async () => {
+  makeTerritoryFixture()
+  try {
+    const ctx = makeRouteCtx()
+    apply(ctx, Config(NO_ENGINE_CFG))
+    const route = ctx.routes.find((r) => r.path === '/go-sensei/diagram')
+    const res = {
+      statusCode: 200, headers: {}, setHeader(k, v) { this.headers[k] = v },
+      end(chunk) { this.body = chunk },
+    }
+    await route.handler({
+      url: '/go-sensei/diagram?path=' + encodeURIComponent(TP_FIXTURE) + '&move=106&territory=1',
+      headers: { host: '127.0.0.1:3080' },
+    }, res)
+    assert.equal(res.statusCode, 200)
+    assert.ok(res.body.includes('形势判断：'), '盘下要附一行形势判断')
+    assert.ok(/形势判断：黑 [\d.]+ 目 · 白 [\d.]+ 目/.test(res.body), res.body.slice(-220))
+    assert.ok((res.body.match(/<rect /g) || []).length >= 2, '盘上要画出地色块')
+    assert.ok(res.body.includes('rgba(20, 22, 26, 0.62)') || res.body.includes('rgba(250, 250, 252, 0.82)'),
+      '地块的配色')
+
+    // 同一份棋谱不传 territory：输出里不该有形势判断
+    const plainRes = {
+      statusCode: 200, headers: {}, setHeader() {}, end(chunk) { this.body = chunk },
+    }
+    await route.handler({
+      url: '/go-sensei/diagram?path=' + encodeURIComponent(TP_FIXTURE) + '&move=106',
+      headers: { host: '127.0.0.1:3080' },
+    }, plainRes)
+    assert.ok(!plainRes.body.includes('形势判断'), '没要就不该多画')
+  } finally {
+    rmSync(TP_FIXTURE, { force: true })
   }
-  await route.handler({
-    url: '/go-sensei/diagram?path=' + encodeURIComponent(fixture('real-analysis.sgf')) + '&move=106',
-    headers: { host: '127.0.0.1:3080' },
-  }, plainRes)
-  assert.ok(!plainRes.body.includes('简易形势判断'), '没要领地就不该多画')
 })
 
-test('工具: go_draw_diagram 的 territory=true 叠加领地并把简易点目带回来', async () => {
-  const ctx = makeRouteCtx()
-  apply(ctx, Config(NO_ENGINE_CFG))
-  const tool = ctx.registered.get('go_draw_diagram')
-  const exec = { agent: { session: { header: { cwd: join(here, 'fixtures') } } }, signal: undefined }
-  const value = await tool.execute({
-    path: fixture('real-analysis.sgf'), moveNumber: 106, territory: true, caption: '终局前的形势',
-  }, exec)
-  assert.ok(value.url.includes('territory=1'), value.url)
-  assert.equal(typeof value.territory, 'string', '要把形势判断那行带回来')
-  assert.ok(/^黑 [\d.]+ 目 · 白 [\d.]+ 目/.test(value.territory), value.territory)
-  const rendered = tool.output.render({}, value).map((b) => b.text).join('\n')
-  assert.ok(rendered.includes('形势判断：' + value.territory), rendered)
+test('工具: go_draw_diagram 的 territory 读归属图；没有数据且引擎不可用时如实说明', async () => {  makeTerritoryFixture()
+  try {
+    const ctx = makeRouteCtx()
+    apply(ctx, Config(NO_ENGINE_CFG))
+    const tool = ctx.registered.get('go_draw_diagram')
+    const exec = { agent: { session: { header: { cwd: join(here, 'fixtures') } } }, signal: undefined }
+    const value = await tool.execute({
+      path: '_tmp-territory.sgf', moveNumber: 106, territory: true, caption: '终局前的形势',
+    }, exec)
+    assert.ok(value.url.includes('territory=1'), value.url)
+    assert.equal(typeof value.territory, 'string', '要把形势判断那行带回来')
+    assert.ok(/^形势判断：黑 [\d.]+ 目/.test(value.territory), value.territory)
+    const rendered = tool.output.render({}, value).map((b) => b.text).join('\n')
+    assert.ok(rendered.includes(value.territory), rendered)
 
-  // 没要领地时不该多这个键（schema 只声明可选，compact 负责剔除）
-  const plain = await tool.execute({ path: fixture('real-analysis.sgf') }, exec)
-  assert.equal(Object.hasOwn(plain, 'territory'), false)
-  assert.ok(!plain.url.includes('territory=1'))
+    // 没有归属数据 + 引擎不可用：不出图、如实说明 —— 不用启发式顶包（用户定案）
+    const plain = await tool.execute({ path: 'real-analysis.sgf', moveNumber: 106, territory: true }, exec)
+    assert.equal(Object.hasOwn(plain, 'territory'), false)
+    assert.equal(typeof plain.territoryNote, 'string', '要说明为什么没出图')
+    assert.ok(!plain.url.includes('territory=1'))
+    // 没要形势判断时连这个键都不该有
+    const off = await tool.execute({ path: 'real-analysis.sgf', moveNumber: 106 }, exec)
+    assert.equal(Object.hasOwn(off, 'territory'), false)
+    assert.equal(Object.hasOwn(off, 'territoryNote'), false)
+  } finally {
+    rmSync(TP_FIXTURE, { force: true })
+  }
+})
+
+// 真机回归（2026-09-19）：面板路由点「形势判断」会触发整局补算。当时 attachTerritory
+// 被放在 writeAnalysisBack **里面**，而这条路由没有工具执行上下文、解析不出写回策略，
+// 于是写回被跳过 → 连响应里的 territory 都没了：补算实打实跑了 35 秒，
+// territory.available 仍是 false。这条用例把「算出来的归属图与能不能落盘解耦」钉死。
+test('路由: ?territory=1 补算后即使拿不到写回策略，响应里也要带上归属图', async () => {
+  const engineDir = join(here, 'tmp-engine-territory')
+  rmSync(engineDir, { recursive: true, force: true })
+  mkdirSync(engineDir, { recursive: true })
+  writeFileSync(join(engineDir, 'katago.exe'), 'stub')
+  writeFileSync(join(engineDir, 'analysis_example.cfg'), 'reportAnalysisWinratesAs = BLACK\n')
+  writeFileSync(join(engineDir, 'kata1-b18c384nbt-s.bin.gz'), Buffer.alloc(2048))
+
+  const target = join(here, 'tmp-territory-live.sgf')
+  const original = '(;GM[1]FF[4]SZ[19]KM[7.5]PB[甲]PW[乙];B[pd];W[dp])'
+  writeFileSync(target, original, 'utf8')
+  // 引擎假输出：每手都带一份「全盘归黑」的 ownership（frame=BLACK，正数就是黑）
+  const line = (turn, move) => JSON.stringify({
+    id: 'go-sensei',
+    turnNumber: turn,
+    moveInfos: [{ move, order: 0, visits: 100, winrate: 0.55, scoreMean: 1.5, prior: 0.3, pv: [move] }],
+    ownership: new Array(361).fill(0.9),
+    rootInfo: { currentPlayer: 'W', scoreLead: 1.5, winrate: 0.55 },
+  })
+  const stdout = [line(1, 'D16'), line(2, 'Q16')].join('\n') + '\n'
+  const spawn = () => ({
+    pid: 1,
+    done: Promise.resolve({ exitCode: 0, signal: null }),
+    collected: {
+      stdout: { readFrom: () => ({ text: stdout, nextOffset: 0, lossy: false }) },
+      stderr: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) },
+    },
+  })
+  // 特意**不提供** sandboxPolicy：模拟面板路由拿不到写回策略的那条路
+  const ctx = makeRouteCtx({ services: { subprocess: { spawn } } })
+  apply(ctx, Config({ engineDir, kataGoPath: '' }))
+
+  try {
+    const route = ctx.routes.find((r) => r.path === '/go-sensei/review')
+    const res = await callRoute(route, '/go-sensei/review?path=' + encodeURIComponent(target) + '&territory=1')
+    assert.equal(res.status, 200, JSON.stringify(res.body))
+    const data = res.body.data
+    assert.equal(data.engineAvailable, true, '解析到假引擎 → 按钮可用')
+    assert.ok(data.autoEngine && data.autoEngine.moves >= 2, `补算确实跑了：${JSON.stringify(data.autoEngine)}`)
+    assert.equal(data.territory.available, true, '拿不到写回策略也必须把归属图带回来')
+    assert.equal(data.territory.step.length, 2, '与手顺等长')
+    assert.equal(typeof data.territory.step[0].map, 'string')
+    // 全盘归黑：活子 + 地 = 361（白那颗落在黑地里 → 判死，它的点也算黑的地）
+    assert.equal(data.territory.step[1].blackPoints, 361)
+    assert.equal(data.territory.step[1].deadWhite, 1, '白子落在黑地里 → 死子')
+    assert.equal(data.territorySaved, false, '没有策略就如实标记"未落盘"')
+    // 只读路径不该因为这次请求悄悄改动源盘面
+    assert.equal(readFileSync(target, 'utf8'), original)
+  } finally {
+    rmSync(engineDir, { recursive: true, force: true })
+    rmSync(target, { force: true })
+    rmSync(join(here, 'tmp-territory-live-sensei.sgf'), { force: true })
+  }
+})
+
+// 接上一条：拿到策略时**必须真的写回副本**，而且第二次打开要能直接读副本（不再跑引擎）。
+// 真机回归（2026-09-20）：面板路由自己读盘解析，没给 game._meta 赋值 —— 策略解析
+// 完全正常（mode=danger-full-access），writeAnalysisBack 却在第一行 `_meta.text` 就
+// 返回 undefined，表现为「补算跑了 43 秒、什么都没写」。这条用例把落盘与二次秒开钉死。
+test('路由: ?territory=1 有策略时把归属图写回副本，第二次打开直接读副本', async () => {
+  const engineDir = join(here, 'tmp-engine-territory2')
+  rmSync(engineDir, { recursive: true, force: true })
+  mkdirSync(engineDir, { recursive: true })
+  writeFileSync(join(engineDir, 'katago.exe'), 'stub')
+  writeFileSync(join(engineDir, 'analysis_example.cfg'), 'reportAnalysisWinratesAs = BLACK\n')
+  writeFileSync(join(engineDir, 'kata1-b18c384nbt-s.bin.gz'), Buffer.alloc(2048))
+
+  const target = join(here, 'tmp-territory-write.sgf')
+  // 手顺特意与上一条用例不同：补算结果按「棋谱指纹」缓存，同盘棋会让第二条走缓存命中，
+  // 测不到真正的补算→写回这条路
+  const original = '(;GM[1]FF[4]SZ[19]KM[7.5]PB[甲]PW[乙];B[pd];W[dp];B[qp])'
+  writeFileSync(target, original, 'utf8')
+  const copy = join(here, 'tmp-territory-write-sensei.sgf')
+  rmSync(copy, { force: true })
+
+  let spawns = 0
+  const line = (turn, move) => JSON.stringify({
+    id: 'go-sensei',
+    turnNumber: turn,
+    moveInfos: [{ move, order: 0, visits: 100, winrate: 0.55, scoreMean: 1.5, prior: 0.3, pv: [move] }],
+    ownership: new Array(361).fill(0.9),
+    rootInfo: { currentPlayer: 'W', scoreLead: 1.5, winrate: 0.55 },
+  })
+  const stdout = [line(1, 'D16'), line(2, 'Q16'), line(3, 'D4')].join('\n') + '\n'
+  const ctx = makeRouteCtx({
+    services: {
+      subprocess: {
+        spawn: () => {
+          spawns += 1
+          return {
+            pid: 1,
+            done: Promise.resolve({ exitCode: 0, signal: null }),
+            collected: {
+              stdout: { readFrom: () => ({ text: stdout, nextOffset: 0, lossy: false }) },
+              stderr: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) },
+            },
+          }
+        },
+      },
+      // 有策略（写权限）：面板写回要走通
+      sandboxPolicy: { resolve: () => ({ mode: 'workspace-write', workspaceRoot: here }) },
+    },
+  })
+  apply(ctx, Config({ engineDir, kataGoPath: '' }))
+
+  try {
+    const route = ctx.routes.find((r) => r.path === '/go-sensei/review')
+    const url = '/go-sensei/review?path=' + encodeURIComponent(target) + '&territory=1'
+    const first = await callRoute(route, url)
+    assert.equal(first.status, 200, JSON.stringify(first.body))
+    assert.equal(first.body.data.territorySaved, true, `要写回副本：${JSON.stringify(first.body.data.territoryWrite)}`)
+    assert.equal(first.body.data.territoryWrite.ok, true)
+    assert.equal(first.body.data.territory.available, true)
+
+    const written = readFileSync(copy, 'utf8')
+    assert.ok(written.includes('TP['), '副本里要有归属图')
+    assert.ok(written.includes('LZ['), '补算的分析也要一起写回')
+    assert.equal(readFileSync(target, 'utf8'), original, '源棋谱必须逐字节保持原样')
+    assert.equal(spawns, 1, '第一次跑了一次引擎')
+
+    // 第二次打开：副本里已有 TP → 不再补算，直接读
+    const second = await callRoute(route, url)
+    assert.equal(second.status, 200)
+    assert.equal(second.body.data.autoEngine, undefined, '已有归属图就不该再跑引擎')
+    assert.equal(second.body.data.territory.available, true, '读副本里的 TP 也能出数据')
+    assert.equal(second.body.data.territorySaved, false, '这次没跑引擎，也就没写盘')
+    assert.equal(spawns, 1, '第二次不应再起引擎')
+  } finally {
+    rmSync(engineDir, { recursive: true, force: true })
+    rmSync(target, { force: true })
+    rmSync(copy, { force: true })
+  }
 })

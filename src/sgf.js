@@ -12,6 +12,7 @@
 
 import sgf from '@sabaki/sgf'
 import iconv from 'iconv-lite'
+import { createReplayer, scoreFromCells, territoryScoreText, unpackTerritory } from './territory.js'
 
 // ---------------------------------------------------------------------------
 // 编码自愈
@@ -508,6 +509,9 @@ export function parseGame(text) {
         coord: isPass ? null : coord,
         pass: isPass,
         analysis,
+        // 形势判断的三档图（TP[]）：单独挂在 move 上，读路径（面板/配图）直接取它。
+        // analysis 里也留了一份（extractAnalysis 写的），写回时按 move.territory 处理。
+        ...(analysis?.territory !== undefined ? { territory: analysis.territory } : {}),
       })
     }
     node = child
@@ -568,6 +572,9 @@ function extractAnalysis(data, coord, isPass, size) {
     const parsed = parseLz(lz)
     if (parsed && (parsed.engine || parsed.candidates.length > 0)) analysis.lz = parsed
   }
+  // 归属图（形势判断的三档图，紧凑字符串）。与 WV/DM/LZ 同一次补算产出，单独一个属性。
+  const tp = data.TP?.[0]
+  if (typeof tp === 'string' && tp !== '') analysis.territory = tp
   if (comment !== undefined && comment.trim() !== '') {
     analysis.comment = comment
     const parsed = parseWinrateComment(comment)
@@ -626,6 +633,69 @@ export function winrateForColor(move, color) {
  */
 export function hasWinrateData(game) {
   return countWinratePairs(game) > 0
+}
+
+/**
+ * 棋谱里有没有「形势判断」的归属图（`TP[]`）。
+ *
+ * 与 {@link hasWinrateData} 同属**能力判据**：要看有没有真数据（至少一手的 TP 非空），
+ * 不能用 `analysis !== null` 这种结构判据 —— 只写了注释的棋谱也会产出 analysis 对象。
+ *
+ * 判据是**至少有归属图**而不是"每一手都有"：让"以前复盘过的副本"（有 WV/DM/LZ、
+ * 没有 TP）能被识别为"缺归属、需要补算一次"。
+ *
+ * @param {object} game parseGame 的返回值
+ * @returns {boolean}
+ */
+export function hasTerritoryData(game) {
+  for (const move of game?.moves ?? []) {
+    if (typeof move.territory === 'string' && move.territory !== '') return true
+  }
+  return false
+}
+
+/**
+ * 逐手的形势判断（只读棋谱里已有的 `TP[]`，**不跑引擎**）。
+ *
+ * 一次重放给出每一手的三档图与数字：面板要的就是整条线，配图/工具只要其中一手
+ * ——两者共用这一份实现，免得数字与图走两套算法。
+ *
+ * @param {object} game parseGame 的返回值
+ * @returns {Array<{ packed: string, est: object, text: string }|null>} 与 moves 等长
+ */
+export function territorySeriesOf(game) {
+  const size = game?.info?.size ?? 19
+  const moves = game?.moves ?? []
+  const replayer = createReplayer(compactBoard(game))
+  const out = new Array(moves.length).fill(null)
+  for (let i = 0; i < moves.length; i++) {
+    replayer.step(replayer.moves[i])
+    const packed = typeof moves[i]?.territory === 'string' ? moves[i].territory : ''
+    if (packed === '') continue
+    const cells = unpackTerritory(packed, size * size)
+    if (cells === null) continue
+    const { capturedBlack, capturedWhite } = replayer.captures()
+    const est = scoreFromCells(replayer.board, size, cells, {
+      komi: game?.info?.komi ?? 0,
+      capturedBlack,
+      capturedWhite,
+    })
+    if (est === null) continue
+    out[i] = { packed, est, text: territoryScoreText(est) }
+  }
+  return out
+}
+
+/**
+ * 取某一手之后的形势判断。没有该手的归属数据时返回 null。
+ * @param {object} game parseGame 的返回值
+ * @param {number} moveNumber 手数（1 起；取该手之后的局面）
+ * @returns {{ packed: string, est: object, text: string }|null}
+ */
+export function territoryOfMove(game, moveNumber) {
+  const index = Math.trunc(Number(moveNumber))
+  if (!Number.isFinite(index) || index < 1) return null
+  return territorySeriesOf(game)[index - 1] ?? null
 }
 
 /**
@@ -853,6 +923,11 @@ export function injectAnalysis(sgfText, entries) {
       candidates: entry.candidates,
     })
     if (lzValue !== undefined) found.node.data.LZ = [lzValue]
+    // 归属图（形势判断的三档图）：与 WV/DM/LZ 同一次补算产出，单独存成 TP[]。
+    // 客户端只画不算 —— 三档图就是最终渲染结果，两端不会漂。
+    if (typeof entry.territory === 'string' && entry.territory !== '') {
+      found.node.data.TP = [entry.territory]
+    }
     out.written.push(moveNumber)
   }
 
@@ -892,12 +967,13 @@ export function analysisEntriesOf(game) {
     } else if (a.scoreLeadBlack !== undefined) {
       moverScoreLead = isBlack ? a.scoreLeadBlack : -a.scoreLeadBlack
     }
-    if (moverWinrate === undefined && moverScoreLead === undefined) continue
+    if (moverWinrate === undefined && moverScoreLead === undefined && move.territory === undefined) continue
     const candidates = Array.isArray(a.lz?.candidates) ? a.lz.candidates : []
     out.push({
       moveNumber: move.number,
       ...(moverWinrate !== undefined ? { moverWinrate } : {}),
       ...(moverScoreLead !== undefined ? { moverScoreLead } : {}),
+      ...(typeof move.territory === 'string' && move.territory !== '' ? { territory: move.territory } : {}),
       ...(candidates.length > 0
         ? {
             candidates,
