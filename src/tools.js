@@ -12,6 +12,7 @@ import {
   injectAnalysis,
   analysisEntriesOf,
   coordLabel,
+  compactBoard,
   hasWinrateData,
   MAX_SGF_CHARS,
 } from './sgf.js'
@@ -19,7 +20,8 @@ import { reviewGame, inferLevel, RANKS } from './review.js'
 import { ReviewCache, gameFingerprint } from './cache.js'
 import { resolveEngine, describeEngine } from './engine-resolve.js'
 import { senseiPathFor } from './derived.js'
-import { parsePointLabel, parseSequence, parseMarks } from './diagram.js'
+import { parsePointLabel, parseSequence, parseMarks, buildGrid } from './diagram.js'
+import { estimateTerritory, territoryScoreText } from './territory.js'
 
 /** 工具返回值的裁剪上限，防止异常棋谱撑爆上下文。 */
 const MAX_MOVE_LIST = 400
@@ -750,6 +752,8 @@ function goDrawDiagram(ctx, cfg, cache, policy, diagram) {
       + '用途：回答"第 N 手改下 X 会怎样""这里连没连上"这类追问时，用图说明变化与要点。'
       + '变化图着法按 1-9、A-Z 逐手编号（起始颜色按局面自动推断，也可写成 "B:Q16" 显式指定）；'
       + '重点棋子用 triangle（三角形）/ square / circle / cross / label（字母或数字）标出。'
+      + 'territory=true 时叠加**领地显示**（简易形势判断：把只挨黑子/只挨白子的空点画成小黑块/小白块，'
+      + '并在图下写出简易点目），适合讲"这块地是谁的""现在谁领先"。'
       + '**回答里必须原样粘贴返回的 markdown 行**，URL 不要改写或另编。',
     parameters: {
       type: 'object',
@@ -768,6 +772,10 @@ function goDrawDiagram(ctx, cfg, cache, policy, diagram) {
           type: 'array',
           items: { type: 'string' },
           description: '重点棋子标注，每项形如 "triangle:Q16"、"square:D4"、"circle:C10"、"cross:R6"、"label:Q16:A"（末尾可带一个字母/数字）。',
+        },
+        territory: {
+          type: 'boolean',
+          description: 'true 时在盘上叠加领地显示（简易形势判断：只挨黑子/只挨白子的空点画成黑/白小方块），并在图下附一行简易点目。讲地盘归属、形势优劣时用它。',
         },
         caption: { type: 'string', description: '图注（画在棋盘下方，一句话，如"黑 1 断后白无应手"）' },
         width: { type: 'number', description: '图片像素宽度（默认 640，范围 120~1600）' },
@@ -788,6 +796,8 @@ function goDrawDiagram(ctx, cfg, cache, policy, diagram) {
           marks: { type: 'array', items: { type: 'string' } },
           skipped: { type: 'array', items: { type: 'string' } },
           note: { type: 'string' },
+          // 叠加了领地显示时，把那行简易点目也带回给模型（免得它自己算）
+          territory: { type: 'string' },
         },
         required: ['url', 'markdown', 'moveNumber', 'size', 'caption', 'numbered', 'marks', 'skipped'],
       },
@@ -799,6 +809,8 @@ function goDrawDiagram(ctx, cfg, cache, policy, diagram) {
         ]
         if (value.numbered.length > 0) lines.push(`变化：${value.numbered.join(' → ')}`)
         if (value.marks.length > 0) lines.push(`标注：${value.marks.join('；')}`)
+        // 领地显示的那行形势判断：模型应直接引用它，别自己另算一个数
+        if (value.territory !== undefined) lines.push(`形势判断：${value.territory}`)
         if (value.skipped.length > 0) lines.push(`⚠ 已忽略无法解析的项：${value.skipped.join('、')}`)
         lines.push('把下面这一行**原样**放进回答正文（Markdown 图片语法），图片就会显示：', value.markdown)
         if (value.note !== undefined) lines.push(value.note)
@@ -844,6 +856,16 @@ function goDrawDiagram(ctx, cfg, cache, policy, diagram) {
       if (tokens.length > 0) params.set('seq', tokens.join(','))
       if (markTokens.length > 0) params.set('marks', markTokens.join(','))
       if (caption !== '') params.set('cap', caption)
+      // 领地显示：路由侧会照同一份算法把归属画到图上，并在图下附一行简易点目。
+      // 工具这里也算一份（同源函数、同一局面），好把那行数字如实回给模型。
+      const wantTerritory = args.territory === true
+      let territoryText
+      if (wantTerritory) {
+        params.set('territory', '1')
+        const grid = buildGrid(compactBoard(game), move)
+        const est = estimateTerritory(grid, size, { komi: game.info?.komi ?? 0 })
+        territoryText = territoryScoreText(est)
+      }
       if (args.width !== undefined && Number.isFinite(Number(args.width))) {
         params.set('w', String(Math.trunc(Number(args.width))))
       }
@@ -866,6 +888,7 @@ function goDrawDiagram(ctx, cfg, cache, policy, diagram) {
         numbered,
         marks: markTexts,
         skipped,
+        ...(territoryText !== undefined ? { territory: territoryText } : {}),
         ...(total === 0 ? { note: '这盘棋没有着手，配图是空盘。' } : {}),
       }
     },

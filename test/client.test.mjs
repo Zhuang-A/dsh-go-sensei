@@ -2010,3 +2010,196 @@ test('client: 右侧栏：控件与棋盘同容器（不偏移）、点交叉点
   assert.ok(clipboardWrites[0].includes('如果下在 A19'), clipboardWrites[0])
   assert.ok(clipboardWrites[0].includes(gamePath), clipboardWrites[0])
 })
+
+// ---------------------------------------------------------------------------
+// 领地显示 / 简易形势判断（用户 2026-09-19：参考 Lizzieyzy 加形势判断与领地显示）
+//
+// 分两层钉住：① 纯函数与宿主 src/territory.js 同口径（只挨单色才算地、单官中立）；
+// ② 整页棋盘上画出色块、盘下给出一行点目，且图例开关能整层关掉。
+// ---------------------------------------------------------------------------
+
+/** 9 路「黑圈围住 (1,1) + 白圈围住 (5,5)」的盘面数据（摆子形式，不用手顺摆）。 */
+const RING_BOARD_9 = {
+  size: 9,
+  komi: 0,
+  handicap: 0,
+  moves: [],
+  setup: {
+    black: [[0, 0], [1, 0], [2, 0], [0, 1], [2, 1], [0, 2], [1, 2], [2, 2]],
+    white: [[4, 4], [5, 4], [6, 4], [4, 5], [6, 5], [4, 6], [5, 6], [6, 6]],
+  },
+}
+
+test('client: 简易形势判断与宿主同口径（只挨单色才算地、单官中立）', () => {
+  const { plugin } = loadClient()
+  const { estimateTerritory, territoryText, territoryAt } = plugin.__internals
+  assert.equal(typeof estimateTerritory, 'function', '__internals 应暴露 estimateTerritory')
+
+  const size = 9
+  const grid = new Array(size * size).fill(0)
+  const ring = (cx, cy, color) => {
+    for (const [dx, dy] of [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]) {
+      grid[(cy + dy) * size + (cx + dx)] = color
+    }
+  }
+  ring(1, 1, 1)
+  ring(5, 5, 2)
+  const est = estimateTerritory(grid, size, 0)
+  assert.equal(est.owner[1 * size + 1], 1, '只挨黑子的空点＝黑地')
+  assert.equal(est.owner[5 * size + 5], 2, '只挨白子的空点＝白地')
+  assert.equal(est.owner[3 * size + 3], 0, '黑白都挨的空点＝单官')
+  assert.equal(est.owner[0], 1, '棋子记自己的颜色（黑子）')
+  assert.equal(est.blackTerritory, 1)
+  assert.equal(est.whiteTerritory, 1)
+  assert.equal(est.dame, size * size - 16 - 2)
+  assert.equal(territoryText(est), '黑 9 目 · 白 9 目（含贴目 0）· 盘面两分')
+  // 贴目算给白方：白一领先就写成"白领先"
+  assert.equal(territoryText(estimateTerritory(grid, size, 7.5)),
+    '黑 9 目 · 白 16.5 目（含贴目 7.5）· 白领先 7.5 目')
+  // 空盘没有形势可言 → territoryAt 仍返回对象，但调用方（territoryLine）不显示
+  assert.equal(territoryAt({ board: { size: 19, komi: 0, moves: [], setup: {} } }, 0).blackStones, 0)
+  assert.equal(territoryAt(null, 0), null, '没有棋谱时返回 null')
+})
+
+test('client: 整页棋盘——领地色块 + 盘下形势判断，图例开关能整层关掉', () => {
+  const loaded = loadClient()
+  const { senseiPatch } = loaded.plugin.__internals
+  const page = boardPageOf(loaded)
+  senseiPatch({
+    data: {
+      path: 'ring.sgf', mode: 'analysis', level: '18K', moveCount: 0, variations: 0,
+      candidates: [], board: RING_BOARD_9,
+    },
+    upto: 0,
+    showTerritory: true,
+  })
+  const render = () => { loaded.react.reset(); return page({}) }
+  let tree = render()
+  let nodes = walk(tree)
+  let boardSvg = nodes.find((n) => n.type === 'svg' && String(n.props.className || '').includes('dgs-board'))
+  assert.ok(boardSvg, '应画出棋盘')
+  const inBoard = walk(boardSvg)
+  const terrRects = inBoard.filter((n) => n.type === 'rect' && n.props.className === 'dgs-terr')
+  assert.equal(terrRects.length, 2, '两处领地各一个色块（单官不画）')
+  assert.equal(terrRects.filter((n) => n.props.fill === 'rgba(20, 22, 26, 0.62)').length, 1, '一个黑地色块')
+  assert.equal(terrRects.filter((n) => n.props.fill === 'rgba(250, 250, 252, 0.82)').length, 1, '一个白地色块')
+  assert.equal(
+    inBoard.filter((n) => n.type === 'rect' && n.props.className === 'dgs-terr'
+      && n.props.key === 'terr1_1').length,
+    1,
+    '黑地落在被围住的 (1,1)',
+  )
+  let text = texts(nodes).join('|')
+  assert.ok(text.includes('简易形势判断：'), text)
+  assert.ok(text.includes('黑 9 目 · 白 9 目（含贴目 0）· 盘面两分'), text)
+
+  // 图例开关：关掉后盘上色块与盘下那行一起消失（不留"漏画了"的错觉）
+  const chip = walk(tree).find((n) => n.type === 'button'
+    && String(n.props.className || '').includes('dgs-keyitem')
+    && texts(walk(n)).join('|').includes('领地 / 形势判断'))
+  assert.ok(chip, '图例里应有「领地 / 形势判断」开关')
+  chip.props.onClick()
+  tree = render()
+  nodes = walk(tree)
+  boardSvg = nodes.find((n) => n.type === 'svg' && String(n.props.className || '').includes('dgs-board'))
+  assert.equal(walk(boardSvg).filter((n) => n.props.className === 'dgs-terr').length, 0, '关掉后不画色块')
+  assert.ok(!texts(nodes).join('|').includes('简易形势判断：'), '关掉后也不留那行数字')
+
+  // 再点回来能恢复
+  const chipAgain = walk(tree).find((n) => n.type === 'button'
+    && String(n.props.className || '').includes('dgs-keyitem')
+    && texts(walk(n)).join('|').includes('领地 / 形势判断'))
+  chipAgain.props.onClick()
+  tree = render()
+  assert.equal(
+    walk(tree).filter((n) => n.props.className === 'dgs-terr').length,
+    2,
+    '再点一次应重新显示领地',
+  )
+
+  senseiPatch({ data: null, upto: 0, showTerritory: true })
+})
+
+test('client: renderBoard 的 showTerritory=false 整层不画（老调用方行为不变）', () => {
+  const { plugin, react } = loadClient()
+  const { renderBoard, estimateTerritory } = plugin.__internals
+  const grid = new Array(9 * 9).fill(0)
+  for (const [dx, dy] of [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]) {
+    grid[(1 + dy) * 9 + (1 + dx)] = 1
+  }
+  grid[8 * 9 + 8] = 2
+  const est = estimateTerritory(grid, 9, 0)
+  const board = {
+    size: 9,
+    komi: 0,
+    moves: [],
+    setup: {
+      black: [[0, 0], [1, 0], [2, 0], [0, 1], [2, 1], [0, 2], [1, 2], [2, 2]],
+      white: [[8, 8]],
+    },
+  }
+  react.reset()
+  const off = renderBoard({
+    board, upto: 0, problem: null, pv: [], territory: est, showTerritory: false, onPick: null,
+  })
+  assert.equal(walk(off).filter((n) => n.props.className === 'dgs-terr').length, 0, '关掉就不画')
+  react.reset()
+  const on = renderBoard({
+    board, upto: 0, problem: null, pv: [], territory: est, onPick: null,
+  })
+  const rects = walk(on).filter((n) => n.props.className === 'dgs-terr')
+  assert.equal(rects.length, 1, '默认叠加：只画被围住的 (1,1) 那一处')
+  assert.ok(Math.abs(rects[0].props.x - (8 + 1 * (84 / 8) - (84 / 8) * 0.52 / 2)) < 1e-9,
+    '色块画在交叉点上（实际 ' + rects[0].props.x + '）')
+})
+
+test('路由: /go-sensei/diagram?territory=1 叠加领地显示与简易形势判断', async () => {
+  const ctx = makeRouteCtx()
+  apply(ctx, Config(NO_ENGINE_CFG))
+  const route = ctx.routes.find((r) => r.path === '/go-sensei/diagram')
+  const query = '/go-sensei/diagram?path=' + encodeURIComponent(fixture('real-analysis.sgf'))
+    + '&move=106&territory=1'
+  const res = {
+    statusCode: 200,
+    headers: {},
+    setHeader(k, v) { this.headers[k] = v },
+    end(chunk) { this.body = chunk },
+  }
+  await route.handler({ url: query, headers: { host: '127.0.0.1:3080' } }, res)
+  assert.equal(res.statusCode, 200)
+  assert.ok(res.body.includes('简易形势判断：'), '盘下要附一行形势判断')
+  assert.ok(/简易形势判断：黑 [\d.]+ 目 · 白 [\d.]+ 目/.test(res.body), res.body.slice(-220))
+  // 该局第 106 手实测有 1 处黑地 + 2 处白地：背景之外至少 3 个领地方块
+  assert.ok((res.body.match(/<rect /g) || []).length >= 4, '盘上要画出领地方块')
+  assert.ok(res.body.includes('rgba(20, 22, 26, 0.62)') || res.body.includes('rgba(250, 250, 252, 0.82)'),
+    '领地方块的配色')
+  // 不传 territory：输出里不该有形势判断
+  const plainRes = {
+    statusCode: 200, headers: {}, setHeader() {}, end(chunk) { this.body = chunk },
+  }
+  await route.handler({
+    url: '/go-sensei/diagram?path=' + encodeURIComponent(fixture('real-analysis.sgf')) + '&move=106',
+    headers: { host: '127.0.0.1:3080' },
+  }, plainRes)
+  assert.ok(!plainRes.body.includes('简易形势判断'), '没要领地就不该多画')
+})
+
+test('工具: go_draw_diagram 的 territory=true 叠加领地并把简易点目带回来', async () => {
+  const ctx = makeRouteCtx()
+  apply(ctx, Config(NO_ENGINE_CFG))
+  const tool = ctx.registered.get('go_draw_diagram')
+  const exec = { agent: { session: { header: { cwd: join(here, 'fixtures') } } }, signal: undefined }
+  const value = await tool.execute({
+    path: fixture('real-analysis.sgf'), moveNumber: 106, territory: true, caption: '终局前的形势',
+  }, exec)
+  assert.ok(value.url.includes('territory=1'), value.url)
+  assert.equal(typeof value.territory, 'string', '要把形势判断那行带回来')
+  assert.ok(/^黑 [\d.]+ 目 · 白 [\d.]+ 目/.test(value.territory), value.territory)
+  const rendered = tool.output.render({}, value).map((b) => b.text).join('\n')
+  assert.ok(rendered.includes('形势判断：' + value.territory), rendered)
+
+  // 没要领地时不该多这个键（schema 只声明可选，compact 负责剔除）
+  const plain = await tool.execute({ path: fixture('real-analysis.sgf') }, exec)
+  assert.equal(Object.hasOwn(plain, 'territory'), false)
+  assert.ok(!plain.url.includes('territory=1'))
+})

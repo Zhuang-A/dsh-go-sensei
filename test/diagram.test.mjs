@@ -17,6 +17,7 @@ import {
   playStone,
   MARK_SHAPES,
 } from '../src/diagram.js'
+import { estimateTerritory, territoryScoreText } from '../src/territory.js'
 
 test('diagram: 变化图编号 1-9 之后转 A-Z（用户指定的编号法）', () => {
   assert.equal(numberLabel(0), '1')
@@ -207,4 +208,61 @@ test('buildGrid/renderBoardSvg: 摆子越界、超大宽度、越界最后一手
   const without = renderBoardSvg({ size: 9, grid })
   const withBad = renderBoardSvg({ size: 9, grid, lastMove: { x: 40, y: 40, color: 'B' } })
   assert.equal(withBad, without, '越界的最后一手不得画到盘外')
+})
+
+// ---------------------------------------------------------------------------
+// 领地显示 / 简易形势判断（用户 2026-09-19：参考 Lizzieyzy 加形势判断与领地显示）
+// ---------------------------------------------------------------------------
+
+test('diagram: 领地显示只画空点，附一行形势判断；不给 territory 时一个字都不多画', () => {
+  const size = 9
+  const grid = new Array(size * size).fill(0)
+  const ring = (cx, cy, color) => {
+    for (const [dx, dy] of [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]) {
+      grid[(cy + dy) * size + (cx + dx)] = color
+    }
+  }
+  ring(2, 2, 1) // 黑圈围住 (2,2)
+  ring(6, 6, 2) // 白圈围住 (6,6)
+  const est = estimateTerritory(grid, size, { komi: 0 })
+  const svg = renderBoardSvg({
+    size,
+    grid,
+    territory: est.owner,
+    footer: `简易形势判断：${territoryScoreText(est)}`,
+  })
+  // 图注 0 + 盘面 100 + 附注 7：附注自成一条，不跟盘面挤
+  assert.ok(svg.includes('viewBox="0 0 100 107"'), svg.slice(0, 80))
+  assert.ok(svg.includes('fill="rgba(20, 22, 26, 0.62)"'), '黑地画深色小方块')
+  assert.ok(svg.includes('fill="rgba(250, 250, 252, 0.82)"'), '白地画浅色小方块')
+  // 背景 1 个矩形 + 两处领地（各 1 个）：棋子是 circle，不占矩形
+  assert.equal((svg.match(/<rect /g) || []).length, 3, '只有背景与两处领地')
+  assert.ok(svg.includes('简易形势判断：黑 9 目 · 白 9 目（含贴目 0）· 盘面两分'), svg.slice(-260))
+  assert.ok(svg.includes('aria-label="简易形势判断'), '无障碍标签也要念出附注')
+
+  // 不给 territory：与从前完全一致（背景 1 个矩形，没有附注条）
+  const plain = renderBoardSvg({ size, grid })
+  assert.equal((plain.match(/<rect /g) || []).length, 1, '只有背景矩形')
+  assert.ok(plain.includes('viewBox="0 0 100 100"'), '没有附注就不加高')
+  // 单官（黑白都挨的外圈）不画：9 路 81 点里只有 2 处领地，其余是 circle/无
+  assert.ok(!plain.includes('rgba(20, 22, 26, 0.62)'))
+})
+
+test('territory: 配图上的领地与宿主算法同源（围住的角地要认出来）', () => {
+  // 9 路局面：黑用 8 子把 (1,1) 严实围住，白在别处落一子——
+  // 被围住的空点只挨黑子，要算成黑地并画出小方块；外圈黑白都挨＝单官，不画。
+  const size = 9
+  const grid = new Array(size * size).fill(0)
+  for (const [dx, dy] of [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]) {
+    grid[(1 + dy) * size + (1 + dx)] = 1
+  }
+  grid[8 * size + 8] = 2
+  const est = estimateTerritory(grid, size, { komi: 0 })
+  assert.equal(est.owner[1 * size + 1], 1, '被围住的空点归属黑')
+  assert.equal(est.owner[4 * size + 4], 0, '外圈黑白都挨 → 单官')
+  const svg = renderBoardSvg({ size, grid, territory: est.owner, width: 320 })
+  assert.ok(svg.includes('width="320"'))
+  assert.equal((svg.match(/<rect /g) || []).length, 2, '背景 + 那一处黑地')
+  // 白子那一点是棋子（circle），不是领地方块
+  assert.equal(est.owner[8 * size + 8], 2, '棋子记自己的颜色')
 })

@@ -9,9 +9,10 @@ import { basename, dirname } from 'node:path'
 import { registerGoTools, autoComputeIfNeeded } from './src/tools.js'
 import { ReviewCache } from './src/cache.js'
 import { RANKS, reviewGame, inferLevel, aiCandidatesByMove } from './src/review.js'
-import { parseGame, decodeBuffer, coordLabel, winrateForColor, scoreForColor, MAX_SGF_CHARS } from './src/sgf.js'
+import { parseGame, decodeBuffer, compactBoard, winrateForColor, scoreForColor, MAX_SGF_CHARS } from './src/sgf.js'
 import { senseiPathFor } from './src/derived.js'
 import { buildGrid, parseSequence, parseMarks, renderBoardSvg } from './src/diagram.js'
+import { estimateTerritory, territoryScoreText } from './src/territory.js'
 
 export const name = 'go-sensei'
 // 硬依赖：tools 注册工具、systemPrompt 挂人设段、fs 读写棋谱。
@@ -74,10 +75,11 @@ function buildPersona(cfg) {
 3. 水平自适应：按学生棋力调整术语密度（配置 level=auto 时依据棋谱双方段位自行判断）：18K~10K 用生活化比喻并解释基础概念（气、眼、断点、出头）；9K~1D 用常规术语；2D 以上可用职业级术语与全局构思。
 4. 变化图：以"第 N 手改下 X 会怎样"为单元，一次只展开一条主变，每手一句话讲清意图，不逐手复述整条 PV。
 5. 配图讲解：回答追问（尤其"第 N 手改下 X 会怎样""这里连没连上"）时，**必须**用 go_draw_diagram 生成配图，并在回答正文里用 Markdown 图片语法 \`![一句话说明](工具返回的 URL)\` 嵌入。图上的约定：变化着法按 1-9、A-Z 逐手编号（起始颜色由工具按局面自动定），关键棋子用 triangle（三角形）、square、circle、label（字母）标出；一张图只讲一个变化，图下配一句话说明。**绝不用文字描述代替配图，也绝不编造图片 URL**——URL 只能来自 go_draw_diagram 的返回值。
-6. 工具纪律：先 go_parse_sgf 了解棋谱，再 go_review_moves 找问题手，逐手讲解后调用 go_write_review 写回 SGF 注释，需要落盘报告时用 go_export_report；同一局重复复盘优先复用工具返回的缓存结果（cached=true 时不再重复获取全量数据）；单局讲解预算约 ${cfg.tokenBudget} tokens，用"先问后讲"与数据裁剪控制消耗。`
+6. 形势判断与领地显示：讲"这块地归谁""现在谁领先"时，用 go_draw_diagram 的 territory=true 叠加领地显示（把只挨黑子/只挨白子的空点画成黑/白小方块，图下附一行简易点目）。那行数字是**启发式估算**（不提死子、不判双活），口径与面板图例的「简易形势判断」一致；真正的目差与胜率仍以引擎数据（DM/胜率）为准，两者不要混着说。
+7. 工具纪律：先 go_parse_sgf 了解棋谱，再 go_review_moves 找问题手，逐手讲解后调用 go_write_review 写回 SGF 注释，需要落盘报告时用 go_export_report；同一局重复复盘优先复用工具返回的缓存结果（cached=true 时不再重复获取全量数据）；单局讲解预算约 ${cfg.tokenBudget} tokens，用"先问后讲"与数据裁剪控制消耗。`
 }
 
-const TOOL_GUIDANCE = `围棋复盘工具（DeepGo Sensei）：go_parse_sgf 读棋谱，go_review_moves 找问题手，go_position_context 取某手前后局面与 AI 候选，go_draw_diagram 画讲解配图（变化图编号 1-9/A-Z + 三角形等重点棋子标注，返回可在对话里直接用 Markdown 图片语法嵌入的 URL），go_write_review 把讲解写回 SGF 的 C[] 注释，go_export_report 落盘 Markdown 报告，go_engine_info 查看/说明当前使用的 KataGo 引擎与权重。**源棋谱只读**：讲解与分析数据（胜率/目差/AI 首选与变化图）都写进同目录的 \`<源名>-sensei.sgf\` 副本，源文件永不修改；读取同一盘棋时若副本已存在（工具与面板都一样）就直接读副本，因为那才是上一次复盘的成果。补算引擎默认用插件自带的 engine 目录（开箱即用），也可用配置 engineDir / kataGoPath / kataGoModel 换成用户自己的引擎与权重。路径参数支持绝对路径或相对当前会话工作区的相对路径。`
+const TOOL_GUIDANCE = `围棋复盘工具（DeepGo Sensei）：go_parse_sgf 读棋谱，go_review_moves 找问题手，go_position_context 取某手前后局面与 AI 候选，go_draw_diagram 画讲解配图（变化图编号 1-9/A-Z + 三角形等重点棋子标注；territory=true 可叠加领地显示与简易形势判断，返回可在对话里直接用 Markdown 图片语法嵌入的 URL），go_write_review 把讲解写回 SGF 的 C[] 注释，go_export_report 落盘 Markdown 报告，go_engine_info 查看/说明当前使用的 KataGo 引擎与权重。**源棋谱只读**：讲解与分析数据（胜率/目差/AI 首选与变化图）都写进同目录的 \`<源名>-sensei.sgf\` 副本，源文件永不修改；读取同一盘棋时若副本已存在（工具与面板都一样）就直接读副本，因为那才是上一次复盘的成果。补算引擎默认用插件自带的 engine 目录（开箱即用），也可用配置 engineDir / kataGoPath / kataGoModel 换成用户自己的引擎与权重。路径参数支持绝对路径或相对当前会话工作区的相对路径。`
 
 /** 配图 URL 的基地址（形如 http://127.0.0.1:3080）；由 webServer 挂载时填充。 */
 function createDiagramBase() {
@@ -175,42 +177,6 @@ function sessionRootOf(ctx, sessionId) {
     return typeof cwd === 'string' ? cwd : ''
   } catch {
     return ''
-  }
-}
-
-/**
- * 棋盘数据：把主变化线与摆子压成坐标整数，浏览器直接画，不必自己解析 SGF。
- *
- * 为什么与问题手同一路由返回：客户端拿不到 game（它既不能读盘也不能调工具），
- * 单独开一条棋盘路由等于同一份棋谱再读一次、再解析一次；而棋盘与问题手永远
- * 是同一局，同一次请求里一起给出既省事又不会二者不同步。
- *
- * @param {object} game parseGame 的返回值
- * @returns {{ size: number, komi: number, handicap: number,
- *             moves: Array<{c: string, x: number, y: number}>,
- *             setup: { black: number[][], white: number[][] } }}
- */
-function compactBoard(game) {
-  const size = game.info?.size ?? 19
-  /** 坐标 -> [x, y]；虚着/越界返回 null。 */
-  const point = (coord) => {
-    const at = coordLabel(coord ?? '', size)
-    if (at.pass || at.x < 0 || at.y < 0 || at.x >= size || at.y >= size) return null
-    return [at.x, at.y]
-  }
-  return {
-    size,
-    komi: game.info?.komi ?? 0,
-    handicap: game.info?.handicap ?? 0,
-    // 虚着用 x=y=-1 表示（棋盘不落子，但手顺要保留，否则手数对不上）
-    moves: (game.moves ?? []).map((m) => {
-      const p = m.pass ? null : point(m.coord)
-      return p === null ? { c: m.color, x: -1, y: -1 } : { c: m.color, x: p[0], y: p[1] }
-    }),
-    setup: {
-      black: (game.setup?.black ?? []).map(point).filter((p) => p !== null),
-      white: (game.setup?.white ?? []).map(point).filter((p) => p !== null),
-    },
   }
 }
 
@@ -790,6 +756,13 @@ function registerPanelRoute(ctx, cfg, diagram) {
           )
           const rawWidth = Math.trunc(Number(url.searchParams.get('w')))
           const lastMove = move > 0 && board.moves[move - 1].x >= 0 ? board.moves[move - 1] : null
+          // 领地显示 / 形势判断（用户 2026-09-19 要求，照 Lizzieyzy 的做法）：
+          // ?territory=1 时算出每点归属并画成小方块，同时在盘下附一行简易点目。
+          // 算式是纯启发式（只按空块紧邻的棋子颜色归属），不是引擎的胜率/目差。
+          const wantTerritory = url.searchParams.get('territory') === '1'
+          const territoryEst = wantTerritory
+            ? estimateTerritory(grid, size, { komi: game.info?.komi ?? 0 })
+            : null
           const svg = renderBoardSvg({
             size,
             grid,
@@ -797,6 +770,13 @@ function registerPanelRoute(ctx, cfg, diagram) {
             marks: marks.marks,
             lastMove,
             caption: (url.searchParams.get('cap') ?? '').slice(0, 120),
+            // 形势判断附在图注之下（两行都在盘下，视口高度按两行一起加）
+            ...(territoryEst !== null
+              ? {
+                  territory: territoryEst.owner,
+                  footer: `简易形势判断：${territoryScoreText(territoryEst)}`,
+                }
+              : {}),
             // 黑方白方的名字直接画在盘上沿：配图在对话正文里，四周没有别的说明
             players: game.info?.players,
             width: Number.isFinite(rawWidth) && rawWidth >= 120 ? Math.min(rawWidth, 1600) : 640,

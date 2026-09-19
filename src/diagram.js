@@ -13,6 +13,8 @@
 //
 // 本模块只做纯计算与字符串拼装：不读盘、不依赖 ctx，便于直接单测。
 
+import { estimateTerritory } from './territory.js'
+
 /** 列标（跳过 I，与 sgf.js 的 coordLabel 一致）。 */
 export const COLS = 'ABCDEFGHJKLMNOPQRST'
 
@@ -295,6 +297,8 @@ function clipName(text) {
  * @param {Array<{x:number,y:number,shape:string,text?:string}>} [spec.marks] 重点棋子标注
  * @param {{x:number,y:number,color:string}|null} [spec.lastMove] 最后一手（反色小圆点）
  * @param {string} [spec.caption] 图注（画在图下方）
+ * @param {string} [spec.footer] 附注（画在图注之下；形势判断一行就放这里）
+ * @param {number[]} [spec.territory] 每点归属（0 单官 / 1 黑 / 2 白）：给了就画领地小方块
  * @param {{black?:string,white?:string,blackRank?:string,whiteRank?:string}} [spec.players] 棋手（画在盘上沿的名条）
  * @param {number} [spec.width] 输出像素宽度，默认 640
  * @returns {string} 完整 SVG 文档
@@ -303,6 +307,7 @@ export function renderBoardSvg(spec) {
   const size = safeSize(spec.size)
   const grid = Array.isArray(spec.grid) ? spec.grid : emptyGrid(size)
   const caption = typeof spec.caption === 'string' ? spec.caption.trim() : ''
+  const footer = typeof spec.footer === 'string' ? spec.footer.trim() : ''
   // 宽度也夹住：路由侧本来就会夹，但 renderBoardSvg 是公开函数，别让调用方
   // 用 spec.width 造出超大 SVG（2026-09 复审）
   const width = Math.min(1600, Math.max(120, Math.trunc(spec.width) || 640))
@@ -311,7 +316,8 @@ export function renderBoardSvg(spec) {
   const hasNames = names.black !== '' || names.white !== ''
   const nameH = hasNames ? NAME_BAND : 0
   const captionH = caption === '' ? 0 : 7
-  const viewH = nameH + VIEW + captionH
+  const footerH = footer === '' ? 0 : 7
+  const viewH = nameH + VIEW + captionH + footerH
   const height = Math.round((width * viewH) / VIEW)
   const step = (VIEW - PAD * 2) / Math.max(1, size - 1)
   const pos = (i) => PAD + i * step
@@ -361,6 +367,26 @@ export function renderBoardSvg(spec) {
   for (let i = 0; i < size; i++) {
     out.push(`<text x="${pos(i).toFixed(2)}" y="${(PAD / 2 + 1.4).toFixed(2)}" font-size="2.8" fill="#111111" text-anchor="middle" font-family="sans-serif">${esc(COLS.charAt(i))}</text>`)
     out.push(`<text x="${(PAD / 2).toFixed(2)}" y="${(pos(i) + 1.1).toFixed(2)}" font-size="2.8" fill="#111111" text-anchor="middle" font-family="sans-serif">${size - i}</text>`)
+  }
+
+  // 领地显示（简易形势判断）：只画**空点**上的归属小方块——黑白都挨或都不挨的
+  // 单官不画（画了等于替棋手宣布中立点归谁）。方块比棋子小一圈，压在盘面棋子之下。
+  if (Array.isArray(spec.territory)) {
+    const side = step * 0.52
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const t = spec.territory[y * size + x]
+        if (t !== 1 && t !== 2) continue
+        // 只标**空点**：owner 数组里棋子也记着自己的颜色，落子处不该再叠方块
+        if (grid[y * size + x] !== 0) continue
+        const black = t === 1
+        out.push(`<rect class="dgs-terr" x="${(pos(x) - side / 2).toFixed(2)}" y="${(pos(y) - side / 2).toFixed(2)}"`
+          + ` width="${side.toFixed(2)}" height="${side.toFixed(2)}"`
+          + ` fill="${black ? 'rgba(20, 22, 26, 0.62)' : 'rgba(250, 250, 252, 0.82)'}"`
+          + (black ? '' : ' stroke="rgba(17, 17, 17, 0.35)" stroke-width="0.12"')
+          + '/>')
+      }
+    }
   }
 
   // 盘面棋子（白子带描边，与 Lizzieyzy drawStoneSimple 一致）
@@ -423,12 +449,17 @@ export function renderBoardSvg(spec) {
   if (caption !== '') {
     out.push(`<text x="${VIEW / 2}" y="${nameH + VIEW + 4.6}" font-size="3.6" fill="#3b2f1c" text-anchor="middle" font-family="sans-serif">${esc(caption)}</text>`)
   }
+  // 附注（形势判断一行）：排在图注之下；没有图注时直接贴盘底。
+  if (footer !== '') {
+    out.push(`<text x="${VIEW / 2}" y="${nameH + VIEW + captionH + 4.6}" font-size="3.2" fill="#4a3a22" text-anchor="middle" font-family="sans-serif">${esc(footer)}</text>`)
+  }
 
   const who = hasNames
     ? [names.black === '' ? '' : `黑 ${names.black}`, names.white === '' ? '' : `白 ${names.white}`]
         .filter((t) => t !== '').join(' 对 ')
     : ''
-  const aria = who === '' ? (caption === '' ? '围棋局面配图' : caption) : `${who}${caption === '' ? '' : '：' + caption}`
+  const headline = caption !== '' ? caption : footer
+  const aria = who === '' ? (headline === '' ? '围棋局面配图' : headline) : `${who}${headline === '' ? '' : '：' + headline}`
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${VIEW} ${viewH}"`
     + ` width="${width}" height="${height}" role="img" aria-label="${esc(aria)}">`
     + out.join('')

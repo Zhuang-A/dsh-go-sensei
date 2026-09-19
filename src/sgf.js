@@ -104,6 +104,43 @@ export function coordList(coords, size = 19) {
 }
 
 /**
+ * 把 parseGame 的棋局压成「逐格数据」：主变化线与摆子都转成整数坐标。
+ *
+ * 为什么独占一个导出：这条转换原先只写在宿主面板路由里（index.mjs 的 compactBoard），
+ * 而画棋盘/算领地（src/diagram.js 的 buildGrid、src/territory.js）在工具侧也要用。
+ * 两边各写一份必然会漂——本项目已经因为「两套管线」吃过亏（见 tools.js 的
+ * autoComputeIfNeeded 注释），所以只保留这一份实现。
+ *
+ * @param {object} game parseGame 的返回值
+ * @returns {{ size: number, komi: number, handicap: number,
+ *             moves: Array<{c: string, x: number, y: number}>,
+ *             setup: { black: number[][], white: number[][] } }}
+ *   虚着用 x=y=-1 表示（棋盘不落子，但手顺要保留，否则手数对不上）
+ */
+export function compactBoard(game) {
+  const size = game?.info?.size ?? 19
+  /** 坐标 -> [x, y]；虚着/越界返回 null。 */
+  const point = (coord) => {
+    const at = coordLabel(coord ?? '', size)
+    if (at.pass || at.x < 0 || at.y < 0 || at.x >= size || at.y >= size) return null
+    return [at.x, at.y]
+  }
+  return {
+    size,
+    komi: game?.info?.komi ?? 0,
+    handicap: game?.info?.handicap ?? 0,
+    moves: (game?.moves ?? []).map((m) => {
+      const p = m.pass ? null : point(m.coord)
+      return p === null ? { c: m.color, x: -1, y: -1 } : { c: m.color, x: p[0], y: p[1] }
+    }),
+    setup: {
+      black: (game?.setup?.black ?? []).map(point).filter((p) => p !== null),
+      white: (game?.setup?.white ?? []).map(point).filter((p) => p !== null),
+    },
+  }
+}
+
+/**
  * KataGo 风格坐标数组转序列文本。
  * @param {string[]} coords KataGo 坐标数组
  * @param {number} size 棋盘路数

@@ -1,8 +1,8 @@
 {
   "name": "dsh-go-sensei",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "type": "module",
-  "description": "DeepGo Sensei —— DSH 围棋复盘教练插件：把围棋 AI 的数学判断（胜率/目差/候选点/变化图）翻译成老师级口头讲解，供自学棋手复盘；自带 KataGo 18b 引擎与权重，装完即用，Web 面板带一块可收起的棋盘（点问题手即跳转、可跟随讲解），讲解可回写 SGF 注释。",
+  "description": "DeepGo Sensei —— DSH 围棋复盘教练插件：把围棋 AI 的数学判断（胜率/目差/候选点/变化图）翻译成老师级口头讲解，供自学棋手复盘；自带 KataGo 18b 引擎与权重，装完即用，Web 面板带一块可收起的棋盘（点问题手即跳转、可跟随讲解、可叠简易形势判断与领地显示），讲解可回写 SGF 注释。",
   "keywords": [
     "ds",
     "deepseek-harness",
@@ -32,7 +32,7 @@
   ],
   "scripts": {
     "test": "node --test",
-    "check": "node --check index.mjs && node --check client.js && node --check src/sgf.js && node --check src/review.js && node --check src/tools.js && node --check src/cache.js && node --check src/engine.js && node --check src/engine-resolve.js && node --check src/diagram.js"
+    "check": "node --check index.mjs && node --check client.js && node --check src/sgf.js && node --check src/review.js && node --check src/tools.js && node --check src/cache.js && node --check src/engine.js && node --check src/engine-resolve.js && node --check src/diagram.js && node --check src/territory.js"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.2",
