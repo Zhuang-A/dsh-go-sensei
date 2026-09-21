@@ -1,0 +1,325 @@
+{
+ "schema": "distillation-gates/判态版 v4.6（单文件）",
+ "task": "go-detailed-explanation",
+ "book_cluster": [
+  "围棋正招与俗手（沈果孙，主书）",
+  "常用术语格言图解",
+  "围棋俗筋剖析（藤泽秀行，抽样）"
+ ],
+ "tier": "L2.5 体系卡",
+ "date": "2026-09-21",
+ "artifact": {
+  "skill": "skills/go-detailed-explanation/SKILL.md",
+  "index": "skills/INDEX.md",
+  "glossary": "skills/GLOSSARY.md",
+  "test_prompts": "skills/test-prompts.json",
+  "digest": "DIGEST.md",
+  "skill_bytes": 24006,
+  "desc_chars": 324
+ },
+ "gates": {
+  "gate1_defense3_fidelity": {
+   "status": "passed",
+   "hard": true,
+   "evidence": [
+    {
+     "check": "候选池引文回源核验",
+     "tool": "tools/go-verify-notes.mjs",
+     "result": "206/206 命中（错锚 0 ／ 无锚 0 ／ 超160字 0）",
+     "note": "含 26 条经机器回源订正 + 4 条人工定点修补的条目"
+    },
+    {
+     "check": "技能文件池 id 实存 + R 段引文与池逐字一致",
+     "tool": "tools/go-check-skill-refs.mjs",
+     "result": "PASS：池 136 条｜SKILL 引用 69 ｜ GLOSSARY 74 ｜ INDEX 1｜缺 id 0｜引文不符 0｜页锚不符 0｜R 段引文行 57"
+    },
+    {
+     "check": "操作层冒充扫描（◈ 冒充）",
+     "tool": "scripts/defense3_impersonation_scan.py",
+     "result": "suspects=[]（quote_lines=77，labeled_runs=3，无冒充嫌疑）"
+    },
+    {
+     "check": "四防线① 无原文引用不进候选池",
+     "result": "verified.md 136 条中 111 条带逐字引文；无引文的 25 条均为 PR/CA 类转述条目，未进入 SKILL.md 的 R 段"
+    }
+   ],
+   "notes": "口径：引文一致性按「只保留汉字/字母/数字」归一后逐字比对（手册引文硬纪律 #3：核对失败只允许标点/换行差异）。"
+  },
+  "gate2_blind_routing": {
+   "status": "passed",
+   "hard": true,
+   "evidence": [
+    {
+     "check": "词表盲测（机器初判）",
+     "tool": "scripts/blindtest_lexicon_mock_v1.py",
+     "result": "8 题：mechanical-clear 2 ／ needs_llm 6；top1=目标 1/8；红线（投资域词表）0（外域语料，该计数不得当判停结论）"
+    },
+    {
+     "check": "域内红线词表机器初判",
+     "tool": "tools/go-blindtest-redline.mjs（本次自建，替代投资域 REDLINE）",
+     "result": "none 6 ／ emotional-▲ 1（P7）／ medical-🔴 1（P8 医疗不适用域）"
+    },
+    {
+     "check": "独立判官盲测（desc 全文喂判官）",
+     "tool": "独立子代理（judge-input.md 5290 字节）",
+     "result": "7 题：PASS 5 ／ 🔴 1（P7 情绪判停缺失）／ ▲ 1（P5 词面拉力，语义层兜住，非真实抢单）"
+    },
+    {
+     "check": "🔴 修复 + 复判（hill-climbing 闭环）",
+     "tool": "独立复判子代理",
+     "result": "PASS：desc 情绪判停条款已存在（原句已核）＋ CHECKPOINT 第 6 条已存在；desc 324 字符 < 1024"
+    },
+    {
+     "check": "邻族抢单消解",
+     "result": "desc 触发词摘除与写作域重叠的「复盘」；P6 由抢单（top=self）改为 no-lexicon-hit，判官判 top1=qu-ai-wei"
+    }
+   ],
+   "residual": [
+    {
+     "id": "P5",
+     "level": "▲建议",
+     "note": "触发词「改下」为裸词，变化图搜索类请求仍有词面拉力（命中数 1）。判官结论：语义层由「不出配图／变化图搜索让位」兜住，不构成真实抢单。保留，登记为已知 ▲。"
+    },
+    {
+     "id": "judge-caveat",
+     "level": "▲建议",
+     "note": "判官在 P4 的理由里把正文 B2 的『胜率/目差/形势判断』误述为出现在 desc 中（desc 已刻意不含这些判别词）。P4 结论（让位）正确，但理由引证位置有误，登记留痕。"
+    }
+   ]
+  },
+  "gate3_darwin": {
+   "status": "passed",
+   "hard": false,
+   "evidence": [
+    {
+     "check": "达尔文机器初评（硬闸表）",
+     "tool": "scripts/machine_precheck_v2.py",
+     "result": "d1–d9 零 🔴；唯一非 pass = d5-c2 warn（『表格/示例/模板』计数项，机器只数词频，交 judge）",
+     "counts": {
+      "machine_static_score": 77,
+      "d8": "coverage=none（实测层，机器不覆盖）"
+     }
+    },
+    {
+     "check": "机器层适用性前置检查",
+     "tool": "scripts/machine_layer_readycheck.py",
+     "result": "machine-ok（四闸最小输入齐备）",
+     "counts": {
+      "desc_chars": 324,
+      "trigger_keywords": 22,
+      "quote_pairs": 85,
+      "page_anchors": 57,
+      "source_md_files": 3,
+      "source_pages": 649,
+      "E_steps": 7,
+      "checkpoints": 1
+     }
+    },
+    {
+     "check": "硬闸 d1 结构/desc 含何时用+触发词",
+     "result": "pass"
+    },
+    {
+     "check": "硬闸 d2 工作流",
+     "result": "pass（E 段 7 步，每步含 输入/动作/输出/出口，另有失败分支 4 条）"
+    },
+    {
+     "check": "硬闸 d5 CHECKPOINT + 输出结构",
+     "result": "pass（CHECKPOINT 6 条 + 固定五段输出结构）"
+    },
+    {
+     "check": "硬闸 d7 口径漂移 / related_skills 死链",
+     "result": "pass（related_skills 为空数组；正文无指向不存在 slug 的反引号引用——go_* 工具名用下划线写法，不构成 slug 引用）"
+    },
+    {
+     "check": "硬闸 d8 越界",
+     "result": "pass（B2 明确让位：不做引擎数值、不出配图、不判死活精确结论）"
+    },
+    {
+     "check": "软闸：空话尾巴 / 超 260 字符行 / 失败闭环 / 检查点 / 章节锚 / 反例",
+     "result": "空话尾巴 0（d1-c4 pass）；反例章 B4 独立存在 8 条；检查点 🔴CHECKPOINT 存在；章节锚 R/I/A1/A2/E/B 齐全"
+    }
+   ]
+  }
+ },
+ "machine_layer_scripts_run": [
+  {
+   "script": "machine_precheck_v2.py",
+   "mode": "run",
+   "result": "OK"
+  },
+  {
+   "script": "machine_layer_readycheck.py",
+   "mode": "run",
+   "result": "machine-ok"
+  },
+  {
+   "script": "defense3_impersonation_scan.py",
+   "mode": "run",
+   "result": "suspects=[]"
+  },
+  {
+   "script": "blindtest_lexicon_mock_v1.py",
+   "mode": "run",
+   "result": "已跑（外域，须配域内词表，见 gate2）"
+  }
+ ],
+ "deviations": [
+  {
+   "id": "D1-gate-tools-missing",
+   "level": "披露",
+   "note": "手册 V4.6 强制的 tools/gate_start.py、gate_stage.py、gate_checklist.py、preflight.py、postflight.py、gate_selftest.py、pitfall_audit.py、gate_layer_quotes.py 在本机不存在（已全盘搜索 C:\\dsh）。实际交付的包只有 scripts/ 下 4 个机器层脚本 + SKILL.md + extractors/ + manual-history/。",
+   "adaptation": "轻量等价适配：① 机器层 ¥0 先行（4 个脚本实跑 + 本次自建 3 个机器层脚本）；② 阶段产物逐段落盘 + 时间戳；③ 三闸按判态制记录在本文件；④ 开工前逐字抄录手册 16 条硬条款落盘为 manual-read-receipt.json（替代 gate_start.py 的『手册已读』自证）。"
+  },
+  {
+   "id": "D2-redline-lexicon",
+   "level": "披露",
+   "note": "blindtest_lexicon_mock_v1.py 内嵌 REDLINE 是投资域（时点预测）词表，对外域语料无效（脚本自身也会打出该警告）。",
+   "adaptation": "自建 tools/go-blindtest-redline.mjs 提供围棋教学域红线词表（crisis 8 词 / emotional 8 词 / medical 7 词 + soft 4 词），机器只判停，语义结论交独立判官。"
+  },
+  {
+   "id": "D3-counter-format-mismatch",
+   "level": "披露",
+   "note": "readycheck 的 R_quote_lines 计数器期望行首形如 `- R<数字>` 或 `- 「`，而本技能 R 段采用 `- [池 id] 《书名》〔pN〕：「逐字引文」`（为让池 id 与页锚可机检）。故该计数显示 0，属格式口径不匹配，不构成闸条件；同一文件的 r_quotes（「」计数=57）与 page_anchors（〔pN〕计数=57）已足够。"
+  },
+  {
+   "id": "D4-no-github-plugin-package",
+   "level": "披露",
+   "note": "本册按用户选择只装机到 C:\\Users\\Zhuang\\.dsh\\skills\\，不打包为 DSH 插件（手册 §6 可选）。"
+  },
+  {
+   "id": "D5",
+   "状态": "开放（环境，非产出）",
+   "内容": "`preflight.py` ③ 与 `postflight.py` 的若干项按**作者机三条产品线**（C:\\dsh\\金融投资／家庭教育／债券与衍生品）与作者配套脚本（final_acceptance.py、打包 tgz、edu:* 系列）判据；本机不存在这些宿主工作区 ⇒ 报 🔴。同类检查在 ② 已正确判「不适用」，③ 与 postflight 缺同等短路。**已核对：本条不影响本任务任何产出**，登记为异机假红，不通过伪造宿主目录来\"变绿\"。"
+  },
+  {
+   "id": "D6",
+   "状态": "开放（随包件缺失）",
+   "内容": "`pitfall_audit.py --check` 的对账对象是**含 A-xx 条目的《蒸馏工程避坑手册》**，该手册自 4.9.9 起**不随包发行**（包内随带 `防坑要点-TOP20.md`，无 A-xx 编号）⇒ 本机\"识别到条目 0 个\"报 🔴。判据对象不存在 ⇒ 应判\"不适用\"，脚本无此短路。"
+  },
+  {
+   "id": "D7",
+   "状态": "已定位（沙箱）",
+   "内容": "`gate_selftest.py`／`check_bandid_single_source.py --selftest` 等**写入型自检**会在系统临时目录建样本；workspace-write 沙箱拒绝该写入（实测 `PermissionError [Errno 13]` + `[sandbox: file access denied]`）。放宽到 danger-full-access 后 **gate_selftest 九组坏样本全拦、好样本放行（rc=0）**。⇒ 属沙箱行为，非门禁缺陷。"
+  },
+  {
+   "id": "D8",
+   "状态": "已闭合（自伤登记）",
+   "内容": "自建同步脚本 `go-sync-quotes.mjs` **首版真机自伤**：把 `- 来源：band2-025 + band2-026` 用单 id 正则只取了第一个来源，于是把 VD-010 的引文换成了 band2-025 的引文 —— **改对了格式、改错了内容**（比不改更糟）。当场被自建闸的 9 条\"引文不符\"抓出，已回滚并改为\"取全部来源 + 钉死序列包含关系唯一命中才动，否则跳过并报出\"。教训：多源条目的来源是一组，不是一个。"
+  }
+ ],
+ "budget": {
+  "currency": "CNY",
+  "model": "deepseek-v4-flash",
+  "cap": 20,
+  "ocr_cost": 0,
+  "note": "OCR 用 Windows.Media.Ocr 本地完成（¥0）；LLM 支出＝4 个提取子代理 + 1 个引文修复子代理 + 1 个去重合并子代理 + 2 个判官子代理（盲测判官/复判官）+ 1 个 DIGEST 写作子代理 + 主会话构造。",
+  "estimate_total": "待回填（约 ¥12–16）"
+ },
+ "final_verdict": {
+  "gate1": "passed",
+  "gate2": "passed（修复后零🔴；余 1 条 ▲）",
+  "gate3": "passed（零🔴；余 1 条 d5-c2 warn 交 judge，属计数项）",
+  "overall": "PASS（零🔴）"
+ },
+ "交付盲复核": {
+  "轮次": 2,
+  "派发纪律": "只给「SKILL 全文 + 机器证据包」，不给主会话结论、不给测试期望、不给上一轮判官报告（第 2 轮）；两次均由未参与产出的独立子代理执行。",
+  "第1轮": {
+   "判官": "独立子代理 a6c50112-feca-406b-a8be-b96e531f1c88",
+   "结论": "异议",
+   "档位": "B（小修后交付）",
+   "报告": ".work/delivery-blind-judge.md",
+   "要点": [
+    "正文引用 `## R 原文锚` 中不存在的池 id ≥12 个（VB-008／VB-012／VC-003／VC-006／VE-012／VF-013／VG-012／VG-021／VH-005／VH-012／VI-003／VI-012）⇒ 溯源契约破口",
+    "步骤 4 出口「理由必须挂上 R 段引文」与 CHECKPOINT「挂不上池 id → 回步骤 3」对这些手法形成返回循环",
+    "配图/让位措辞两套口径（description+B2 说\"让位/不出配图\" vs A2+步骤 6 说\"调 go_draw_diagram\"）",
+    "18K–10K 档只给了动作（\"顺带解释\"）没给释义文本；A2 表的愚形／厚薄／子效无定义",
+    "数值让位在 description／B2／A2／E 步骤 1·5·6 重复 4–5 处"
+   ]
+  },
+  "第2轮": {
+   "判官": "独立子代理 dd39152a-374f-4527-a895-35594b9cd5e8",
+   "结论": "异议",
+   "档位": "B（小修后交付）",
+   "报告": ".work/delivery-blind-judge-round2.md",
+   "要点": [
+    "A2「曲」行的判据「三路向二路曲多正着、二路向二路曲多俗手」挂 [VC-003]，而 VC-003 引文只是被截断的过渡句 ⇒ 判据在本件内无逐字原文支撑（**溯源语义破口**，比形式悬空更隐蔽）",
+    "「粘」行「粘劫最难分清正俗」挂 [VB-006] 不等值，更贴的 VB-003 未挂",
+    "步骤 4 的**出口字段**仍无界（终止句只写在 CHECKPOINT）",
+    "description「不做引擎数值」与步骤 5「可报一句」字面张力；输出结构标题「固定五段」与第 4 段「（可选）」张力",
+    "失败分支未覆盖「学生只给口头描述、无棋谱坐标」",
+    "第 2 轮判官明确写明：\"不必返工，两处小修即可\""
+   ]
+  },
+  "整改": [
+   "① 新增 `tools/go-r-section-cover.mjs`：把正文引用到的 12 个池 id 全部补进 R 段（新增 `### R7 补齐` 小节），并把池内缺逐字引文的 25 条从来源笔记回补进 verified.md；R 段条目 57 → 69，悬空 0。",
+   "② 新增 `tools/go-polish-skill.mjs`：让位/配图措辞全文统一为「让位给 go_draw_diagram」；18K–10K 档补 8 词释义文本；A2 补「术语速释」；CHECKPOINT 第 3 条补兜底出口。",
+   "③ 新增 `tools/go-polish2-skill.mjs`：VC-003 引文回源 p67 取**完整两句**（判据首次真正有逐字支撑）；「粘」行补挂 VB-003；步骤 4 出口补终止句；description 与输出结构标题消张力；失败分支补无坐标情形。",
+   "④ 每轮整改后复跑 `verify_candidates.py --all`（206/206 回源命中）与 `go-check-skill-refs.mjs`（缺 id 0／引文不符 0／页锚不符 0）。"
+  ],
+  "最终判态": "两轮独立判官均为「异议 · B 档（小修后交付）」，均判定**不需返工**；两轮提出的全部小修项已逐条落实并机器复核。按手册 §21.6 第 4 条（机器命中不因 judge 翻案、judge 必修→修复→复验），已按「修复→复验」闭环处理；未再做第 3 轮判官（判官两轮均未提出架构级异议，且第 2 轮已给出明确可机械执行的修法）。"
+ },
+ "门禁套件": {
+  "版本": "V4.9.17（GitHub winsonpong98-cloud/dsh-distillation-director，package.json version 4.9.17）",
+  "来源": "github 仓库完整克隆（含 scripts/gates/ 38 件门禁套件）；此前 npm 上的 4.6.6 是**裁剪版**，不含 gates/ 目录 —— 这是本任务早期\"门禁脚本不存在\"结论的**真正原因**，已更正。",
+  "安装": "init_workspace.py 装入 <工作区>\\tools\\（45 个文件）；配置 .dsh\\gate-kit\\workspace.json",
+  "实跑": [
+   "gate_start",
+   "gate_stage",
+   "gate_checklist",
+   "preflight",
+   "postflight",
+   "gate_selftest",
+   "pitfall_audit",
+   "verify_candidates",
+   "layer_quotes_gate",
+   "check_install_state",
+   "machine_precheck_v2",
+   "machine_layer_readycheck",
+   "defense3_impersonation_scan",
+   "blindtest_lexicon_mock_v1"
+  ]
+ },
+ "防线3语义层复核": {
+  "判官": "独立子代理 9c462958-6abd-41de-9742-5f4cb42963c8（未参与产出）",
+  "报告": "evidence/fidelity-judge.md",
+  "抽样回源": "抽 20 条（R1–R7 全覆盖、三书覆盖）→ 命中 20 / 不命中 0；另**全量**核 R 段 94 条引文，逐字无差异；页锚与书源标注全对。",
+  "OCR 破口": "清况[VB-003]／但个[VE-007]／荚[VD-002]／同题[VD-005]／弭行[VF-010]／蘢[VI-011]／此勢[VH-014] 等**正确保留**，判官未计为错误（判官并明确要求「不得据本报告改动任何引文」）。",
+  "over_claim": "11 处（必修 6 / 建议 5）",
+  "操作层冒充": "0 处硬冒充；4 处「分层不清」（操作内容与书中内容同段无标记）",
+  "整改": [
+   "B1 恢复 [VA-005] 的「大多」；「恶手易于纠正／危害反不如俗手」改挂 [VA-005][VA-006]",
+   "B2 删去「原文本身就是这样限定的」这一普遍化断言，改为「原文兼有条件式限定与全称式判据」",
+   "B3 速查表「长／贴」行补回 [VD-010] 的「通常情况下」",
+   "B4 速查表「团／双／挤」行补回 [VF-008] 的例外条件（与 GLOSSARY 对齐）",
+   "B7 GLOSSARY「大场」[VH-003] 补回「现代围棋占完大场再打入反而不多见」的转折",
+   "B8 删自撰概念「胜负在气数」，回到原文「谁能吃掉谁才是最重要的」[VG-004]",
+   "B5「遇飞宜跨」→「遇飞常宜跨」（[VC-007] 的「常需」）",
+   "B6 删去池内不存在的举例「枧」，换成池内实例「清况」[VB-003]／「但个」[VE-007]",
+   "B9「核心机制」降为「一个典型机制」（[VA-009]）",
+   "B10 三层判据各自挂 id：周围配置 [VA-012]、全局时机 [VG-002][VG-003]、棋块安全 [VA-010]",
+   "B11「不是判手法名字」改挂 [VA-012]",
+   "C1/C2/C3/C4 四处「分层不清」：操作约定与框架语全部加上显式标记（「操作约定，非书中内容」／「本技能框架语，非书中句」／18K 释义段标「非池内引文」）"
+  ],
+  "整改工具": "tools/go-fix-overclaim.mjs（幂等 + 全有全无；**只改转述与定性措辞，绝不改任何逐字引文**）",
+  "整改后复验": "go-r-section-cover 悬空 0（新增 3 个被引用 id 已补入 R7，R 段 57→72 行）；go-check-skill-refs 缺 id 0／引文不符 0／页锚不符 0；verify_candidates --all 206/206；machine_precheck machine_static=77.00 零🔴；gate_start／gate_stage／gate_checklist 全绿。",
+  "结论": "抽样 20/20、全量 94 条逐字无误 ⇒ **忠实度底线成立**；11 处 over-claim 与 4 处分层不清**已全部整改**。"
+ },
+ "门禁实跑读数": {
+  "gate_start": "✔ 可开工（🔴 0 项）：手册哈希一致／24 条条款逐字命中／执行单 37 项官方形态／机器层 5 脚本／4 个提取器 prompt 含官方模板格式行",
+  "gate_stage": "✔ 全部阶段门禁 PASS（阶段0/1/1.5/2/4/5）",
+  "gate_checklist": "✔ 35 项证据＋产物在位、例外 2、🔴 0",
+  "gate_selftest": "✔ 九组坏样本全拦、好样本放行（rc=0）",
+  "verify_candidates": "✔ 全部通过（4 波段 206/206 引文回源命中）",
+  "machine_precheck_v2": "machine_static=77.00，d1–d9 零🔴（唯一 warn ＝ d5-c2 计数项）",
+  "machine_layer_readycheck": "machine-ok（四闸最小输入齐备）",
+  "defense3_impersonation_scan": "suspects=[]",
+  "blindtest_lexicon_mock_v1": "mechanical-clear 2 ／ needs_llm 6 ／ 8 题全跑",
+  "check_install_state": "✔ 三层装机态闸全绿（针对插件包本身）",
+  "preflight": "🔴 4 项不符 —— 全为作者机专属判据（三条产品线宿主工作区 + final_acceptance），已登记为异机假红（deviations D5）",
+  "postflight": "🔴 17 项不符 —— 同上族（作者机三条线／edu 系列／打包 tgz／若干自证需要写系统临时目录），已登记（D5/D7）",
+  "pitfall_audit": "🔴 条目数 0 —— 判据对象《避坑手册》不随包发行，已登记为\"不适用\"（D6）",
+  "layer_quotes_gate": "🔴 缺当册配置 —— 本件附属文件按体例**不含逐字引文**⇒ 不适用（已在执行单 §4 登记）"
+ }
+}

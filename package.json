@@ -25,6 +25,7 @@
     "client.js",
     "src/",
     "scripts/",
+    "skills/",
     "engine/",
     "cordis.patch.yml",
     "README.md",
