@@ -13,6 +13,7 @@ import { RANKS, reviewGame, inferLevel, aiCandidatesByMove } from './src/review.
 import { parseGame, decodeBuffer, compactBoard, winrateForColor, scoreForColor, hasTerritoryData, territoryOfMove, territorySeriesOf, MAX_SGF_CHARS } from './src/sgf.js'
 import { senseiPathFor } from './src/derived.js'
 import { buildGrid, parseSequence, parseMarks, renderBoardSvg } from './src/diagram.js'
+import { ensureSkill, inspectSkill, defaultSkillSource, resolveSkillsRoot, resolveDshHome, SKILL_NAME } from './src/skill-install.js'
 
 export const name = 'go-sensei'
 // 硬依赖：tools 注册工具、systemPrompt 挂人设段、fs 读写棋谱。
@@ -47,9 +48,14 @@ export const Config = Schema.object({
   kataGoModel: Schema.string().default(''),
   /** KataGo 补算每手搜索量。 */
   maxVisits: Schema.number().default(100),
+  /**
+   * 插件加载时把随件的「围棋详细讲解」技能装进 DSH 技能根（默认开）。
+   * 关掉＝不碰技能目录，同时也就不会要求模型去加载那个技能（见 buildPersona 第 8 条）。
+   */
+  autoInstallSkill: Schema.boolean().default(true),
 })
 
-const DEFAULT_CONFIG = {
+export const DEFAULT_CONFIG = {
   level: 'auto',
   winrateThreshold: 0.03,
   scoreThreshold: 3,
@@ -61,14 +67,15 @@ const DEFAULT_CONFIG = {
   kataGoConfig: '',
   kataGoModel: '',
   maxVisits: 100,
+  autoInstallSkill: true,
 }
 
 /**
  * 围棋老师人设段。放在 persona-prefix 之后（约第 1 位），
  * 以条件式开头："当用户请求围棋复盘时"才生效，不影响其他会话主题。
  */
-function buildPersona(cfg) {
-  return `当用户请求围棋复盘、分析 SGF 棋谱、或询问某一手棋的好坏时，你以温和耐心的围棋老师（DeepGo Sensei）身份讲解：
+export function buildPersona(cfg, skill = null) {
+  const persona = `当用户请求围棋复盘、分析 SGF 棋谱、或询问某一手棋的好坏时，你以温和耐心的围棋老师（DeepGo Sensei）身份讲解：
 
 1. 教学姿态：先复述这手棋的意图，或先问学生想听哪方面（"这手为什么不好"还是"该怎么下"），再指出问题，最后给出具体改进建议；多鼓励、少批评、不嘲讽。
 2. 讲解语言：用口语化的棋理讲解（如"这里就像把家门让给了对方"）；胜率与目差只是佐证——先讲棋理，再引用数值；绝不虚构分析数据或变化图。
@@ -77,6 +84,12 @@ function buildPersona(cfg) {
 5. 配图讲解：回答追问（尤其"第 N 手改下 X 会怎样""这里连没连上"）时，**必须**用 go_draw_diagram 生成配图，并在回答正文里用 Markdown 图片语法 \`![一句话说明](工具返回的 URL)\` 嵌入。图上的约定：变化着法按 1-9、A-Z 逐手编号（起始颜色由工具按局面自动定），关键棋子用 triangle（三角形）、square、circle、label（字母）标出；一张图只讲一个变化，图下配一句话说明。**绝不用文字描述代替配图，也绝不编造图片 URL**——URL 只能来自 go_draw_diagram 的返回值。
 6. 形势判断：讲"这块地归谁""现在谁领先"时，用 go_draw_diagram 的 territory=true 叠加形势判断（**引擎归属图**判出的黑地/白地，未定处留白，图下附一行双方目数与领先）。判定口径照 Lizzieyzy：|归属| < 0.4 算未定、空点要过四邻过滤、落在对方地里的己方子按死子算，与面板的「形势判断」是同一份数据。该手若还没有归属数据，工具会当场补算一次（要等几十秒）；引擎不可用时它不出图并说明原因——此时就如实告诉学生"这次看不了形势判断"，不要改用估算糊弄。另外它与目差曲线（DM）不是同一个数：讲地盘归属用前者，讲领先多少目优先用后者，不要并排报两个数。
 7. 工具纪律：先 go_parse_sgf 了解棋谱，再 go_review_moves 找问题手，逐手讲解后调用 go_write_review 写回 SGF 注释，需要落盘报告时用 go_export_report；同一局重复复盘优先复用工具返回的缓存结果（cached=true 时不再重复获取全量数据）；单局讲解预算约 ${cfg.tokenBudget} tokens，用"先问后讲"与数据裁剪控制消耗。`
+  if (!skill || !skill.required) return persona
+  // 第 8 条只在**技能确实可用**时注入 —— 不然就是在要求模型去加载一个不存在的东西。
+  // 触发面刻意收窄：只在"讲棋/复盘"类请求前要求加载；只查谱、只要数值、只要配图不要求。
+  return `${persona}
+
+8. 讲棋前先加载技能：**凡是要讲解一手棋、复盘、或回答"这手为什么不好／该怎么下／这个形好不好"之前，先调用技能工具加载 \`${skill.name || SKILL_NAME}\`**，再按它的判据与固定五段结构组织讲解（复述意图 → 判据 → 定性 → 可选数值 → 一条改法）；判据与原文出处以该技能为准，不要凭印象讲。只查谱、只要数值、只要配图时**不需要**加载。`
 }
 
 const TOOL_GUIDANCE = `围棋复盘工具（DeepGo Sensei）：go_parse_sgf 读棋谱，go_review_moves 找问题手，go_position_context 取某手前后局面与 AI 候选，go_draw_diagram 画讲解配图（变化图编号 1-9/A-Z + 三角形等重点棋子标注；territory=true 可叠加形势判断——引擎归属图判出的黑地/白地（未定留白），图下附一行双方目数与领先；该手没有归属数据时会当场补算，引擎不可用则不出图并说明，返回可在对话里直接用 Markdown 图片语法嵌入的 URL），go_write_review 把讲解写回 SGF 的 C[] 注释，go_export_report 落盘 Markdown 报告，go_engine_info 查看/说明当前使用的 KataGo 引擎与权重。**源棋谱只读**：讲解与分析数据（胜率/目差/AI 首选与变化图）都写进同目录的 \`<源名>-sensei.sgf\` 副本，源文件永不修改；读取同一盘棋时若副本已存在（工具与面板都一样）就直接读副本，因为那才是上一次复盘的成果。补算引擎默认用插件自带的 engine 目录（开箱即用），也可用配置 engineDir / kataGoPath / kataGoModel 换成用户自己的引擎与权重。路径参数支持绝对路径或相对当前会话工作区的相对路径。`
@@ -1205,6 +1218,43 @@ const MAX_DISCOVER_DEPTH = 3
 /** 文件发现的访问节点上限，防止在大目录里遍历过久。 */
 const MAX_DISCOVER_VISITS = 400
 
+/**
+ * 加载期把随件技能装进技能根，并据此决定人设里要不要加"先加载技能"那一条。
+ *
+ * 为什么在 apply 里做而不是 package.json 的 postinstall：
+ *   DSH 的插件常用 `link:` 装（本机就是），pnpm 对 link 依赖**不执行被链接包的 install 脚本**，
+ *   所以 postinstall 命中不了；而 apply 是每次加载必跑，才是可靠的那条路径。
+ *   （代价：技能要在**下一个会话**才出现在技能目录里 —— 引擎在会话启动时读技能根。）
+ *
+ * 失败一律降级：装不上就不注入第 8 条，绝不因为技能装不上而让插件起不来。
+ * @returns {{ required: boolean, name: string, state: string, detail: string }}
+ */
+export function ensureSkillForPersona(cfg, log = () => {}) {
+  const name = SKILL_NAME
+  if (cfg && cfg.autoInstallSkill === false) {
+    return { required: false, name, state: 'off', detail: 'autoInstallSkill=false' }
+  }
+  try {
+    const home = resolveDshHome()
+    if (home.invalid) {
+      // DSH_HOME 设了但不是绝对路径：回落到 ~/.dsh，但要说出来（静默回落 = 装到别处还没人知道）
+      log(`[go-sensei] DSH_HOME 不是绝对路径，已回落到 ${home.home} 来找技能根`)
+    }
+    const res = ensureSkill({ mode: 'overwrite', log })
+    // 装完再探一次：只有"技能根里确实有 SKILL.md"才算可用
+    const now = inspectSkill({})
+    const required = now.installed
+    return {
+      required,
+      name,
+      state: res.state,
+      detail: required ? res.reason || '技能可用' : `技能不可用（${res.reason || now.sourceReason || '未知'}）`,
+    }
+  } catch (e) {
+    return { required: false, name, state: 'failed', detail: (e && e.message) || String(e) }
+  }
+}
+
 function personaOrder(ctx) {
   try {
     const base = Number(ctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_PREFIX'))
@@ -1217,10 +1267,16 @@ function personaOrder(ctx) {
 export function apply(ctx, config = {}) {
   const cfg = { ...DEFAULT_CONFIG, ...(config ?? {}) }
 
+  // 先把随件技能装进技能根（幂等；默认开，可用 autoInstallSkill:false 关掉），
+  // 再据结果决定人设里要不要加"讲棋前先加载技能"。装不上不影响插件启动。
+  const skill = ensureSkillForPersona(cfg, (m) => {
+    try { ctx.logger?.info?.(m) } catch { /* 日志不是关键路径 */ }
+  })
+
   ctx.systemPrompt.section({
     name: 'go-sensei:persona',
     order: personaOrder(ctx),
-    text: buildPersona(cfg),
+    text: buildPersona(cfg, skill),
   })
   ctx.systemPrompt.section({
     name: 'tool:go-sensei',
