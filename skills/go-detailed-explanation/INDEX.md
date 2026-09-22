@@ -3,7 +3,9 @@
 ## 一、本册产出
 | 件 | 路径 | 作用 |
 |---|---|---|
-| 技能正本 | `skills/go-detailed-explanation/SKILL.md` | 讲一手棋的完整判据与流程（R/I/A1/A2/E/B ＋ CHECKPOINT ＋ 输出结构） |
+| 技能正本 | `skills/go-detailed-explanation/SKILL.md` | 讲一手棋的完整判据与流程（R/I/A1/A1b/A2/E/B ＋ CHECKPOINT ＋ 输出结构） |
+| 盘面锚索引 | `skills/go-detailed-explanation/ANCHORS.md` | 89 条可回放案例锚（自动生成，勿手改） |
+| 盘面锚数据 | `skills/go-detailed-explanation/ANCHORS.jsonl` | 机器数据：每条含现成的一行 SGF（`sgf` 字段），落盘即可交 go_draw_diagram |
 | 术语表 | `skills/GLOSSARY.md` | 讲棋统一用词，每条带池 id 与页锚 |
 | 本索引 | `skills/INDEX.md` | 技能总览、引用图、交叉引用约定 |
 | 精华长文 | `DIGEST.md`（阶段5） | 给读者看的长文版 |
@@ -28,6 +30,7 @@
 3. **逐字引文只允许在 SKILL.md 的 `## R 原文锚` 段出现**。其他文件（含本索引与 GLOSSARY）只写转述 ＋ 池 id；需要引文时指向 R 段，不在别处重打一遍，避免重打时引入形近字污染。
 4. **新增簇**：若补新书，簇字母续编（J、K…），先追加到 `verified.md`，再在 SKILL.md 的 R 段加同编号小节，最后同步本索引。
 5. **运行时数值不进技能文件**：胜率、目差、归属图一律运行时由引擎取；技能文件里出现任何具体数字都视为过期风险。
+6. **盘面锚 id 形如 `SG-001`**：独立命名空间，**不属于** V 池，权威定义在 `ANCHORS.jsonl`（由 `source-survey/gen-anchors.mjs` 生成）。只在 SKILL.md 的 `## A1b` 与 `ANCHORS.md` 出现，不进 `verified.md`、不改候选池；核验走 `tools/go-verify-anchors.mjs`（自洽五项 ＋ 逐字回源）。**随件必须扁平**——插件的 `src/skill-install.js:113` 拒绝含子目录的随件，所以 89 个盘面存成 `ANCHORS.jsonl` 的 `sgf` 字段，不落成 89 个 `.sgf` 文件。
 
 ## 四、溯源链
 ```
@@ -37,7 +40,14 @@ ebook/围棋电子书/              原始 PDF（只读，未改动）
           └─ notes/notes_band{1..4}.md   提取笔记（206 条，逐字引文）
               └─ verified.md             去重合并（136 条，109 条逐字引文）
                   └─ skills/go-detailed-explanation/SKILL.md   R 段引文 + 判据表
+
+ebook/围棋电子书/              自带讲解的 SGF（三套，解压用 Windows tar.exe）
+  └─ source-survey/sgf/        解包后的 188 个 SGF（GBK）
+      └─ source-survey/anchors.jsonl      840 个图单元 + 锚验证（逐图择优编号约定）
+          └─ source-survey/anchors-curated.jsonl  策展 89 条
+              └─ skills/go-detailed-explanation/ANCHORS.jsonl + ANCHORS.md  89 条可回放锚（扁平随件）
 ```
 核验命令：
 - `node tools/go-verify-notes.mjs books/go-detailed-explanation` —— 引文回源核验（当前 206/206 命中）。
 - `node tools/go-check-skill-refs.mjs books/go-detailed-explanation` —— 技能文件池 id 实存核验 ＋ R 段引文与 verified.md 的逐字一致性核验。
+- `node tools/go-verify-anchors.mjs <技能目录> --source <sgf 根>` —— 盘面锚自洽五项 ＋ 逐字回源（当前 89/89）。
