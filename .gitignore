@@ -6,6 +6,11 @@ test/tmp-*/
 # 运行/调试产物
 *.log
 *.demo.sgf
+# 复盘/配图的派生产物：源棋谱只读，产物落在同目录的 `-sensei` 副本与 `.go-sensei/` 里。
+# 不忽略就会把带真实野狐 ID 的复盘副本与配图提交进公开仓库。
+test/fixtures/*-sensei.sgf
+test/fixtures/*-sensei.review.md
+**/.go-sensei/
 # 自带引擎运行时写在引擎目录里的日志与缓存（analysis_example.cfg 的 logDir）
 # 只保留目录占位文件：目录本身要在包里存在，引擎才写得进日志。
 **/analysis_logs/*

@@ -21,9 +21,10 @@ import {
 import { reviewGame, inferLevel, RANKS } from './review.js'
 import { ReviewCache, gameFingerprint } from './cache.js'
 import { resolveEngine, describeEngine } from './engine-resolve.js'
-import { senseiPathFor } from './derived.js'
-import { parsePointLabel, parseSequence, parseMarks } from './diagram.js'
+import { senseiPathFor, diagramPathFor } from './derived.js'
+import { buildDiagramSpec, diagramMoveOf } from './diagram-spec.js'
 import { estimateTerritorySeries } from './territory.js'
+import { createHash } from 'node:crypto'
 
 /** 工具返回值的裁剪上限，防止异常棋谱撑爆上下文。 */
 const MAX_MOVE_LIST = 400
@@ -759,7 +760,8 @@ function goDrawDiagram(ctx, cfg, cache, policy, diagram) {
       + 'territory=true 时叠加**形势判断**（引擎归属图判出的黑地/白地，未定处留白，'
       + '并在图下写出双方目数与领先），适合讲"这块地是谁的""现在谁领先"；'
       + '该手还没有归属数据时会当场补算一次（要等几十秒），引擎不可用时如实说明、不出图。'
-      + '**回答里必须原样粘贴返回的 markdown 行**，URL 不要改写或另编。',
+      + '**回答里必须原样粘贴返回的 markdown 行**：桌面端返回的是本机文件路径（界面会'
+      + '按会话鉴权加载），浏览器界面返回的是直链 —— 两种都别改写、别自己拼。',
     parameters: {
       type: 'object',
       properties: {
@@ -801,6 +803,8 @@ function goDrawDiagram(ctx, cfg, cache, policy, diagram) {
           marks: { type: 'array', items: { type: 'string' } },
           skipped: { type: 'array', items: { type: 'string' } },
           note: { type: 'string' },
+          // 桌面端出图时落盘的本机 SVG 路径（直链在那边拿不到宿主 cookie）
+          imagePath: { type: 'string' },
           // 叠加了领地显示时，把那行形势判断也带回给模型（免得它自己算）
           territory: { type: 'string' },
           // 形势判断没能出图时的原因（引擎不可用、该手没有归属数据……）
@@ -827,25 +831,62 @@ function goDrawDiagram(ctx, cfg, cache, policy, diagram) {
     },
     async execute(args, exec) {
       const base = typeof diagram?.base === 'string' ? diagram.base : ''
-      if (base === '') {
+      // 页面来源：面板每次轮询都会把 `location.origin` 交给宿主（见 index.mjs 的
+      // rememberPageOrigin）。桌面端是 `dsh-app://app`，其余是 http(s) 站点。
+      const pageOrigin = pageOriginOf(diagram, exec)
+      const desktop = pageOrigin.startsWith('dsh-app:')
+      if (base === '' && !desktop) {
         throw new Error(
           '当前进程没有挂载 Web 服务器（webServer），无法生成能在对话里显示的配图；'
           + '请改用文字说明，或确认 dsh web 面板已启用后重试。',
         )
       }
       const game = await readGameFile(ctx, exec, args.path, policy(exec))
-      const size = game.info?.size ?? 19
-      const total = game.moves.length
-      const rawMove = args.moveNumber
-      const parsed = rawMove === undefined || rawMove === null ? total : Math.trunc(Number(rawMove))
-      const move = Math.max(0, Math.min(Number.isFinite(parsed) ? parsed : total, total))
-
-      // 变化图起始颜色：第 move 手之后的盘面轮到那一手的对手（move=0 时黑先）。
-      // 与 /go-sensei/diagram 路由同一口径 —— 两边算错一处，图上颜色就会反。
-      const firstColor = move === 0 ? 'B' : game.moves[move - 1]?.color === 'B' ? 'W' : 'B'
-      const sequence = parseSequence(args.sequence, size, firstColor)
-      const marks = parseMarks(args.marks, size)
+      const move = diagramMoveOf(game, args.moveNumber)
       const caption = typeof args.caption === 'string' ? args.caption.trim().slice(0, 120) : ''
+
+      // 形势判断：与面板**同一份引擎归属**（用户 2026-09-19 定案）——不再是启发式。
+      // 副本里已有 TP[] 就直接读（毫秒级）；没有就当场补算一次：跑引擎 → 写回副本，
+      // 与面板「形势判断」按钮同一条路径，算完以后这份棋谱永远秒开。
+      // 引擎不可用 / 补算失败时**不画**，如实说明原因 —— 不用启发式顶包。
+      const wantTerritory = args.territory === true
+      let territoryHit = wantTerritory ? territoryOfMove(game, move) : null
+      let territoryNote
+      if (wantTerritory && territoryHit === null) {
+        const { autoEngine } = await autoComputeIfNeeded(ctx, cfg, game, {
+          needTerritory: true,
+          signal: exec.signal,
+        })
+        if (autoEngine?.failed !== undefined) {
+          territoryNote = `形势判断没能出图：${autoEngine.failed}`
+        } else if (autoEngine !== undefined) {
+          await writeAnalysisBack(ctx, exec, policy(exec), game).catch(() => undefined)
+        }
+        territoryHit = territoryOfMove(game, move)
+      }
+      if (wantTerritory && territoryHit === null && territoryNote === undefined) {
+        territoryNote = '这一手还没有归属数据，形势判断没能出图。请在面板上点开一次「形势判断」补算，或先跑一次 go_review_moves。'
+      }
+      const territorySvg = territoryHit !== null
+        ? { cells: territoryHit.est.cells, text: territoryHit.text }
+        : null
+
+      // 装配只走 buildDiagramSpec：与 /go-sensei/diagram 路由同一份推导，
+      // 否则同一个变化图在对话里和面板里会出现"颜色反了"的分歧。
+      const width = args.width !== undefined && Number.isFinite(Number(args.width))
+        ? Math.trunc(Number(args.width))
+        : undefined
+      const spec = buildDiagramSpec({
+        game,
+        move,
+        seqTokens: Array.isArray(args.sequence) ? args.sequence : [],
+        markTokens: Array.isArray(args.marks) ? args.marks : [],
+        caption,
+        width,
+        territory: territorySvg,
+      })
+      const { sequence, marks } = spec
+      const size = spec.size
 
       const tokens = []
       for (const p of sequence.points) {
@@ -864,40 +905,37 @@ function goDrawDiagram(ctx, cfg, cache, policy, diagram) {
       if (tokens.length > 0) params.set('seq', tokens.join(','))
       if (markTokens.length > 0) params.set('marks', markTokens.join(','))
       if (caption !== '') params.set('cap', caption)
-      // 形势判断：与面板**同一份引擎归属**（用户 2026-09-19 定案）——不再是启发式。
-      // 副本里已有 TP[] 就直接读（毫秒级）；没有就当场补算一次：跑引擎 → 写回副本，
-      // 与面板「形势判断」按钮同一条路径，算完以后这份棋谱永远秒开。
-      // 引擎不可用 / 补算失败时**不画**，如实说明原因 —— 不用启发式顶包。
-      const wantTerritory = args.territory === true
-      let territoryText
-      let territoryNote
-      if (wantTerritory) {
-        let hit = territoryOfMove(game, move)
-        if (hit === null) {
-          const { autoEngine } = await autoComputeIfNeeded(ctx, cfg, game, {
-            needTerritory: true,
-            signal: exec.signal,
-          })
-          if (autoEngine?.failed !== undefined) {
-            territoryNote = `形势判断没能出图：${autoEngine.failed}`
-          } else if (autoEngine !== undefined) {
-            await writeAnalysisBack(ctx, exec, policy(exec), game).catch(() => undefined)
-          }
-          hit = territoryOfMove(game, move)
-        }
-        if (hit !== null) {
-          params.set('territory', '1')
-          territoryText = hit.text
-        } else if (territoryNote === undefined) {
-          territoryNote = '这一手还没有归属数据，形势判断没能出图。请在面板上点开一次「形势判断」补算，或先跑一次 go_review_moves。'
-        }
-      }
-      if (args.width !== undefined && Number.isFinite(Number(args.width))) {
-        params.set('w', String(Math.trunc(Number(args.width))))
-      }
-      const url = `${base}/go-sensei/diagram?${params.toString()}`
+      if (territorySvg !== null) params.set('territory', '1')
+      if (width !== undefined) params.set('w', String(width))
+
+      // 直链基地址：能拿到**页面自己的 origin** 就用它 —— 用户可能从 localhost、
+      // 局域网 IP 或别的端口打开界面，写死 127.0.0.1 会让图片在别的设备上打不开。
+      const webBase = pageOrigin.startsWith('http://') || pageOrigin.startsWith('https://')
+        ? pageOrigin.replace(/\/+$/, '')
+        : base
+      const url = webBase === '' ? '' : `${webBase}/go-sensei/diagram?${params.toString()}`
       const alt = (caption === '' ? `第 ${move} 手之后的局面` : caption).replace(/[[\]\n\r]/g, ' ').trim()
-      const markdown = `![${alt}](${url})`
+
+      // 桌面端（DSH 0.2.0 的 Electron 外壳）：页面跑在 `dsh-app://app` 上，聊天区只
+      // 会给**本机路径**的图片补上鉴权（前端改写成 `/api/file?path=…`）。指向
+      // `http://127.0.0.1:<port>` 的绝对图片地址拿不到宿主 cookie —— 宿主 cookie 由
+      // 外壳进程持有、明确不下发给页面（desktop-main.js 的 WITHHELD_RESPONSE_HEADERS），
+      // 那样只会 401、图是空白的。所以桌面端把 SVG 落盘，用路径形式出图。
+      let markdown = `![${alt}](${url})`
+      let imagePath
+      let note
+      if (desktop) {
+        imagePath = await writeDiagramSvg(ctx, exec, policy(exec), game, spec.svg, params.toString())
+        if (imagePath !== undefined) {
+          // 路径必须整体转义：Markdown 的图片目标在空格处就断了（Windows 上
+          // "C:/dsh/normal workspace/…" 这种路径很常见），前端会先解码一次再当路径用。
+          markdown = `![${alt}](${encodeURIComponent(imagePath)})`
+          note = '当前界面是桌面端：图片以本机文件路径给出，由界面按会话鉴权加载'
+            + `（${imagePath}）。`
+        } else {
+          note = '桌面端把配图落盘失败，已退回直链；若图片显示不出来，请打开 Go 面板看棋盘。'
+        }
+      }
 
       const skipped = [...sequence.skipped, ...marks.skipped]
       const numbered = sequence.points.map((p, i) =>
@@ -914,11 +952,51 @@ function goDrawDiagram(ctx, cfg, cache, policy, diagram) {
         numbered,
         marks: markTexts,
         skipped,
-        ...(territoryText !== undefined ? { territory: territoryText } : {}),
+        ...(imagePath !== undefined ? { imagePath } : {}),
+        ...(territoryHit !== null ? { territory: territoryHit.text } : {}),
         ...(territoryNote !== undefined ? { territoryNote } : {}),
-        ...(total === 0 ? { note: '这盘棋没有着手，配图是空盘。' } : {}),
+        ...(note !== undefined
+          ? { note }
+          : game.moves.length === 0 ? { note: '这盘棋没有着手，配图是空盘。' } : {}),
       }
     },
+  }
+}
+
+/** 面板上报的页面来源里，取当前会话的那一条（拿不到会话就退回最近一次）。 */
+function pageOriginOf(diagram, exec) {
+  if (diagram === undefined || diagram === null || typeof diagram.pageOriginFor !== 'function') return ''
+  const sessionId = exec?.agent?.session?.header?.id
+  try {
+    const origin = diagram.pageOriginFor(typeof sessionId === 'string' ? sessionId : '')
+    return typeof origin === 'string' ? origin : ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 把配图 SVG 落盘到棋谱同目录的 `.go-sensei/` 里，返回显示路径。
+ *
+ * 只有桌面端走这条路（原因见 goDrawDiagram 里的说明）。失败一律返回 undefined：
+ * 配图是"锦上添花"，落盘失败也不该让整个工具调用失败 —— 调用方会退回直链并如实说明。
+ *
+ * @returns {Promise<string|undefined>} 写入的文件显示路径；写不了时 undefined
+ */
+async function writeDiagramSvg(ctx, exec, sandboxPolicy, game, svg, paramsKey) {
+  try {
+    requireSandboxPolicy(sandboxPolicy)
+    const working = game?._meta?.path ?? game?._meta?.sourcePath ?? ''
+    const hash = createHash('sha1').update(String(paramsKey)).digest('hex').slice(0, 12)
+    const diagramPath = diagramPathFor(working, hash)
+    if (diagramPath === '') return undefined
+    const target = await ctx.fs.resolve(diagramPath, resolveOptions(exec, diagramPath, sandboxPolicy))
+    await ctx.fs.writeText(target, svg, undefined, exec?.signal, sandboxPolicy)
+    ctx.emit('fs/observed', target, { kind: 'present' }, exec)
+    return target.displayPath
+  } catch (error) {
+    ctx.logger?.warn?.(`go-sensei：配图落盘失败：${String(error?.message ?? error)}`)
+    return undefined
   }
 }
 

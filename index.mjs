@@ -12,7 +12,7 @@ import { ReviewCache } from './src/cache.js'
 import { RANKS, reviewGame, inferLevel, aiCandidatesByMove } from './src/review.js'
 import { parseGame, decodeBuffer, compactBoard, winrateForColor, scoreForColor, hasTerritoryData, territoryOfMove, territorySeriesOf, MAX_SGF_CHARS } from './src/sgf.js'
 import { senseiPathFor } from './src/derived.js'
-import { buildGrid, parseSequence, parseMarks, renderBoardSvg } from './src/diagram.js'
+import { buildDiagramSpec, diagramMoveOf } from './src/diagram-spec.js'
 import { ensureSkill, inspectSkill, defaultSkillSource, resolveSkillsRoot, resolveDshHome, SKILL_NAME } from './src/skill-install.js'
 
 export const name = 'go-sensei'
@@ -81,7 +81,7 @@ export function buildPersona(cfg, skill = null) {
 2. 讲解语言：用口语化的棋理讲解（如"这里就像把家门让给了对方"）；胜率与目差只是佐证——先讲棋理，再引用数值；绝不虚构分析数据或变化图。
 3. 水平自适应：按学生棋力调整术语密度（配置 level=auto 时依据棋谱双方段位自行判断）：18K~10K 用生活化比喻并解释基础概念（气、眼、断点、出头）；9K~1D 用常规术语；2D 以上可用职业级术语与全局构思。
 4. 变化图：以"第 N 手改下 X 会怎样"为单元，一次只展开一条主变，每手一句话讲清意图，不逐手复述整条 PV。
-5. 配图讲解：回答追问（尤其"第 N 手改下 X 会怎样""这里连没连上"）时，**必须**用 go_draw_diagram 生成配图，并在回答正文里用 Markdown 图片语法 \`![一句话说明](工具返回的 URL)\` 嵌入。图上的约定：变化着法按 1-9、A-Z 逐手编号（起始颜色由工具按局面自动定），关键棋子用 triangle（三角形）、square、circle、label（字母）标出；一张图只讲一个变化，图下配一句话说明。**绝不用文字描述代替配图，也绝不编造图片 URL**——URL 只能来自 go_draw_diagram 的返回值。
+5. 配图讲解：回答追问（尤其"第 N 手改下 X 会怎样""这里连没连上"）时，**必须**用 go_draw_diagram 生成配图，并在回答正文里用 Markdown 图片语法 \`![一句话说明](工具返回的图片地址)\` 嵌入。地址**只能是 go_draw_diagram 返回的那一行 markdown**：桌面端给的是本机文件路径（界面会按会话鉴权加载），浏览器界面给的是直链——两种都原样粘贴，绝不要改写成别的形式、也不要自己拼 http://127.0.0.1:… 之类的地址。图上的约定：变化着法按 1-9、A-Z 逐手编号（起始颜色由工具按局面自动定），关键棋子用 triangle（三角形）、square、circle、label（字母）标出；一张图只讲一个变化，图下配一句话说明。**绝不用文字描述代替配图，也绝不编造图片地址**。
 6. 形势判断：讲"这块地归谁""现在谁领先"时，用 go_draw_diagram 的 territory=true 叠加形势判断（**引擎归属图**判出的黑地/白地，未定处留白，图下附一行双方目数与领先）。判定口径照 Lizzieyzy：|归属| < 0.4 算未定、空点要过四邻过滤、落在对方地里的己方子按死子算，与面板的「形势判断」是同一份数据。该手若还没有归属数据，工具会当场补算一次（要等几十秒）；引擎不可用时它不出图并说明原因——此时就如实告诉学生"这次看不了形势判断"，不要改用估算糊弄。另外它与目差曲线（DM）不是同一个数：讲地盘归属用前者，讲领先多少目优先用后者，不要并排报两个数。
 7. 工具纪律：先 go_parse_sgf 了解棋谱，再 go_review_moves 找问题手，逐手讲解后调用 go_write_review 写回 SGF 注释，需要落盘报告时用 go_export_report；同一局重复复盘优先复用工具返回的缓存结果（cached=true 时不再重复获取全量数据）；单局讲解预算约 ${cfg.tokenBudget} tokens，用"先问后讲"与数据裁剪控制消耗。`
   if (!skill || !skill.required) return persona
@@ -92,9 +92,15 @@ export function buildPersona(cfg, skill = null) {
 8. 讲棋前先加载技能：**凡是要讲解一手棋、复盘、或回答"这手为什么不好／该怎么下／这个形好不好"之前，先调用技能工具加载 \`${skill.name || SKILL_NAME}\`**，再按它的判据与固定五段结构组织讲解（复述意图 → 判据 → 定性 → 可选数值 → 一条改法）；判据与原文出处以该技能为准，不要凭印象讲。只查谱、只要数值、只要配图时**不需要**加载。`
 }
 
-const TOOL_GUIDANCE = `围棋复盘工具（DeepGo Sensei）：go_parse_sgf 读棋谱，go_review_moves 找问题手，go_position_context 取某手前后局面与 AI 候选，go_draw_diagram 画讲解配图（变化图编号 1-9/A-Z + 三角形等重点棋子标注；territory=true 可叠加形势判断——引擎归属图判出的黑地/白地（未定留白），图下附一行双方目数与领先；该手没有归属数据时会当场补算，引擎不可用则不出图并说明，返回可在对话里直接用 Markdown 图片语法嵌入的 URL），go_write_review 把讲解写回 SGF 的 C[] 注释，go_export_report 落盘 Markdown 报告，go_engine_info 查看/说明当前使用的 KataGo 引擎与权重。**源棋谱只读**：讲解与分析数据（胜率/目差/AI 首选与变化图）都写进同目录的 \`<源名>-sensei.sgf\` 副本，源文件永不修改；读取同一盘棋时若副本已存在（工具与面板都一样）就直接读副本，因为那才是上一次复盘的成果。补算引擎默认用插件自带的 engine 目录（开箱即用），也可用配置 engineDir / kataGoPath / kataGoModel 换成用户自己的引擎与权重。路径参数支持绝对路径或相对当前会话工作区的相对路径。`
+const TOOL_GUIDANCE = `围棋复盘工具（DeepGo Sensei）：go_parse_sgf 读棋谱，go_review_moves 找问题手，go_position_context 取某手前后局面与 AI 候选，go_draw_diagram 画讲解配图（变化图编号 1-9/A-Z + 三角形等重点棋子标注；territory=true 可叠加形势判断——引擎归属图判出的黑地/白地（未定留白），图下附一行双方目数与领先；该手没有归属数据时会当场补算，引擎不可用则不出图并说明，返回可直接嵌进回答正文的 Markdown 图片行——桌面端是本机文件路径、浏览器端是直链，原样粘贴即可），go_write_review 把讲解写回 SGF 的 C[] 注释，go_export_report 落盘 Markdown 报告，go_engine_info 查看/说明当前使用的 KataGo 引擎与权重。**源棋谱只读**：讲解与分析数据（胜率/目差/AI 首选与变化图）都写进同目录的 \`<源名>-sensei.sgf\` 副本，源文件永不修改；读取同一盘棋时若副本已存在（工具与面板都一样）就直接读副本，因为那才是上一次复盘的成果。补算引擎默认用插件自带的 engine 目录（开箱即用），也可用配置 engineDir / kataGoPath / kataGoModel 换成用户自己的引擎与权重。路径参数支持绝对路径或相对当前会话工作区的相对路径。`
 
-/** 配图 URL 的基地址（形如 http://127.0.0.1:3080）；由 webServer 挂载时填充。 */
+/**
+ * 配图的两个运行时来源（注册期创建，执行期读取）：
+ *   · base          —— 直链基地址（形如 http://127.0.0.1:3080），webServer 挂载时填充；
+ *   · pageOriginFor —— 面板上报的**页面来源**（浏览器 http(s) 站点，或桌面端的
+ *                      `dsh-app://app`），决定配图用直链还是落盘成本机文件路径。
+ * 两者都按"注册期建对象、执行期读值"写，注册顺序与挂载时机因此不敏感。
+ */
 function createDiagramBase() {
   return { base: '' }
 }
@@ -409,6 +415,90 @@ function registerPanelRoute(ctx, cfg, diagram) {
     }
     return focusLatest
   }
+
+  /**
+   * 「浏览器页面来源」：面板每次轮询都会把 `location.origin` 带上来，按会话记住。
+   *
+   * 为什么需要它：配图有两种形态，取决于界面跑在哪里 ——
+   *   · 浏览器（web profile）：页面与宿主同源，图片用绝对 http(s) 直链即可；
+   *   · 桌面端（DSH 0.2.0 的 Electron 外壳）：页面跑在 `dsh-app://app` 上，聊天区
+   *     只给**本机文件路径**的图片补鉴权（前端改写成 `/api/file?path=…`）。宿主
+   *     自己的 cookie 由外壳进程持有、明确不下发给页面（desktop-main.js 的
+   *     WITHHELD_RESPONSE_HEADERS 注释），所以指向 `http://127.0.0.1:<port>` 的
+   *     绝对图片地址在桌面端只会 401 —— 图是空白的。
+   *
+   * 为什么要按会话分桶：宿主进程只有一个而 GUI 支持多会话，全局单值会让 A 会话的
+   * 桌面端判断污染 B 会话的浏览器配图链接。桶数上限与 focus 一致（LRU）。
+   */
+  const pageOriginBySession = new Map()
+  const PAGE_ORIGIN_MAX_SESSIONS = 32
+  let pageOriginLatest = ''
+
+  /**
+   * 归一化上报的页面来源：只接受 `dsh-app://app` 或 http(s) 站点根。
+   *
+   * 该值会参与配图链接/路径的决策，所以不能让请求头里的任意字符串落进来
+   * （拼进 Markdown 的图片目标）。所有调用点都排在 panelRejection() 之后。
+   *
+   * @param {unknown} raw 请求头原文
+   * @returns {string} 合法来源（无尾斜杠），否则空串
+   */
+  function normalizePageOrigin(raw) {
+    const text = typeof raw === 'string' ? raw.trim() : ''
+    if (text === '' || text.length > 200 || /[\s"'<>()]/.test(text)) return ''
+    if (text === 'dsh-app://app') return text
+    try {
+      const parsed = new URL(text)
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return ''
+      if (parsed.username !== '' || parsed.password !== '') return ''
+      if (parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '') return ''
+      return parsed.origin
+    } catch {
+      return ''
+    }
+  }
+
+  /**
+   * 记下一条页面来源。
+   * @param {object} req Node 请求
+   * @param {string|null} sessionId 请求带来的会话 id；空串时只更新"最近一次"
+   */
+  function rememberPageOrigin(req, sessionId) {
+    const origin = normalizePageOrigin(req?.headers?.['x-go-sensei-page'])
+    if (origin === '') return
+    pageOriginLatest = origin
+    if (typeof sessionId === 'string' && sessionId !== '') {
+      pageOriginBySession.delete(sessionId)
+      pageOriginBySession.set(sessionId, origin)
+      while (pageOriginBySession.size > PAGE_ORIGIN_MAX_SESSIONS) {
+        pageOriginBySession.delete(pageOriginBySession.keys().next().value)
+      }
+    }
+  }
+
+  /**
+   * 取某会话的页面来源。
+   *
+   * 只用**本会话**的记录：页面来源决定配图形态，拿别的会话的记录会让"桌面端/浏览器"
+   * 或"本机/局域网"张冠李戴（配图就是一张空白图）。唯一的例外是 `dsh-app://app` ——
+   * 它是"这台机器跑的是桌面端外壳"这一**应用级**事实，与具体会话无关，所以在整页视图
+   * （没带 ?session= 的那种轮询）里上报后，可以给尚未上报的会话兜底。
+   *
+   * @param {string|null} sessionId
+   * @returns {string} 页面来源，未知时为空串（调用方退回服务自己的 host:port）
+   */
+  function pageOriginFor(sessionId) {
+    if (typeof sessionId === 'string' && sessionId !== '') {
+      const hit = pageOriginBySession.get(sessionId)
+      if (hit !== undefined) return hit
+    }
+    return pageOriginLatest === 'dsh-app://app' ? pageOriginLatest : ''
+  }
+
+  // 工具侧（go_draw_diagram）在执行时读取它决定出图形态；此刻面板可能一次都没被
+  // 访问过，所以同步登记在 apply 期创建的 diagram 对象上，而不是等 mount 时才挂。
+  diagram.pageOriginFor = (sessionId) => pageOriginFor(sessionId)
+  diagram.rememberPageOrigin = (req, sessionId) => rememberPageOrigin(req, sessionId)
   /**
    * 面板/配图路由的 dispose 函数。webServer.register 返回「移除该路由」的 disposer；
    * DSH 0.1.6 起宿主支持插件运行时卸载，路由必须随本插件 fiber 一起释放，否则停用
@@ -761,6 +851,8 @@ function registerPanelRoute(ctx, cfg, diagram) {
           return
         }
         rememberHost(req)
+        // 会话 id 可选：面板挂载时的一次性上报会带上它（宿主据此按会话记页面来源）
+        rememberPageOrigin(req, new URL(req.url ?? '/', 'http://localhost').searchParams.get('session'))
         res.statusCode = 200
         res.setHeader('content-type', 'application/json; charset=utf-8')
         res.setHeader('cache-control', 'no-store')
@@ -783,6 +875,7 @@ function registerPanelRoute(ctx, cfg, diagram) {
         // 侧栏本就列出全部会话，持有效 cookie 的调用者能看到所有会话；指针内容也只是
         // "哪盘棋、第几手"。真正的身份关卡是上面那道 panelRejection。
         const focusUrl = new URL(req.url ?? '/', 'http://localhost')
+        rememberPageOrigin(req, focusUrl.searchParams.get('session'))
         res.statusCode = 200
         res.setHeader('content-type', 'application/json; charset=utf-8')
         res.setHeader('cache-control', 'no-store')
@@ -815,6 +908,8 @@ function registerPanelRoute(ctx, cfg, diagram) {
             return
           }
           const sessionId = url.searchParams.get('session')
+          // 页面来源：配图形态（直链 vs 本机文件）取决于界面跑在浏览器还是桌面端。
+          rememberPageOrigin(req, sessionId)
           // 绝对路径不经任何解析基准、直接落到文件系统：先做一次纯字符串的包含校验，
           // 连 stat 都不做，避免把"这个文件存不存在"泄露给已知工作区之外的目标。
           if (looksAbsolute(requested)) {
@@ -847,47 +942,28 @@ function registerPanelRoute(ctx, cfg, diagram) {
           const bytes = await ctx.fs.readBytes(target, undefined, MAX_SGF_CHARS)
           const { text } = decodeBuffer(bytes)
           const game = parseGame(text)
-          const size = game.info?.size ?? 19
-          const board = compactBoard(game)
-          const total = board.moves.length
-          const rawMove = url.searchParams.get('move')
-          const parsed = rawMove === null || rawMove.trim() === '' ? total : Math.trunc(Number(rawMove))
-          const move = Math.max(0, Math.min(Number.isFinite(parsed) ? parsed : total, total))
-          const grid = buildGrid(board, move)
-          // 第 move 手之后的盘面：轮到的是那一手的对手（move=0 时黑先）
-          const firstColor = move === 0 ? 'B' : board.moves[move - 1].c === 'B' ? 'W' : 'B'
-          const sequence = parseSequence(
-            (url.searchParams.get('seq') ?? '').split(',').filter((t) => t.trim() !== ''),
-            size,
-            firstColor,
-          )
-          const marks = parseMarks(
-            (url.searchParams.get('marks') ?? '').split(',').filter((t) => t.trim() !== ''),
-            size,
-          )
-          const rawWidth = Math.trunc(Number(url.searchParams.get('w')))
-          const lastMove = move > 0 && board.moves[move - 1].x >= 0 ? board.moves[move - 1] : null
+          const move = diagramMoveOf(game, url.searchParams.get('move'))
           // 形势判断（用户 2026-09-19 定案，照 Lizzieyzy 的规则）：读棋谱副本里已有的
           // 归属图（TP[]，与胜率/目差同一次补算产出），把它画成黑/白小方块并在盘下附一行。
           // **这里不跑引擎**：补算由工具侧 autoComputeIfNeeded 或面板的「形势判断」按钮触发
           // （那一步会把 TP[] 写回副本），所以这条路由始终是毫秒级、不阻塞图片加载。
           const wantTerritory = url.searchParams.get('territory') === '1'
           const territoryHit = wantTerritory ? territoryOfMove(game, move) : null
-          const svg = renderBoardSvg({
-            size,
-            grid,
-            numbered: sequence.points,
-            marks: marks.marks,
-            lastMove,
-            caption: (url.searchParams.get('cap') ?? '').slice(0, 120),
-            // 形势判断附在图注之下（两行都在盘下，视口高度按两行一起加）
-            ...(territoryHit !== null
-              ? { territory: territoryHit.est.cells, footer: territoryHit.text }
-              : {}),
-            // 黑方白方的名字直接画在盘上沿：配图在对话正文里，四周没有别的说明
-            players: game.info?.players,
+          const rawWidth = Math.trunc(Number(url.searchParams.get('w')))
+          // 装配只走 buildDiagramSpec —— 与工具侧 go_draw_diagram 同一份推导，
+          // 否则同一个变化图在对话里和面板里会画出不同的编号颜色。
+          const spec = buildDiagramSpec({
+            game,
+            move,
+            seqTokens: (url.searchParams.get('seq') ?? '').split(',').filter((t) => t.trim() !== ''),
+            markTokens: (url.searchParams.get('marks') ?? '').split(',').filter((t) => t.trim() !== ''),
+            caption: url.searchParams.get('cap') ?? '',
             width: Number.isFinite(rawWidth) && rawWidth >= 120 ? Math.min(rawWidth, 1600) : 640,
+            territory: territoryHit !== null
+              ? { cells: territoryHit.est.cells, text: territoryHit.text }
+              : null,
           })
+          const svg = spec.svg
           res.statusCode = 200
           res.setHeader('content-type', 'image/svg+xml; charset=utf-8')
           // 参数即全部输入，但内容可能随棋谱变化（重新复盘后注释/分析都变），故不缓存。
@@ -935,6 +1011,8 @@ function registerPanelRoute(ctx, cfg, diagram) {
           // 解析候选**只从这里取**，不含请求带来的 ?cwd —— 那个值完全由调用方给定，
           // 拿它当放行/解析依据会让包含校验自我作废（2026-09 复核）。
           const sessionId = url.searchParams.get('session')
+          // 页面来源：配图形态（直链 vs 本机文件）取决于界面跑在浏览器还是桌面端。
+          rememberPageOrigin(req, sessionId)
           const allowedRoots = allowedReadRoots(sessionId)
           const candidates = []
           for (const root of allowedRoots) candidates.push(root)

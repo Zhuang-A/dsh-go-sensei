@@ -590,7 +590,11 @@ function makeFsStub() {
     },
     // 面板路由的「形势判断」会把归属图写回副本，桩里得真写盘，否则测不到落盘那条路
     async writeText(target, content) {
-      const { writeFileSync } = await import('node:fs')
+      const { writeFileSync, mkdirSync } = await import('node:fs')
+      const { dirname } = await import('node:path')
+      // 与真实 dsh-fs-local 一致：writeFileAtomic 会 mkdir -p 父目录
+      // （配图落在棋谱同目录的 .go-sensei/ 里，第一次写时它还不存在）
+      mkdirSync(dirname(target.displayPath), { recursive: true })
       writeFileSync(target.displayPath, content, 'utf8')
     },
   }
@@ -2566,5 +2570,172 @@ test('路由: ?territory=1 有策略时把归属图写回副本，第二次打�
     rmSync(engineDir, { recursive: true, force: true })
     rmSync(target, { force: true })
     rmSync(copy, { force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// 配图形态：浏览器直链 vs 桌面端本机文件（DSH 0.2.0 的 dsh-app:// 页面）
+//
+// 桌面端把界面跑在 `dsh-app://app` 上，聊天区只给**本机文件路径**的图片补鉴权
+// （前端改写成 /api/file?path=…）；指向 http://127.0.0.1:<port> 的绝对图片地址
+// 拿不到宿主 cookie（cookie 由外壳进程持有、明确不下发给页面），只会 401 出空白图。
+// 所以面板每 3 秒轮询时会把 location.origin 上报给宿主，宿主据此决定出图形态。
+// ---------------------------------------------------------------------------
+
+/** 建一个只放一份棋谱的临时工作区（test/tmp-* 已在 .gitignore 里）。 */
+function makeDiagramWorkspace(label) {
+  const dir = join(here, `tmp-diagram-${label}-${process.pid}`)
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(dir, { recursive: true })
+  const sgf = join(dir, 'board.sgf')
+  writeFileSync(sgf, readFileSync(fixture('real-analysis.sgf')))
+  return { dir, sgf }
+}
+
+test('工具: 桌面端（dsh-app）把配图落盘成本机 SVG，并用文件路径出图', async () => {
+  const { dir, sgf } = makeDiagramWorkspace('desktop')
+  try {
+    const ctx = makeRouteCtx({
+      services: { sandboxPolicy: { resolve: () => ({ mode: 'danger-full-access', workspaceRoot: dir }) } },
+    })
+    apply(ctx, Config(NO_ENGINE_CFG))
+    const tool = ctx.registered.get('go_draw_diagram')
+    const exec = { agent: { session: { header: { id: 'session-desktop', cwd: dir } } }, signal: undefined }
+
+    // ① 面板轮询上报页面来源（桌面端就是 dsh-app://app）
+    const focus = ctx.routes.find((r) => r.path === '/go-sensei/focus')
+    await callRoute(focus, '/go-sensei/focus?session=session-desktop', {
+      headers: { host: '127.0.0.1:19387', 'x-go-sensei-page': 'dsh-app://app' },
+    })
+
+    // ② 工具出图：markdown 指向本机文件路径（必须整体转义，Windows 路径常带空格）
+    const value = await tool.execute({
+      path: sgf, moveNumber: 20, sequence: ['Q16', 'D4'], marks: ['triangle:C10'], caption: '桌面端配图',
+    }, exec)
+    assert.equal(typeof value.imagePath, 'string', '桌面端要落盘并回报路径')
+    assert.equal(value.imagePath, join(dir, '.go-sensei', value.imagePath.split(/[\\/]/).pop()),
+      '配图落在棋谱同目录的 .go-sensei/ 里')
+    assert.ok(value.imagePath.endsWith('.svg'))
+    assert.ok(readFileSync(value.imagePath, 'utf8').includes('<svg'), '落盘的必须是一张真 SVG')
+
+    assert.equal(value.markdown, `![桌面端配图](${encodeURIComponent(value.imagePath)})`,
+      '桌面端的 markdown 要用转义后的本机路径（界面会改写成带鉴权的 /api/file）')
+    assert.ok(value.markdown.indexOf('.svg)') > 0)
+    // 直链仍然带回：用户在宿主机器上可以自己用浏览器打开它。
+    // 基地址跟着请求的 Host 头走（桌面端就是 127.0.0.1:19387），这是既有口径。
+    assert.equal(value.url, 'http://127.0.0.1:19387/go-sensei/diagram?'
+      + value.url.slice(value.url.indexOf('?') + 1), '直链要带上全部参数')
+    assert.ok(value.url.startsWith('http://127.0.0.1:19387/go-sensei/diagram?'), value.url)
+
+    // ③ 同一组参数：落盘的 SVG 必须与 /go-sensei/diagram 路由渲染的逐字节一致
+    //    （否则同一个变化图会在对话里和面板里长得不一样）
+    const route = ctx.routes.find((r) => r.path === '/go-sensei/diagram')
+    const res = {
+      statusCode: 200, headers: {}, setHeader(k, v) { this.headers[k] = v }, end(chunk) { this.body = chunk },
+    }
+    await route.handler({
+      url: '/go-sensei/diagram' + value.url.slice(value.url.indexOf('?')),
+      headers: { host: '127.0.0.1:19387' },
+    }, res)
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body, readFileSync(value.imagePath, 'utf8'), '两条路径必须画出同一张图')
+
+    // ④ 同一组参数重复调用：文件名带内容指纹，不堆文件
+    const again = await tool.execute({
+      path: sgf, moveNumber: 20, sequence: ['Q16', 'D4'], marks: ['triangle:C10'], caption: '桌面端配图',
+    }, exec)
+    assert.equal(again.imagePath, value.imagePath, '同样参数应复用同一个文件')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('工具: 浏览器界面上报的 origin 会成为直链基地址；非法上报一律不采信', async () => {
+  const { dir, sgf } = makeDiagramWorkspace('origin')
+  try {
+    const ctx = makeRouteCtx({
+      services: { sandboxPolicy: { resolve: () => ({ mode: 'workspace-write', workspaceRoot: dir }) } },
+    })
+    apply(ctx, Config(NO_ENGINE_CFG))
+    const tool = ctx.registered.get('go_draw_diagram')
+    const focus = ctx.routes.find((r) => r.path === '/go-sensei/focus')
+    const execFor = (id) => ({ agent: { session: { header: { id, cwd: dir } } }, signal: undefined })
+
+    // 局域网访问：直链必须落在**页面自己的 origin** 上，而不是 127.0.0.1
+    await callRoute(focus, '/go-sensei/focus?session=lan', {
+      headers: { host: '192.168.31.9:3080', 'x-go-sensei-page': 'http://192.168.31.9:3080' },
+    })
+    const lan = await tool.execute({ path: sgf, moveNumber: 12 }, execFor('lan'))
+    assert.ok(lan.url.startsWith('http://192.168.31.9:3080/go-sensei/diagram?'), lan.url)
+    assert.equal(Object.hasOwn(lan, 'imagePath'), false, '浏览器端不需要落盘')
+    assert.ok(lan.markdown.includes(lan.url))
+
+    // 伪造/非法上报（带路径、带凭据、非 http(s)）一律不采信 → 退回服务自己的 host:port
+    for (const bogus of ['http://evil.example/x', 'https://u:p@h', 'javascript:alert(1)', 'file:///c:/x', '   ']) {
+      await callRoute(focus, '/go-sensei/focus?session=bogus', {
+        headers: { host: '127.0.0.1:3080', 'x-go-sensei-page': bogus },
+      })
+      const out = await tool.execute({ path: sgf, moveNumber: 12 }, execFor('bogus'))
+      assert.ok(out.url.startsWith('http://127.0.0.1:3080/go-sensei/diagram?'),
+        `非法 origin「${bogus}」不得进图片地址：${out.url}`)
+    }
+
+    // 按会话分桶：桌面端的会话不该把浏览器会话的配图也推成本机路径
+    await callRoute(focus, '/go-sensei/focus?session=desk', {
+      headers: { host: '127.0.0.1:19387', 'x-go-sensei-page': 'dsh-app://app' },
+    })
+    const desk = await tool.execute({ path: sgf, moveNumber: 12 }, execFor('desk'))
+    assert.equal(typeof desk.imagePath, 'string')
+    const web = await tool.execute({ path: sgf, moveNumber: 12 }, execFor('lan'))
+    assert.equal(Object.hasOwn(web, 'imagePath'), false)
+    assert.ok(web.url.startsWith('http://192.168.31.9:3080/'))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('client: 面板请求都上报页面来源（x-go-sensei-page）', () => {
+  const source = readFileSync(join(here, '..', 'client.js'), 'utf8')
+  assert.ok(source.includes('x-go-sensei-page'), '要定义上报头')
+  assert.ok(source.includes('panelFetchInit'), '要有统一的 fetch init')
+  // 五处**字面量**面板请求（三处 focus 轮询 + 两处 review 取数）每一个都要带 init，
+  // 漏一处那条链路下的配图就会退回直链（桌面端表现为空白图）
+  const sites = source.split(/fetch\('\/go-sensei/)
+  assert.equal(sites.length - 1, 5, `字面量面板请求应为 5 处，实际 ${sites.length - 1}`)
+  for (const tail of sites.slice(1)) {
+    assert.ok(tail.slice(0, 300).includes('panelFetchInit()'),
+      `面板请求缺少 panelFetchInit()：fetch('/go-sensei${tail.slice(0, 60)}…`)
+  }
+  // 第六处是"页面来源一次性上报"（URL 由变量拼出，上面的正则抓不到），同样要带上
+  assert.match(source, /function reportPageOrigin[\s\S]{0,400}panelFetchInit\(\)/,
+    '一次性上报也要带 panelFetchInit()')
+})
+
+test('client: 对话一挂载就上报页面来源（用户没开过 Go 面板也要报）', () => {
+  const { registered, react } = loadClient({ withEffects: true })
+  const calls = []
+  const originalFetch = globalThis.fetch
+  const originalLocation = globalThis.location
+  globalThis.location = { origin: 'dsh-app://app' }
+  globalThis.fetch = (url, init) => {
+    calls.push({ url: String(url), init })
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true, roots: [] }) })
+  }
+  try {
+    const dock = registered.find((r) => r.options.name === 'conversation.composer.dock').component
+    // 会话 id 从插槽标准 props 的 useSession 里取（真实外壳就是这么给的）
+    dock({ useSession: (select) => select({ header: { id: 'session-abc', cwd: '/w' } }) })
+    for (let i = 0; i < react.effects.length; i++) {
+      try { react.runEffect(i) } catch { /* 其余 effect 依赖真实环境，忽略 */ }
+    }
+    const report = calls.find((c) => c.url.startsWith('/go-sensei/roots'))
+    assert.ok(report, `挂载时应上报一次页面来源：${JSON.stringify(calls.map((c) => c.url))}`)
+    assert.equal(report.url, '/go-sensei/roots?session=session-abc')
+    assert.ok(report.init && report.init.headers, '上报必须带头')
+    assert.equal(report.init.headers['x-go-sensei-page'], 'dsh-app://app')
+  } finally {
+    globalThis.fetch = originalFetch
+    if (originalLocation === undefined) delete globalThis.location
+    else globalThis.location = originalLocation
   }
 })

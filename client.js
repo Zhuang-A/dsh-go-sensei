@@ -1103,6 +1103,56 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 面板请求统一带的头：把**当前页面的来源**告诉宿主。
+     *
+     * 为什么必须上报：配图有两种形态，取决于界面跑在哪里 ——
+     *   · 浏览器（web profile）：页面与宿主同源，图片用绝对 http(s) 直链即可；
+     *   · 桌面端（DSH 0.2.0 的 Electron 外壳）：页面跑在 `dsh-app://app` 上，聊天区
+     *     只给**本机文件路径**的图片补鉴权，指向 `http://127.0.0.1:<port>` 的绝对
+     *     图片地址拿不到宿主 cookie（cookie 由外壳进程持有，不下发给页面）→ 401 空白图。
+     * 宿主自己看不到这件事（两条链路都经外壳代理，请求头被抹平），只有页面知道
+     * `location.origin`，所以由这里上报，宿主据此决定 go_draw_diagram 出哪种图。
+     *
+     * 相对地址 + 自定义头不会触发预检（同源请求）；桌面端由外壳转发给宿主时头会保留。
+     *
+     * @returns {object} fetch 的 init 片段（拿不到 location 时退回空对象）
+     */
+    function panelFetchInit() {
+      var origin = ''
+      try {
+        origin = typeof location !== 'undefined' && location && typeof location.origin === 'string'
+          ? location.origin
+          : ''
+      } catch (error) {
+        origin = ''
+      }
+      // 非标准 scheme 下 origin 可能是字符串 "null"，那种情况下不如不报（宿主会退回直链）
+      if (origin === '' || origin === 'null') return {}
+      return { headers: { 'x-go-sensei-page': origin } }
+    }
+
+    /**
+     * 把本页面的来源报给宿主（带上会话 id，宿主按会话记账）。
+     *
+     * 用 /go-sensei/roots 这条既有的只读路由：它本来就是面板启动时拉"已知工作区根"的
+     * 端点，多带一个头不增加任何新接口；宿主侧只读这个头、不改响应。
+     *
+     * @param {string} sessionId 会话 id（拿不到就按"最近一次"记，宿主会谨慎处理）
+     */
+    function reportPageOrigin(sessionId) {
+      var init = panelFetchInit()
+      if (!init.headers) return
+      var url = '/go-sensei/roots' + (sessionId ? '?session=' + encodeURIComponent(sessionId) : '')
+      try {
+        var pending = fetch(url, init)
+        // 失败静默：上报只影响配图形态，绝不打扰用户
+        if (pending && typeof pending.catch === 'function') pending.catch(function () {})
+      } catch (error) {
+        /* 极旧宿主或请求被拦：忽略 */
+      }
+    }
+
+    /**
      * 按需补算并刷新形势判断（带 territory=1 再取一次数据路由）。
      *
      * 宿主缺归属图时会当场跑一次引擎（几十秒）再返回 —— 与工具侧 go_draw_diagram
@@ -1126,7 +1176,8 @@ window.__ModuleLoader__.load({
       }
       senseiPatch({ territoryBusy: true, territoryError: '' })
       fetch('/go-sensei/review?path=' + encodeURIComponent(target) + '&territory=1'
-        + (senseiStore.sessionId ? '&session=' + encodeURIComponent(senseiStore.sessionId) : ''))
+        + (senseiStore.sessionId ? '&session=' + encodeURIComponent(senseiStore.sessionId) : ''),
+      panelFetchInit())
         .then(function (response) { return response.json().catch(function () { return {} }) })
         .then(function (body) {
           if (!body || body.ok !== true || !body.data) throw new Error('数据路由没有返回内容')
@@ -1785,7 +1836,8 @@ window.__ModuleLoader__.load({
 
       function pollFocusPage() {
         var pointer = pointerFor(pageSessionId)
-        fetch('/go-sensei/focus' + (pageSessionId ? '?session=' + encodeURIComponent(pageSessionId) : ''))
+        fetch('/go-sensei/focus' + (pageSessionId ? '?session=' + encodeURIComponent(pageSessionId) : ''),
+          panelFetchInit())
           .then(function (response) { return response.json().catch(function () { return {} }) })
           .then(function (body) {
             var f = body && body.ok === true ? body.focus : null
@@ -2053,6 +2105,20 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * 一次性上报页面来源 —— 面板**不必被打开**也要报。
+       *
+       * 为什么放在这里：配图形态（浏览器直链 vs 桌面端本机文件）取决于界面跑在哪里，
+       * 而宿主自己看不到这件事（两条链路都经桌面端外壳代理，请求头被抹平），只有页面
+       * 知道 location.origin。对话一挂载就报一次，用户压根没开过 Go 面板时也能报对；
+       * 之后的 /focus 轮询会持续刷新同一份记录。
+       *
+       * 失败静默：这只是让配图形态更准，不影响面板与工具的任何功能。
+       */
+      React.useEffect(function () {
+        reportPageOrigin(sessionId)
+      }, [])
+
+      /**
        * 读取棋谱。cwdOverride 用于「跟随讲解」自动载入 —— 那时路径来自
        * 工具调用参数（可能是相对某个会话工作区的相对路径），基准与当前
        * 会话 cwd 未必相同，必须带上 Host 记下的那个。
@@ -2134,7 +2200,8 @@ window.__ModuleLoader__.load({
        */
       function pollFocus() {
         var pointer = pointerFor(sessionId)
-        fetch('/go-sensei/focus' + (sessionId ? '?session=' + encodeURIComponent(sessionId) : ''))
+        fetch('/go-sensei/focus' + (sessionId ? '?session=' + encodeURIComponent(sessionId) : ''),
+          panelFetchInit())
           .then(function (response) { return response.json().catch(function () { return {} }) })
           .then(function (body) {
             if (pointer.failures > 0) {
@@ -2441,7 +2508,8 @@ window.__ModuleLoader__.load({
         setBusy(true); setErr(''); setData(null); setUpto(0)
         // 带上会话 id：文档地址里的路径是会话内相对路径，宿主靠这个反查工作区根
         fetch('/go-sensei/review?path=' + encodeURIComponent(path)
-          + (sessionId ? '&session=' + encodeURIComponent(sessionId) : ''))
+          + (sessionId ? '&session=' + encodeURIComponent(sessionId) : ''),
+        panelFetchInit())
           .then(function (response) { return response.json().catch(function () { return {} }) })
           .then(function (body) {
             if (!alive) return
@@ -2469,7 +2537,8 @@ window.__ModuleLoader__.load({
 
       function pollFocusDoc() {
         var pointer = pointerFor(sessionId)
-        fetch('/go-sensei/focus' + (sessionId ? '?session=' + encodeURIComponent(sessionId) : ''))
+        fetch('/go-sensei/focus' + (sessionId ? '?session=' + encodeURIComponent(sessionId) : ''),
+          panelFetchInit())
           .then(function (response) { return response.json().catch(function () { return {} }) })
           .then(function (body) {
             var f = body && body.ok === true ? body.focus : null
