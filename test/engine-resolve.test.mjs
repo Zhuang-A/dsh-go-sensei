@@ -34,6 +34,9 @@ function fakeIo({ files = [], dirs = {}, texts = {}, sizes = {}, platform = 'win
   const present = new Set(files)
   return {
     exists: (p) => present.has(p),
+    // 桩里也要给 isFile：显式 kataGoPath 的准入闸门会用它（缺了会落到真实的
+    // statSync 上，假路径一律变成"不是普通文件"→ 引擎被拒，测试全线误报）
+    isFile: (p) => present.has(p) && !Object.prototype.hasOwnProperty.call(dirs, p),
     listDir: (dir) => dirs[dir] ?? [],
     readText: (p) => {
       if (!(p in texts)) throw new Error(`no such file: ${p}`)
@@ -210,4 +213,84 @@ test('真实磁盘 + Windows：零配置即可解析到自带引擎', { skip: pr
   assert.ok(r.kataGoPath.endsWith('katago.exe'))
   assert.ok(r.modelName.endsWith('.bin.gz'))
   assert.ok(r.modelSizeMB > 50, '自带权重应有几十 MB 量级')
+})
+
+// ---------------------------------------------------------------------------
+// 显式 kataGoPath 的准入闸门（2026-09-30 DeepSec L3 报 High 后的加固）
+//
+// go_engine_analyze 把 kataGoPath / engineDir 暴露成模型可传的参数，最终交给
+// ctx.subprocess.spawn。没有闸门时，一次被棋谱内容带偏的调用就能让宿主执行任意
+// 二进制；这里把「可执行文件」收窄成 KataGo 自己的发行名，并要求它是普通文件。
+// ---------------------------------------------------------------------------
+
+test('准入闸门：kataGoPath 必须像 KataGo 的可执行文件，且是普通文件', () => {
+  const ok = ['/opt/go/katago', '/opt/go/katago.exe', '/opt/go/katago-opencl.exe', '/opt/go/katago_cuda.exe', '/opt/go/KataGo.exe']
+  for (const p of ok) {
+    const io = fakeIo({ files: [p] })
+    const r = resolveEngine({ kataGoPath: p }, io)
+    assert.equal(r.kataGoPath, p, `${p} 应被接受`)
+    assert.equal(r.source, 'config')
+    assert.equal(r.refused, '')
+  }
+  // 名字不对：拒掉，并说明为什么（含"扩展名不是可执行文件"这条）
+  for (const p of ['/tmp/evil.exe', '/tmp/katago-helper.py', '/tmp/notkatago.exe', '/tmp/katago.exe.bak']) {
+    const io = fakeIo({ files: [p] })
+    const r = resolveEngine({ kataGoPath: p }, io)
+    assert.equal(r.available, false, `${p} 不得被当作引擎`)
+    assert.equal(r.kataGoPath, '')
+    assert.match(r.refused, /不像 KataGo/)
+    assert.match(r.hint, /不像 KataGo/, '拒绝原因要出现在提示里')
+  }
+  // 目录冒充可执行文件：同样拒掉
+  const asDir = resolveEngine({ kataGoPath: '/tmp/katago.exe' }, fakeIo({ files: ['/tmp/katago.exe'], dirs: { '/tmp/katago.exe': [] } }))
+  assert.equal(asDir.available, false)
+  assert.match(asDir.refused, /不是.*普通文件/)
+  // 根本不存在：同一句理由（不给"存在性"单独的信号）
+  const missing = resolveEngine({ kataGoPath: '/tmp/katago.exe' }, fakeIo({}))
+  assert.equal(missing.available, false)
+  assert.match(missing.refused, /不是.*普通文件/)
+})
+
+test('准入闸门：被拒的显式路径不会挡住 engineDir / 自带引擎', () => {
+  const io = fakeIo({
+    files: [join(ENGINE_DIR, 'katago.exe'), join(ENGINE_DIR, CONFIG_FILE_NAME)],
+    dirs: { [ENGINE_DIR]: [{ name: 'katago.exe', dir: false, size: 1 }] },
+  })
+  const r = resolveEngine({ kataGoPath: '/tmp/evil.exe', engineDir: ENGINE_DIR }, io)
+  assert.equal(r.available, true, '显式路径被拒后仍可用 engineDir')
+  assert.equal(r.kataGoPath, join(ENGINE_DIR, 'katago.exe'))
+  assert.match(r.refused, /不像 KataGo/)
+})
+
+test('准入闸门：engineDir 里同名目录不算引擎；超大的配置文件不读', () => {
+  // ① 目录冒充 katago.exe：findExecutable 必须要求普通文件
+  const asDir = resolveEngine({ engineDir: ENGINE_DIR }, fakeIo({
+    dirs: { [ENGINE_DIR]: [{ name: 'katago.exe', dir: true, size: 0 }] },
+  }))
+  assert.equal(asDir.available, false)
+
+  // ② 显式 kataGoConfig 指向一个超大文件：不整份读进内存，也不从中解析 modelFile
+  const huge = '/tmp/huge.cfg'
+  const big = fakeIo({
+    files: [join(ENGINE_DIR, 'katago.exe'), huge],
+    dirs: { [ENGINE_DIR]: [{ name: 'katago.exe', dir: false, size: 1 }] },
+    sizes: { [huge]: 8 * 1024 * 1024 },
+    texts: { [huge]: 'modelFile = evil.bin.gz\n' },
+  })
+  const r = resolveEngine({ engineDir: ENGINE_DIR, kataGoConfig: huge }, big)
+  assert.equal(r.configPath, huge)
+  assert.equal(r.modelSource, 'none', '超大配置不参与解析')
+  assert.equal(r.modelPath, '')
+  assert.match(r.warning, /找不到权重文件/)
+
+  // ③ 正常大小的配置照常解析
+  const small = fakeIo({
+    files: [join(ENGINE_DIR, 'katago.exe'), huge],
+    dirs: { [ENGINE_DIR]: [{ name: 'katago.exe', dir: false, size: 1 }] },
+    sizes: { [huge]: 2048 },
+    texts: { [huge]: 'modelFile = ok.bin.gz\n' },
+  })
+  const ok = resolveEngine({ engineDir: ENGINE_DIR, kataGoConfig: huge }, small)
+  assert.equal(ok.modelSource, 'configFile')
+  assert.ok(ok.modelPath.endsWith('ok.bin.gz'))
 })

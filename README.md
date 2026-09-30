@@ -155,6 +155,7 @@ dsh plugin --profile web remove dsh-go-sensei        # 卸载
     kataGoConfig: ''            # 可选：analysis 配置（默认取 engineDir 里的 analysis_example.cfg）
     kataGoModel: ''             # 可选：权重文件；留空＝自动挑 engineDir 里最大的 *.bin.gz
     maxVisits: 100              # 补算每手搜索量：越大越准越慢
+    allowEnginePathOverride: false  # 是否允许模型用工具入参临时改引擎路径（默认关，见下）
     autoInstallSkill: true      # 加载时把随件讲棋技能装进技能根（false＝不碰技能目录，也不要求模型加载它）
 ```
 
@@ -174,6 +175,7 @@ dsh plugin --profile web remove dsh-go-sensei        # 卸载
 | `kataGoConfig` | `''` | analysis 配置路径；留空＝取 `engineDir` 里的 `analysis_example.cfg` |
 | `kataGoModel` | `''` | 权重路径；**留空＝自动挑 `engineDir` 里最大的 `*.bin.gz`**（再退回配置里的 `modelFile`） |
 | `maxVisits` | `100` | 补算每手搜索量 |
+| `allowEnginePathOverride` | `false` | 是否允许**模型**用 `go_engine_analyze` 的入参临时覆盖 `engineDir` / `kataGoPath` / `kataGoConfig` / `kataGoModel`。**默认关**：引擎是可执行资产，路径决定权留在配置侧；关着时入参会被忽略并在结果里说明。打开后即恢复"只临时换一次"的便利（见 [引擎章节](#只临时换一次选项)） |
 
 引擎不可用（非 Windows 且没配 `engineDir`）时，`go_engine_analyze` 不会注册，复盘自动走纯棋理模式；随时可以让 Sensei 调 `go_engine_info` 看当前状态与改法。
 
@@ -210,10 +212,20 @@ dsh plugin --profile web remove dsh-go-sensei        # 卸载
 | **换更强的权重**（如 b28，约 270 MB） | 把 `.bin.gz` 丢进 `<插件目录>/engine/`，插件自动挑其中**最大**的那个 |
 | **指定某个权重文件** | 配置 `kataGoModel: <权重文件的完整路径>`（下载的 `.bin.gz` 放哪就填哪） |
 | **换引擎或换后端**（CUDA / 纯 CPU 版 / 别的版本） | 配置 `engineDir: <你的引擎目录>`，该目录里放可执行文件 + analysis 配置 + 权重即可 |
-| **只临时换一次**（不动配置） | 让 Sensei 在 `go_engine_analyze` 里带上 `engineDir` / `kataGoPath` / `kataGoConfig` / `kataGoModel` 参数：带 `engineDir`＝整个引擎目录换掉（目录内自动发现），只带某一项＝只覆盖那一项 |
+| **只临时换一次**（不动配置） | 让 Sensei 在 `go_engine_analyze` 里带上 `engineDir` / `kataGoPath` / `kataGoConfig` / `kataGoModel` 参数：带 `engineDir`＝整个引擎目录换掉（目录内自动发现），只带某一项＝只覆盖那一项。**需要先把配置项 `allowEnginePathOverride` 打开**（默认 `false`，见下） |
 | **调搜索量**（越大越准越慢） | 配置 `maxVisits`（默认 100；业余复盘 60~200 都合理） |
 
 生效时机要分清：权重与路径**每次调用都重新解析**，所以往 `engine/` 里丢一个新权重，下一盘复盘就用上了；而 `go_engine_analyze` 这个工具本身注册与否在插件加载时决定，改了 `engineDir` / `kataGoPath` 记得**重启 `dsh web`**。想强制重算某盘棋（不吃缓存），用 `go_engine_analyze` 指定手数区间。
+
+> ⚠️ **可执行文件名的限制**（2026-09-30 起）：无论走 `engineDir` 还是 `kataGoPath`，可执行文件都必须是
+> KataGo 自己的发行名（`katago` / `katago.exe` / `katago-opencl.exe` 这类），且 `kataGoPath` 必须指向
+> 真实存在的普通文件；不符合时按"没有引擎"处理并说明原因。原因见[装机章节的说明](#自己装一套非-windows或想换后端)。
+
+> 🔒 **"只临时换一次"默认是关的**（`allowEnginePathOverride: false`）：工具入参里的引擎路径只有在配置
+> 显式打开后才生效 —— 引擎路径决定宿主执行哪个可执行文件，这个决定权留在配置（部署者）手里。
+> 打开后，模型可以在 `go_engine_analyze` 里临时换引擎/权重；关着时入参被忽略，结果里会写明"已被忽略"。
+> 想临时试一个引擎又不想重启，推荐做法是：把新引擎放进一个目录，改配置的 `engineDir` 并重启 `dsh web`
+> （重启只影响一次加载，仍然是显式动作）。
 
 ### 自己装一套（非 Windows，或想换后端）
 
@@ -289,6 +301,14 @@ Using OpenCL backend
     engineDir: <你的引擎目录>      # 该目录里有 katago 可执行文件、analysis 配置、权重
     maxVisits: 100
 ```
+
+> ⚠️ **可执行文件名必须还是 KataGo 的发行名**（`katago` / `katago.exe` / `katago-opencl.exe` 这类，
+> 即 `katago` 后面接 `-`、`_` 或 `.` 再接后缀）。`engineDir` 里只认 `katago.exe` / `katago` 两个名字；
+> 用 `kataGoPath` 显式指定时也只接受这一族名字，**且必须是一个真实存在的普通文件**。
+> 这不是洁癖：`go_engine_analyze` 允许模型临时覆盖引擎路径，而那一串最终会走到
+> `subprocess.spawn` —— 没有这道闸门，一次被棋谱内容带偏的调用就能让宿主执行任意二进制
+> （2026-09-30 安全复查把这条收窄成"KataGo 自己的名字"）。所以：**别把引擎重命名成别的名字**，
+> 想换后端就换整个目录里的 exe 文件（名字照旧）。被拒时 `go_engine_info` 会明确写出原因。
 
 （`<你的引擎目录>` 是占位符——填你自己解压引擎的位置，别照抄本文档里的示例目录名。
 也可以更细：`kataGoPath` 指可执行文件、`kataGoConfig` 指配置文件、`kataGoModel` 指权重，三者各自覆盖 `engineDir` 里的自动发现。）

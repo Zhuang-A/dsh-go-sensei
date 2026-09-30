@@ -189,6 +189,40 @@ test('go_export_report: format 大小写与空白容错', async () => {
   rmSync(WORK, { recursive: true, force: true })
 })
 
+test('go_export_report: 目标必须是 .md，且不得覆盖棋谱（源棋谱只读的兜底）', async () => {
+  // 2026-09-30 安全复查：outPath 是调用方给的写盘目标，只靠沙箱策略兜底不够 ——
+  // 在 workspace-write 会话里，一个 .sgf 目标就能把"源棋谱只读"直接推翻。
+  rmSync(WORK, { recursive: true, force: true })
+  mkdirSync(WORK, { recursive: true })
+  const target = join(WORK, 'game.sgf')
+  writeFileSync(target, readFileSync(fixture('synthetic-analysis.sgf')))
+  const ctx = makeCtx(WORK)
+  apply(ctx, CFG)
+  const tool = ctx.registered.get('go_export_report')
+  const before = readFileSync(target, 'utf8')
+
+  // 指向源棋谱 → 拒
+  await assert.rejects(
+    () => tool.execute({ path: 'game.sgf', outPath: 'game.sgf' }, exec(WORK)),
+    /不能覆盖棋谱/,
+  )
+  // 指向非 .md → 拒
+  await assert.rejects(
+    () => tool.execute({ path: 'game.sgf', outPath: 'report.txt' }, exec(WORK)),
+    /必须是 \.md/,
+  )
+  // 副本名（.sgf）同样拒
+  await assert.rejects(
+    () => tool.execute({ path: 'game.sgf', outPath: 'game-sensei.sgf' }, exec(WORK)),
+    /必须是 \.md|不能覆盖棋谱/,
+  )
+  // 正常 .md：通过，且源棋谱逐字节未动
+  const r = await tool.execute({ path: 'game.sgf', outPath: 'ok.md' }, exec(WORK))
+  assert.ok(String(r.outPath).endsWith('ok.md'), String(r.outPath))
+  assert.equal(readFileSync(target, 'utf8'), before, '源棋谱必须逐字节保持原样')
+  rmSync(WORK, { recursive: true, force: true })
+})
+
 test('go_export_report: 端到端写回讲解后导出，报告含讲解', async () => {
   rmSync(WORK, { recursive: true, force: true })
   mkdirSync(WORK, { recursive: true })

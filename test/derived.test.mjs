@@ -6,7 +6,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { join, sep } from 'node:path'
-import { senseiPathFor, SENSEI_SUFFIX } from '../src/derived.js'
+import { senseiPathFor, diagramPathFor, SENSEI_SUFFIX, DIAGRAM_DIR } from '../src/derived.js'
 
 test('senseiPathFor: 同目录、文件名插 -sensei', () => {
   assert.equal(senseiPathFor('game.sgf'), `game${SENSEI_SUFFIX}.sgf`)
@@ -32,4 +32,26 @@ test('senseiPathFor: 大小写与非 sgf 扩展名', () => {
   // 空输入不炸
   assert.equal(senseiPathFor(''), '')
   assert.equal(senseiPathFor(undefined), '')
+})
+
+// ---------------------------------------------------------------------------
+// 配图文件名（diagramPathFor）：指纹形态必须自己把关
+//
+// 返回值就是写盘 / 读取路径，而指纹会被拼进文件名。若不校验形态，`x/../../../evil`
+// 这种值经 join() 规范化后会越出 `.go-sensei/`，变成"在预期目录之外创建 .svg"
+// （2026-09-30 DeepSec L3 报 Medium）。所以这一层 fail-closed。
+// ---------------------------------------------------------------------------
+
+test('diagramPathFor: 只认短十六进制指纹，落点固定在 .go-sensei/ 之内', () => {
+  const sgf = `C:${sep}QiPu${sep}game.sgf`
+  assert.equal(diagramPathFor(sgf, '9b532f6da450'),
+    join(`C:${sep}QiPu`, DIAGRAM_DIR, 'diagram-9b532f6da450.svg'))
+  // 纯相对路径：落在当前目录下的 .go-sensei/
+  assert.equal(diagramPathFor('game.sgf', 'abcdef12'), join(DIAGRAM_DIR, 'diagram-abcdef12.svg'))
+  // 形态不对：一律空串（调用方会当成"没生成文件"处理）
+  for (const bad of ['', 'x/../../../evil', '..', 'ABCDEF12', 'abc', 'hash with space', '9b532f6da450/../x', 'z'.repeat(80)]) {
+    assert.equal(diagramPathFor(sgf, bad), '', `不该接受指纹：${JSON.stringify(bad)}`)
+  }
+  assert.equal(diagramPathFor('', 'abcdef12'), '')
+  assert.equal(diagramPathFor(undefined, undefined), '')
 })

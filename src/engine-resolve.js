@@ -29,6 +29,39 @@ const EXE_NAMES = ['katago.exe', 'katago']
 /** 权重文件后缀。 */
 const MODEL_SUFFIX = '.bin.gz'
 
+/**
+ * 显式 `kataGoPath` 允许的可执行文件名（去扩展名后）。
+ *
+ * 为什么需要这道闸门（2026-09-30 DeepSec L3 报 High）：`go_engine_analyze` 把
+ * `kataGoPath` / `engineDir` 暴露成**模型可传**的参数，而它们最终会交给
+ * `ctx.subprocess.spawn` —— 没有这道校验时，一次被棋谱注释带偏的工具调用就能让
+ * 宿主执行任意二进制。这里把"可执行文件"收窄成 **KataGo 自己的发行名**：
+ * `katago` / `katago.exe` / `katago-opencl.exe` / `katago_cuda.exe` / `katago.avx2.exe`
+ * 这类（`katago` 后面接 `-`/`_`/`.` 再接后缀）。换引擎仍然自由（放进 engineDir 即可），
+ * 只是不能把任意名字的二进制当作引擎。
+ */
+const KATAGO_EXE_NAME = /^katago(?:[-_.][a-z0-9._-]*)?$/i
+
+/** 可执行文件后缀（出现扩展名时必须落在这个集合里）。 */
+const EXE_SUFFIXES = ['.exe', '.cmd', '.bat', '.bin']
+
+/**
+ * 一个路径的文件名看着像不像 KataGo 发行版的可执行文件。
+ *
+ * 两道判据：① 扩展名要么没有（Linux 的 `katago`），要么在 EXE_SUFFIXES 里
+ * （`katago-helper.py`、`katago.exe.bak` 这类一律不算）；② 去扩展名后的名字是
+ * `katago` 或 `katago-<后缀>`。
+ */
+function isKataGoExecutablePath(path) {
+  const base = String(path ?? '').split(/[/\\]/).pop() ?? ''
+  const dot = base.lastIndexOf('.')
+  const hasExt = dot > 0
+  const ext = hasExt ? base.slice(dot).toLowerCase() : ''
+  if (hasExt && !EXE_SUFFIXES.includes(ext)) return false
+  const stem = hasExt ? base.slice(0, dot) : base
+  return KATAGO_EXE_NAME.test(stem)
+}
+
 /** 去空白后取字符串；非字符串一律当空串。 */
 function str(value) {
   return typeof value === 'string' ? value.trim() : ''
@@ -43,6 +76,15 @@ function toAbsolute(value, base) {
 function defaultIo() {
   return {
     exists: (path) => existsSync(path),
+    // 目录不算可执行文件：`kataGoPath` 指向一个目录时必须拒掉（否则 spawn 会失败，
+    // 更糟的是在别的平台上可能命中同名目录下的东西）。
+    isFile: (path) => {
+      try {
+        return statSync(path).isFile()
+      } catch {
+        return false
+      }
+    },
     listDir: (dir) => readdirSync(dir, { withFileTypes: true }).map((entry) => {
       const full = join(dir, entry.name)
       let size = 0
@@ -64,7 +106,7 @@ function defaultIo() {
 function makeIo(deps) {
   const base = defaultIo()
   const merged = { ...base }
-  for (const key of ['exists', 'listDir', 'readText', 'sizeOf', 'platform', 'packageDir']) {
+  for (const key of ['exists', 'isFile', 'listDir', 'readText', 'sizeOf', 'platform', 'packageDir']) {
     if (deps[key] !== undefined) merged[key] = deps[key]
   }
   return merged
@@ -82,6 +124,12 @@ function safeList(io, dir) {
 
 /**
  * 在目录里找引擎可执行文件。
+ *
+ * 名字白名单（`katago.exe` / `katago`）与显式 `kataGoPath` 那条闸门同源：
+ * `engineDir` 也是模型可传的参数，若不在这一层收窄，闸门等于白设
+ * （2026-09-30 DeepSec L3 第二轮就是这么指出来的）。同时要求它是个普通文件 ——
+ * 一个**同名的目录**不该被当成引擎。
+ *
  * @param {object} io 文件系统适配器
  * @param {string} dir 目录
  * @returns {string} 命中路径；未命中为空串
@@ -89,9 +137,37 @@ function safeList(io, dir) {
 function findExecutable(io, dir) {
   for (const name of EXE_NAMES) {
     const candidate = join(dir, name)
-    if (io.exists(candidate)) return candidate
+    if (io.exists(candidate) && io.isFile(candidate)) return candidate
   }
   return ''
+}
+
+/** 读配置文件的上限：analysis 配置是几 KB 的文本，超过这个量级的一律不读。 */
+const MAX_CONFIG_BYTES = 256 * 1024
+
+/**
+ * 读 analysis 配置文本（带两道自保）。
+ *
+ * 为什么要自保：`kataGoConfig` 同样是模型可传的路径，而这份文本此前是无长度上限的
+ * `readFileSync` —— 指到一个几 GB 的日志/镜像上就能让宿主内存暴涨，指到管道/设备还会
+ * 阻塞（2026-09-30 DeepSec L3）。所以先看类型与大小，超限或不是普通文件就当作"没配置"。
+ *
+ * @returns {string} 文件文本；不可读/不合格时为空串
+ */
+function readConfigText(io, path) {
+  if (!io.isFile(path)) return ''
+  let size = 0
+  try {
+    size = io.sizeOf(path) ?? 0
+  } catch {
+    return ''
+  }
+  if (size > MAX_CONFIG_BYTES) return ''
+  try {
+    return io.readText(path)
+  } catch {
+    return ''
+  }
 }
 
 /**
@@ -134,7 +210,8 @@ export function readModelFileKey(text) {
  * @param {object} [deps] 注入的文件系统适配器（测试用）
  * @returns {object} 全部字段均为具体值（无 undefined）：
  *   { available, source, engineDir, kataGoPath, configPath, modelPath,
- *     modelName, modelSizeMB, modelSource, platform, warning, hint }
+ *     modelName, modelSizeMB, modelSource, platform, warning, hint, refused }
+ *   `refused` 非空表示显式 kataGoPath 被准入闸门拒掉（名字不像 KataGo 或不是普通文件）。
  */
 export function resolveEngine(cfg = {}, deps = {}) {
   const io = makeIo(deps ?? {})
@@ -159,6 +236,17 @@ export function resolveEngine(cfg = {}, deps = {}) {
 
   let kataGoPath = configuredExe !== '' ? toAbsolute(configuredExe, packageDir) : ''
   let source = kataGoPath !== '' ? 'config' : 'none'
+  // 显式路径的准入闸门（见 KATAGO_EXE_NAME 的说明）：名字不像 KataGo 发行版、
+  // 或者根本不是一个普通文件，就当作"没有配置"——宁可退化到自带引擎，也不 spawn
+  // 一个来路不明的可执行文件。拒绝原因如实带出去，别让用户猜。
+  let refused = ''
+  if (kataGoPath !== '' && (!isKataGoExecutablePath(kataGoPath) || !io.isFile(kataGoPath))) {
+    refused = isKataGoExecutablePath(kataGoPath)
+      ? `kataGoPath 不是一个普通文件：${kataGoPath}`
+      : `kataGoPath 的可执行文件名不像 KataGo（应是 katago / katago.exe / katago-*.exe）：${kataGoPath}`
+    kataGoPath = ''
+    source = 'none'
+  }
   if (kataGoPath === '' && (explicitDir !== '' || bundledExeUsable)) {
     const found = findExecutable(io, engineDir)
     if (found !== '') {
@@ -196,12 +284,7 @@ export function resolveEngine(cfg = {}, deps = {}) {
       modelSizeMB = Math.round((picked.size / (1024 * 1024)) * 10) / 10
       modelSource = 'engineDir'
     } else if (configPath !== '') {
-      let text = ''
-      try {
-        text = io.readText(configPath)
-      } catch {
-        text = ''
-      }
+      const text = readConfigText(io, configPath)
       const key = readModelFileKey(text)
       if (key !== '') {
         modelPath = toAbsolute(key, dirname(configPath))
@@ -222,6 +305,7 @@ export function resolveEngine(cfg = {}, deps = {}) {
       ? `没有可用的 KataGo：把引擎目录填进 engineDir（或把 katago.exe 路径填进 kataGoPath），自带目录为 ${bundledDir}`
       : `随包自带的 katago.exe 是 Windows 版，当前平台（${io.platform}）需要自己下载对应平台的 KataGo，并把 engineDir 或 kataGoPath 指向它`
   }
+  if (refused !== '') hint = `${refused}；${hint}`
 
   return {
     available,
@@ -236,6 +320,7 @@ export function resolveEngine(cfg = {}, deps = {}) {
     platform: String(io.platform ?? ''),
     warning,
     hint,
+    refused,
   }
 }
 

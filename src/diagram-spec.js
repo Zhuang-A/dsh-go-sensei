@@ -65,6 +65,9 @@ export function buildDiagramSpec(input) {
   const lastMove = move > 0 && board.moves[move - 1].x >= 0 ? board.moves[move - 1] : null
 
   const territory = input?.territory ?? null
+  // 转义由 renderBoardSvg 负责：图注、页脚、棋手名、标注文字在 src/diagram.js 里都过
+  // 它内部的 esc()（`&`/`<`/`>`/引号），所以这里只截长度、不再自己转一次 —— 重复转义
+  // 会把 `&` 变成 `&amp;amp;` 显示成乱码。这条信任边界写在这里，免得日后有人在两边各转一次。
   const svg = renderBoardSvg({
     size,
     grid,

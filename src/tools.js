@@ -718,7 +718,19 @@ function goExportReport(ctx, cfg, cache, policy) {
           const base = displayPathOf(game)
           return base.replace(/\.sgf$/i, '') + '.review.md'
         })()
+      // outPath 是调用方给的写盘目标，只靠沙箱策略兜底不够：在 workspace-write 会话里，
+      // 一个 ".sgf" 目标就能把"源棋谱只读"这条承诺直接推翻（2026-09-30 DeepSec L3）。
+      // 所以先解析成绝对路径，再收窄成 **.md**，并显式拒绝覆盖棋谱（源谱与 -sensei 副本）。
       const target = await ctx.fs.resolve(outPath, resolveOptions(exec, outPath, sandboxPolicy))
+      const resolved = String(target.displayPath ?? '')
+      const norm = (p) => String(p ?? '').replace(/\\/g, '/').toLowerCase()
+      const reserved = [game?._meta?.sourcePath, game?._meta?.path].filter((p) => typeof p === 'string' && p !== '')
+      if (reserved.some((p) => norm(p) === norm(resolved))) {
+        throw new Error(`报告不能覆盖棋谱：${resolved}（源棋谱只读，请换一个 .md 路径）`)
+      }
+      if (!/\.md$/i.test(resolved)) {
+        throw new Error(`报告输出必须是 .md 文件：${resolved === '' ? outPath : resolved}`)
+      }
       const content = args.content !== undefined && String(args.content).trim() !== ''
         ? String(args.content)
         : buildReportSkeleton(game, cfg)
@@ -1127,6 +1139,23 @@ export function effectiveEngineConfig(cfg, args = {}) {
   return next
 }
 
+/**
+ * 本部署是否允许**模型**用工具参数临时改引擎路径（配置项 allowEnginePathOverride，默认关）。
+ *
+ * 为什么默认关（2026-09-30 安全复查）：这几个参数（engineDir / kataGoPath / kataGoConfig /
+ * kataGoModel）最终会走到 `ctx.subprocess.spawn`（可执行文件）与文件读取（配置/权重），
+ * 而它们的值是**调用方**给的 —— 一次被棋谱注释等内容带偏的调用，就能让宿主去执行一个
+ * 任意路径上的二进制。引擎是可执行的**宿主资产**，路径的决定权应当留在配置（由部署者/
+ * 用户持有），而不是工具入参。要恢复"临时换一次"的便利，就在配置里显式打开
+ * `allowEnginePathOverride: true` —— 那时由部署者自己承担这个决定。
+ *
+ * @param {object} cfg 插件配置
+ * @returns {boolean} true＝允许入参覆盖
+ */
+export function allowsEnginePathOverride(cfg) {
+  return cfg?.allowEnginePathOverride === true
+}
+
 function goEngineAnalyze(ctx, cfg, cache, policy) {
   return {
     name: 'go_engine_analyze',
@@ -1173,11 +1202,22 @@ function goEngineAnalyze(ctx, cfg, cache, policy) {
     async execute(args, exec) {
       // 单次调用覆盖 = 「临时换引擎/换权重」的口子：覆盖项经 effectiveEngineConfig
       // 合成后走同一套 resolveEngine 解析，优先级规则只维护一处。
-      const effective = effectiveEngineConfig(cfg, args)
+      //
+      // 但**默认不接受**入参覆盖（见 allowsEnginePathOverride）：引擎路径决定"宿主执行
+      // 哪个可执行文件"，这个决定权留给配置持有者。关着时静默忽略入参、只用配置解析，
+      // 并如实告诉调用方"覆盖被忽略了"，免得它以为换成功了。
+      const overrideRequested = ['engineDir', 'kataGoPath', 'kataGoConfig', 'kataGoModel']
+        .some((key) => typeof args?.[key] === 'string' && args[key].trim() !== '')
+      const overrideAllowed = allowsEnginePathOverride(cfg)
+      const effective = overrideAllowed ? effectiveEngineConfig(cfg, args) : cfg
       const engine = resolveEngine(effective)
       if (!engine.available) {
         throw new Error(engine.hint !== '' ? engine.hint : '没有可用的 KataGo 引擎')
       }
+      const overrideNote = overrideRequested && !overrideAllowed
+        ? '本次调用带的引擎路径覆盖已被忽略：本部署未开启 allowEnginePathOverride，'
+          + '引擎路径只能由插件配置决定（引擎是可执行资产，路径决定权留在配置侧）。'
+        : undefined
       const { runKataAnalyze } = await import('./engine.js')
       const game = await readGameFile(ctx, exec, args.path, policy(exec))
       if (game.info.size !== 19) throw new Error(`KataGo 补算目前仅支持 19 路（本局 ${game.info.size} 路）`)
@@ -1223,7 +1263,7 @@ function goEngineAnalyze(ctx, cfg, cache, policy) {
       return {
         ...value,
         analysisWritten: written,
-        note: value.note + (written.moves > 0
+        note: (overrideNote !== undefined ? `${overrideNote} ` : '') + value.note + (written.moves > 0
           ? ` 已把逐手胜率/目差与 AI 首选/变化图写回 ${written.path}（${written.moves} 手），下次打开无需重算；源棋谱保持原样。`
           : ''),
       }

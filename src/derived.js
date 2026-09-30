@@ -50,12 +50,16 @@ export function senseiPathFor(p) {
  *
  * @param {string} sgfPath 棋谱（工作文件）路径
  * @param {string} hash 内容指纹（调用方给的短十六进制串）
- * @returns {string} SVG 文件路径；参数缺失时返回空串
+ * @returns {string} SVG 文件路径；参数缺失或指纹形态不合法时返回空串
  */
 export function diagramPathFor(sgfPath, hash) {
   const text = String(sgfPath ?? '')
   const tag = String(hash ?? '')
-  if (text === '' || tag === '') return ''
+  // 指纹必须真的是"短十六进制串"（调用方用 sha1 现算）。为什么要卡死形态：它会被
+  // 拼进文件名，而 join() 会规范化 `..` 段 —— 不校验时 `x/../../../evil` 这种值会让
+  // 结果越出 `.go-sensei/`，变成"在预期目录之外创建/覆盖 .svg"（2026-09-30 DeepSec
+  // L3 报 Medium）。返回值就是写盘路径，所以这一层必须自己 fail-closed。
+  if (text === '' || !/^[0-9a-f]{8,64}$/.test(tag)) return ''
   const dir = dirname(text)
   const base = dir === '' || dir === '.' ? DIAGRAM_DIR : join(dir, DIAGRAM_DIR)
   return join(base, `diagram-${tag}.svg`)

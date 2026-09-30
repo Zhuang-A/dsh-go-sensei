@@ -49,6 +49,16 @@ export const Config = Schema.object({
   /** KataGo 补算每手搜索量。 */
   maxVisits: Schema.number().default(100),
   /**
+   * 是否允许**模型**用 `go_engine_analyze` 的入参临时改引擎路径（engineDir / kataGoPath /
+   * kataGoConfig / kataGoModel）。默认 **false**（2026-09-30 安全复查后收紧）。
+   *
+   * 为什么默认关：这几个值最终会走到 `ctx.subprocess.spawn`（执行哪个可执行文件）与
+   * 配置文件读取，而它们的来源是**工具入参** —— 一次被棋谱注释等内容带偏的调用就能让
+   * 宿主执行任意路径上的二进制。引擎路径的决定权属于部署者，所以默认只认配置；确实想要
+   * "临时换一次"的便利，就在这里显式打开，由配置持有者承担这个决定。
+   */
+  allowEnginePathOverride: Schema.boolean().default(false),
+  /**
    * 插件加载时把随件的「围棋详细讲解」技能装进 DSH 技能根（默认开）。
    * 关掉＝不碰技能目录，同时也就不会要求模型去加载那个技能（见 buildPersona 第 8 条）。
    */
@@ -67,6 +77,7 @@ export const DEFAULT_CONFIG = {
   kataGoConfig: '',
   kataGoModel: '',
   maxVisits: 100,
+  allowEnginePathOverride: false,
   autoInstallSkill: true,
 }
 
@@ -928,15 +939,19 @@ function registerPanelRoute(ctx, cfg, diagram) {
             const derivedInfo = await ctx.fs.stat(derivedTarget, undefined)
             if (derivedInfo?.type === 'file') target = derivedTarget
           }
-          const info = await ctx.fs.stat(target, undefined)
-          if (info?.type !== 'file') {
-            fail(404, `找不到棋谱：${requested}`)
-            return
-          }
           // 读取前的权威闸门：解析结果必须落在允许的根之内（symlink 跳转也在这里兜住）。
+          //
+          // **必须排在 stat 之前**：先 stat 再判包含，会让这条路由变成一个"存在性探针" ——
+          // 根之外**存在**的文件回"不在已知工作区内"，**不存在**的回"找不到棋谱"，两者可区分
+          // （2026-09-30 DeepSec L3 报 Medium）。先判包含，则两条路走同一句话，且不碰文件系统。
           const outsideRefusal = readRefusal(target, sessionId)
           if (outsideRefusal !== undefined) {
             fail(404, outsideRefusal)
+            return
+          }
+          const info = await ctx.fs.stat(target, undefined)
+          if (info?.type !== 'file') {
+            fail(404, `找不到棋谱：${requested}`)
             return
           }
           const bytes = await ctx.fs.readBytes(target, undefined, MAX_SGF_CHARS)

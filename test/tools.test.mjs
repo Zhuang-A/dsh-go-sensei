@@ -745,9 +745,20 @@ test('effectiveEngineConfig + resolveEngine: engineDir 覆盖配置里的 kataGo
   assert.equal(resolved.configPath, join(dir, 'analysis_example.cfg'))
   assert.equal(resolved.modelPath, join(dir, 'w.bin.gz'))
 
-  // 没有覆盖时仍走配置指定的引擎
+  // 没有覆盖时：配置里的 kataGoPath 指向一个**不存在**的文件 → 准入闸门拒掉。
+  // 这是刻意的 fail-closed：以前这种配置会被当成"有引擎"，直到真正 spawn 时才报错，
+  // 现在在解析阶段就给出一句能照做的理由（2026-09-30 加固，见 engine-resolve.js）。
   const untouched = resolveEngine(effectiveEngineConfig(cfg, {}))
-  assert.equal(untouched.source, 'config')
+  assert.equal(untouched.available, false)
+  assert.match(untouched.refused, /不是.*普通文件/)
+  assert.equal(untouched.source, 'none')
+
+  // 配置指向真实存在、名字合法的 katago.exe → 照常走 config
+  const realExe = join(dir, 'katago.exe')
+  const fromConfig = resolveEngine(effectiveEngineConfig({ ...cfg, kataGoPath: realExe }, {}))
+  assert.equal(fromConfig.source, 'config')
+  assert.equal(fromConfig.kataGoPath, realExe)
+  assert.equal(fromConfig.refused, '')
 
   rmSync(dir, { recursive: true, force: true })
 })
@@ -805,6 +816,76 @@ test('go_engine_analyze: 补算结果写回棋谱，AI 首选与变化图进文�
     assert.equal(first.candidates[0].prior, 3000)
   } finally {
     rmSync(engineDir, { recursive: true, force: true })
+  }
+})
+
+test('引擎路径覆盖默认关：入参给的 engineDir / kataGoPath 一律忽略，且如实说明', async () => {
+  // 2026-09-30 安全复查：engineDir / kataGoPath / kataGoConfig / kataGoModel 是模型可传的
+  // 入参，而它们决定"宿主执行哪个可执行文件"。默认只认配置（配置由部署者持有），
+  // 想恢复"临时换一次"的便利得显式打开 allowEnginePathOverride。
+  const realDir = join(here, 'tmp-engine-gate-real')
+  const bogusDir = join(here, 'tmp-engine-gate-bogus')
+  for (const dir of [realDir, bogusDir]) {
+    rmSync(dir, { recursive: true, force: true })
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'katago.exe'), 'stub')
+    writeFileSync(join(dir, 'analysis_example.cfg'), 'reportAnalysisWinratesAs = BLACK\n')
+    writeFileSync(join(dir, 'kata1-b18c384nbt-s.bin.gz'), Buffer.alloc(2048))
+  }
+  const target = join(WORKSPACE, 'engine-gate.sgf')
+  writeFileSync(target, '(;GM[1]FF[4]SZ[19]KM[7.5]PB[甲]PW[乙];B[pd];W[dp])', 'utf8')
+  const stdout = '{"id":"go-sensei","turnNumber":1,"moveInfos":[{"move":"D16","order":0,"visits":100,"winrate":0.55,"scoreMean":1.5,"prior":0.3,"pv":["D16"]}]}\n'
+  const spawned = []
+  const ctx = makeCtx(WORKSPACE, {
+    subprocess: {
+      spawn: (spec) => {
+        spawned.push(spec)
+        return {
+          pid: 1,
+          done: Promise.resolve({ exitCode: 0, signal: null }),
+          collected: {
+            stdout: { readFrom: () => ({ text: stdout, nextOffset: 0, lossy: false }) },
+            stderr: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) },
+          },
+        }
+      },
+    },
+  })
+  apply(ctx, Config({ engineDir: realDir, kataGoPath: '', maxVisits: 1 }))
+
+  try {
+    // 关着（默认）：入参的 engineDir 被忽略 → 仍然跑配置里的引擎，并如实说明
+    const value = await callJson(ctx.registered.get('go_engine_analyze'), WORKSPACE,
+      { path: target, from: 1, to: 1, engineDir: bogusDir })
+    assert.equal(spawned.length, 1)
+    assert.ok(spawned[0].argv[0].startsWith(realDir), `应使用配置里的引擎：${spawned[0].argv[0]}`)
+    assert.match(String(value.note), /已被忽略/)
+    assert.match(String(value.note), /allowEnginePathOverride/)
+
+    // 打开：入参覆盖生效
+    const onCtx = makeCtx(WORKSPACE, {
+      subprocess: { spawn: (spec) => {
+        spawned.push(spec)
+        return {
+          pid: 1,
+          done: Promise.resolve({ exitCode: 0, signal: null }),
+          collected: {
+            stdout: { readFrom: () => ({ text: stdout, nextOffset: 0, lossy: false }) },
+            stderr: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) },
+          },
+        }
+      } },
+    })
+    apply(onCtx, Config({ engineDir: realDir, kataGoPath: '', maxVisits: 1, allowEnginePathOverride: true }))
+    const onValue = await callJson(onCtx.registered.get('go_engine_analyze'), WORKSPACE,
+      { path: target, from: 1, to: 1, engineDir: bogusDir })
+    assert.ok(spawned[1].argv[0].startsWith(bogusDir), `覆盖打开后应使用入参引擎：${spawned[1].argv[0]}`)
+    assert.equal(String(onValue.note).includes('已被忽略'), false)
+  } finally {
+    rmSync(realDir, { recursive: true, force: true })
+    rmSync(bogusDir, { recursive: true, force: true })
+    rmSync(target, { force: true })
+    rmSync(join(WORKSPACE, 'engine-gate-sensei.sgf'), { force: true })
   }
 })
 
