@@ -66,6 +66,13 @@ jobs:
 
           if run_publish > /tmp/release.log 2>&1; then
             cat /tmp/release.log
+            # 发布成功：顺手清掉本工作流以前发在同一个提交上的失败诊断评论（自诊断只是
+            # 临时通道，不该在公开仓库里长期留着）
+            gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/comments" \
+              --jq '.[] | select(.user.login == "github-actions[bot]") | .id' \
+              | while read -r id; do
+                  gh api -X DELETE "repos/$GITHUB_REPOSITORY/comments/$id" || true
+                done
             exit 0
           fi
 
