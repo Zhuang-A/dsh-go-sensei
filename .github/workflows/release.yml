@@ -8,9 +8,11 @@
 # 为什么不读注记 tag 的消息：`actions/checkout` 之后 `refs/tags/<tag>` 有时是轻量引用，
 # 那时 `git tag -l --format='%(contents)'` 会静默回落成**提交信息**，Release 正文就变成
 # commit 标题（v0.2.13 首次尝试实测踩到）。文件是确定性的、本地就能 `test -f` 验。
-# 注记 tag 的消息仍然照旧写一份同样的内容（人类在 `git show vX.Y.Z` 时看得到）。
+# 注记 tag 的消息仍然照旧写一份同样的内容（人类 `git show vX.Y.Z` 时看得到）。
 #
 # 幂等：重复推同一个 tag 会刷新已有 Release 的正文与 Latest 标记，便于修错。
+# 自诊断：失败时把日志尾部发成**提交评论**（提交评论是公开可读的，而 Actions 日志需要 token ——
+# 本机没有 token，所以这是唯一能把失败原因带出来的通道）。
 name: release
 
 on:
@@ -26,29 +28,50 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Publish the release from docs/releases/<tag>.md
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          tag="$GITHUB_REF_NAME"
-          notes="docs/releases/${tag}.md"
-          if [ ! -s "$notes" ]; then
-            echo "缺少发布说明文件 $notes —— 请在打 tag 前把它和改动一起提交（本仓库的发版约定）" >&2
-            exit 1
+          set -uo pipefail
+
+          run_publish() {
+            set -euo pipefail
+            local tag="$GITHUB_REF_NAME"
+            local notes="docs/releases/${tag}.md"
+            test -s "$notes" || { echo "缺少发布说明文件 $notes —— 打 tag 前请把它和改动一起提交"; return 1; }
+            if ! head -n 1 "$notes" | grep -q "$tag"; then
+              echo "$notes 的首行未提到 $tag，疑似写错了文件："
+              head -n 1 "$notes"
+              return 1
+            fi
+            if gh release view "$tag" >/dev/null 2>&1; then
+              echo "已存在同名 Release，刷新正文与 Latest 标记"
+              gh release edit "$tag" --title "$tag" --notes-file "$notes" --latest
+            else
+              gh release create "$tag" \
+                --title "$tag" \
+                --notes-file "$notes" \
+                --verify-tag \
+                --latest
+            fi
+          }
+
+          if run_publish > /tmp/release.log 2>&1; then
+            cat /tmp/release.log
+            exit 0
           fi
-          if ! head -n 1 "$notes" | grep -q "$tag"; then
-            echo "$notes 的首行未提到 $tag，疑似写错了文件：" >&2
-            head -n 1 "$notes" >&2
-            exit 1
-          fi
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release edit "$tag" --title "$tag" --notes-file "$notes" --latest
-          else
-            gh release create "$tag" \
-              --title "$tag" \
-              --notes-file "$notes" \
-              --verify-tag \
-              --latest
-          fi
+
+          echo "----- 发布失败，日志如下（同时会发成提交评论） -----"
+          cat /tmp/release.log
+          {
+            echo "release workflow 失败：$GITHUB_REF_NAME（run $GITHUB_RUN_ID）"
+            echo ""
+            echo '```'
+            tail -c 1500 /tmp/release.log
+            echo '```'
+          } > /tmp/diag.md
+          gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/comments" -F body=@/tmp/diag.md || true
+          exit 1
