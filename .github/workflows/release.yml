@@ -2,11 +2,15 @@
 #
 # 为什么要有它：本机没有 GitHub API token，也没有可用的浏览器自动化通道 —— 历史上每次发版
 # 都要人工开 https://github.com/Zhuang-A/dsh-go-sensei/releases/new 粘一遍发布说明再点
-# Publish。把这一步交给 Actions 之后，`git push --follow-tags` 就是完整的发版动作；
-# 重复推同一个 tag 会把已有 Release 的正文刷新一遍（幂等，便于修错）。
+# Publish。把这一步交给 Actions 之后，`git push --follow-tags` 就是完整的发版动作。
 #
-# 发布说明的来源是**注记 tag 的消息**（`git tag -a vX.Y.Z -F notes.md` 写入的那份），
-# 与历史版本的正文格式一致；标题＝tag 名，并且总是标为 Latest、非 Draft。
+# 发布说明的**唯一来源是仓库里的文件** `docs/releases/<tag>.md`（跟 tag 一起提交）。
+# 为什么不读注记 tag 的消息：`actions/checkout` 之后 `refs/tags/<tag>` 有时是轻量引用，
+# 那时 `git tag -l --format='%(contents)'` 会静默回落成**提交信息**，Release 正文就变成
+# commit 标题（v0.2.13 首次尝试实测踩到）。文件是确定性的、本地就能 `test -f` 验。
+# 注记 tag 的消息仍然照旧写一份同样的内容（人类在 `git show vX.Y.Z` 时看得到）。
+#
+# 幂等：重复推同一个 tag 会刷新已有 Release 的正文与 Latest 标记，便于修错。
 name: release
 
 on:
@@ -22,45 +26,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Create or refresh the release from the annotated tag
+      - name: Publish the release from docs/releases/<tag>.md
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
-
-          # 显式按对象抓一次 tag：checkout 之后 refs/tags/<tag> 有可能是**轻量**引用，
-          # 那时 `git tag -l --format='%(contents)'` 会静默回落成提交信息，Release 正文就
-          # 变成 commit 标题（v0.2.13 首次运行实测踩到）。宁可失败，也不发错误正文。
-          git fetch --force --no-recurse-submodules origin "+refs/tags/$tag:refs/tags/$tag"
-          if [ "$(git cat-file -t "refs/tags/$tag")" != "tag" ]; then
-            echo "refs/tags/$tag 不是注记 tag 对象；拒绝在没有发布说明的情况下发布" >&2
+          notes="docs/releases/${tag}.md"
+          if [ ! -s "$notes" ]; then
+            echo "缺少发布说明文件 $notes —— 请在打 tag 前把它和改动一起提交（本仓库的发版约定）" >&2
             exit 1
           fi
-
-          # 注记 tag 的正文 = 剥掉 object/type/tag/tagger 四行头之后的内容
-          git cat-file -p "refs/tags/$tag" | sed '1,/^$/d' > notes.md
-          if [ ! -s notes.md ]; then
-            echo "注记 tag 的消息为空；拒绝在没有发布说明的情况下发布" >&2
+          if ! head -n 1 "$notes" | grep -q "$tag"; then
+            echo "$notes 的首行未提到 $tag，疑似写错了文件：" >&2
+            head -n 1 "$notes" >&2
             exit 1
           fi
-          # 正文首行必须提到 tag 名（历史版本都是「vX.Y.Z：…」这种写法）
-          if ! head -n 1 notes.md | grep -q "$tag"; then
-            echo "发布说明首行未提到 $tag，疑似取错了内容：" >&2
-            head -n 1 notes.md >&2
-            exit 1
-          fi
-
           if gh release view "$tag" >/dev/null 2>&1; then
-            # 幂等：重复推同一个 tag 时把正文刷新（修错用）
-            gh release edit "$tag" --title "$tag" --notes-file notes.md --latest
+            gh release edit "$tag" --title "$tag" --notes-file "$notes" --latest
           else
             gh release create "$tag" \
               --title "$tag" \
-              --notes-file notes.md \
+              --notes-file "$notes" \
               --verify-tag \
               --latest
           fi
