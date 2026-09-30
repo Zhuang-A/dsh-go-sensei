@@ -763,14 +763,24 @@ node scripts/demo.mjs <sgf路径> [起始手] [结束手]
 
 **发一版的完整步骤**（版本号按 patch 递增：0.2.0 → 0.2.1 → 0.2.2 → 0.2.3 都是这样，一批 feat 也走 patch）：
 
-1. 改 `package.json` 的 `version`，单独提交 `chore: 版本 X.Y.Z（本版一句话）`；
-2. 打**注记 tag**（`git tag -a`，不是轻量 tag），tag 消息就是发布说明的底稿：`git tag -a vX.Y.Z -m "vX.Y.Z：<中文，列本版用户可见的变化>"`；
-3. `git push --follow-tags`（提交与 tag 一起推）；
-4. 在 GitHub 上给这个 tag 建 **Release**（自 v0.2.2 起的固定动作）：标题与 tag 同名，正文＝tag 消息展开成要点 + `**Full Changelog**: https://github.com/Zhuang-A/dsh-go-sensei/compare/<上一 tag>...vX.Y.Z`，默认即为 "Latest release"。新建页可用查询参数直接预填 tag，省掉选 tag 的动作：
-   `https://github.com/Zhuang-A/dsh-go-sensei/releases/new?tag=vX.Y.Z` —— 打开后填标题与正文，点 **Publish release** 即可；
-5. 发布验收：把远端**重新克隆**到临时目录 → `npm install` → 跑全量测试（`node --test --test-isolation=none` 展开 `test/*.test.mjs`），确认"发布出去的那份代码"全绿，再删掉临时克隆。
+1. 把本版发布说明写成 **`docs/releases/vX.Y.Z.md`**（首行写 `vX.Y.Z：<一句话>`，末尾附
+   `**Full Changelog**: https://github.com/Zhuang-A/dsh-go-sensei/compare/<上一 tag>...vX.Y.Z`）；
+2. 改 `package.json` 的 `version`，提交 `chore: 版本 X.Y.Z（本版一句话）`（发布说明文件跟这一提交一起进）；
+3. 打**注记 tag**（`git tag -a`，不是轻量 tag），消息写同一份说明的要点：
+   `git tag -a vX.Y.Z -F docs/releases/vX.Y.Z.md`；
+4. `git push --follow-tags`（提交与 tag 一起推）；
+5. **Release 由 GitHub Actions 自动建**（`.github/workflows/release.yml`）：推 tag 触发，正文取
+   `docs/releases/vX.Y.Z.md`，标题＝tag 名，自动标 Latest、非 Draft；重复推同一个 tag 会把已有
+   Release 的正文刷新一遍（幂等，用于修错）。本地机器没有 GitHub token、也无可用的浏览器自动化
+   通道，所以这一步刻意交给 Actions，`git push --follow-tags` 即完成发版；失败时工作流会把日志
+   尾部发成**提交评论**（公开可读），成功后自动清掉那条评论；
+6. 发布验收：把远端**重新克隆**到临时目录 → `npm install` → 跑全量测试
+   （`node --test --test-isolation=none` 展开 `test/*.test.mjs`），确认"发布出去的那份代码"全绿，再删掉临时克隆。
 
 > 仓库的 tag 全是注记 tag，tag 页本身就能看到发布说明；Release 页与 tag 一一对应。
+> ⚠️ **别在 Release 建好之前删除/重打 tag**：GitHub 会把对应 Release 转成 **draft**，而
+> `--latest` 不允许标在 draft 上（实测 422 `Latest release cannot be draft or prerelease`）。
+> 工作流已经能处理这种情况（先 `--draft=false` 再 `--latest`），但正常流程里没有理由重打 tag。
 
 ### 改工具 schema 前必读
 
