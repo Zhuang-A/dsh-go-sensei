@@ -1,0 +1,43 @@
+# 推 tag 即建 GitHub Release（本仓库的发版约定：只推 tag 不算完成）
+#
+# 为什么要有它：本机没有 GitHub API token，也没有可用的浏览器自动化通道 —— 历史上每次发版
+# 都要人工开 https://github.com/Zhuang-A/dsh-go-sensei/releases/new 粘一遍发布说明再点
+# Publish。把这一步交给 Actions 之后，`git push --follow-tags` 就是完整的发版动作。
+#
+# 发布说明的来源是**注记 tag 的消息**（`git tag -a vX.Y.Z -F notes.md` 写入的那份），
+# 与历史版本的正文格式一致；标题＝tag 名，并且总是标为 Latest、非 Draft。
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create the release from the annotated tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          # 注记 tag 的消息＝发布说明底稿（历史版本就是这么写的）
+          git tag -l --format='%(contents)' "$tag" > notes.md
+          if [ ! -s notes.md ]; then
+            echo "annotated tag message is empty; refusing to publish without notes" >&2
+            exit 1
+          fi
+          gh release create "$tag" \
+            --title "$tag" \
+            --notes-file notes.md \
+            --verify-tag \
+            --latest
