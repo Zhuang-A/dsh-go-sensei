@@ -48,8 +48,13 @@ jobs:
               return 1
             fi
             if gh release view "$tag" >/dev/null 2>&1; then
-              echo "已存在同名 Release，刷新正文与 Latest 标记"
-              gh release edit "$tag" --title "$tag" --notes-file "$notes" --latest
+              # 已存在同名 Release：先补正文并**脱离 draft**，再单独标 Latest。
+              # 为什么必须分两步：GitHub 在 tag 被删掉时会把对应 Release 转成 draft，
+              # 而 `--latest` 不允许标在 draft/prerelease 上（实测 422：
+              # "Latest release cannot be draft or prerelease"）。
+              echo "已存在同名 Release，刷新正文并确保不是 draft"
+              gh release edit "$tag" --title "$tag" --notes-file "$notes" --draft=false
+              gh release edit "$tag" --latest
             else
               gh release create "$tag" \
                 --title "$tag" \
