@@ -75,6 +75,9 @@ test('清单: 兼容表里实测过的 DSH 版本都标了 compatible', () => {
   // 实测基线（2026-09-30，桌面端内核 0.2.0-rc.2）：tools 七件套注册成功、四处客户端插槽
   // 全部 active、面板路由闸门生效、补算 30 手并写回副本、294 条测试通过 —— 记为 compatible。
   assert.equal(table['0.2.0-rc.2'], 'compatible', '实测过的 0.2.0-rc.2 必须标 compatible')
+  // 实测基线（2026-10-17，桌面端内核 0.2.1-rc.2）：go_* 七件套工具注册成功、Config schema
+  // 13 个字段带默认值完整投影、四处客户端插槽全部 active、兼容门未被拦（engines.dsh 开区间）—— 记为 compatible。
+  assert.equal(table['0.2.1-rc.2'], 'compatible', '实测过的 0.2.1-rc.2 必须标 compatible')
   // engines.dsh 的下界必须在表里（不然没人知道这版从哪来）
   const floor = /^>=(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/.exec(pkg.dsh.engines.dsh)?.[1]
   assert.ok(table[floor] !== undefined, `engines.dsh 下界 ${floor} 应出现在兼容表里`)

@@ -117,14 +117,15 @@ dsh plugin --profile web remove dsh-go-sensei        # 卸载
 
 | DSH 内核 | 状态 | 依据 |
 |---|---|---|
+| 0.2.1-rc.2 | **compatible** | 2026-10-17 在官方桌面端（内核 0.2.1-rc.2）实测：7 个工具注册成功、配置 Schema 13 个字段带默认值完整投影、客户端 4 处插槽全部 active、兼容门判定通过（`engines.dsh` 开区间 + `includePrerelease`）、306 条单测通过 |
 | 0.2.0-rc.2 | **compatible** | 2026-09-30 在官方桌面端（Electron 外壳，`dsh-app://app` 页面）实测：7 个工具注册成功、客户端 4 处插槽（输入框下方 / 左侧栏图标 / 主区域 / 右侧栏文档预览）全部 active、面板路由复用 GUI 鉴权闸门（未带凭据 401）、补算 30 手并写回 `-sensei` 副本、294 条单测通过 |
 | 0.2.0-rc.1 | unknown | 没在真机上跑过 |
 | 0.1.7-rc.1 / rc.2 | unknown | 没在真机上跑过 |
 | 0.1.5-rc.1 / rc.2 | compatible | 长期使用的基线（web profile） |
 
-两条在 0.2.0 上必须知道的事实：
+两条在 0.2.x 上必须知道的事实：
 
-- **闸门只认 `peerDependencies`**：0.2.0 的插件管理器/加载器用 `peerDependencies` 里对 `@deepseek-ai/dsh*` 的版本范围判兼容（本插件不声明 peer，因此不受这一步拦截）；`dsh.engines.dsh` 与 `dsh.compatibility.dshReleases` 是**声明性**字段，不会被强制校验。
+- **闸门的判定顺序**：插件写了 `engines.dsh` 就**只按它判**，`peerDependencies` 会被忽略；没写 `engines.dsh` 才逐个校验 `@deepseek-ai/dsh*` peer。semver 判定固定带 `{ includePrerelease: true }`，所以 `>=0.1.5-rc.1` 能放行 `0.2.1-rc.2`（换成默认选项的话，预发布版会被判不满足——这是最容易踩的坑）。`dsh.compatibility.dshReleases` 只是对外声明，内核不读。
 - **桌面端与浏览器端的配图形态不同**：桌面端页面跑在 `dsh-app://app` 上，宿主 cookie 由外壳进程持有、不下发给页面，所以指向 `http://127.0.0.1:<端口>` 的绝对图片地址在那边会 401。插件会把配图 SVG 落盘（棋谱同目录的 `.go-sensei/`）并用**本机路径**出图，由界面改写成带鉴权的 `/api/file`；浏览器界面（web profile）仍用绝对直链。两种形态都由 `go_draw_diagram` 返回，**原样粘贴即可**，不要自己改。
 
 ## 配置项
